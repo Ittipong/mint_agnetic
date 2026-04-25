@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "financial-agent"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.30.0",
+    "asyncpg>=0.29.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "quantalogic-pythonbox>=0.5.0",
+    "numpy-financial>=1.0.0",
+    "pydantic-settings>=2.0.0",
+    "jinja2>=3.1.0",
+    "loguru>=0.7.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+financial-agent = "financial_agent.agent:cli_main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = ["e2e: end-to-end tests requiring real DB and API key"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]

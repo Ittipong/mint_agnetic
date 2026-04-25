@@ -1,0 +1,30 @@
+sequenceDiagram
+    participant User as "ผู้ใช้"
+    participant CLI as "CLI / Main"
+    participant Loop as "CodeActLoop"
+    participant Reasoner as "Reasoner"
+    participant LLM as "LLM (OpenRouter)"
+    participant Exec as "Executor (Sandbox)"
+    participant DB as "PostgreSQL DB"
+
+    User->>CLI: ส่งคำสั่งภาษาธรรมชาติ + User ID
+    CLI->>Loop: เริ่มทำงาน (Task, Namespace)
+    
+    loop จนกว่าจะสำเร็จ หรือครบ Max Steps
+        Loop->>Reasoner: ขอให้สร้างโค้ด (Task, History)
+        Reasoner->>LLM: ส่ง Prompt (System + Action)
+        LLM-->>Reasoner: ตอบกลับพร้อมโค้ด Python
+        Reasoner-->>Loop: โค้ด Python
+        
+        Loop->>Exec: รันโค้ด
+        Exec->>DB: คิวรีข้อมูล (Query)
+        DB-->>Exec: ผลลัพธ์ข้อมูล
+        Exec-->>Loop: ผลการรันโค้ด (Result / Error)
+        
+        opt ถ้าผลลัพธ์สำเร็จ (Completed)
+            Loop->>Loop: จบการทำงานในลูป
+        end
+    end
+    
+    Loop-->>CLI: ผลลัพธ์สุดท้าย (LoopResult)
+    CLI-->>User: คำตอบพร้อมข้อมูลสถิติ/รายละเอียด

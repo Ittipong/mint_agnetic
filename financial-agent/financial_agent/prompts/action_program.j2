@@ -1,0 +1,32 @@
+Task: {{ task }}
+
+{% if history %}
+## Previous Steps
+{% for h in history %}
+### Step {{ h.step }}
+Code:
+```python
+{{ h.code }}
+```
+Result: status={{ h.result.status }}{% if h.result.error %}, error={{ h.result.error }}{% endif %}{% if h.result.result %}, result={{ h.result.result }}{% endif %}
+
+{% endfor %}
+{% endif %}
+
+## Step {{ step }}
+
+{% if step == 1 %}
+Write `async def main()` to accomplish the task above.
+{% else %}
+{% set last = history[-1].result %}
+{% if last.status == "error" %}
+The previous step failed with: {{ last.error }}
+Fix the error and write a corrected `async def main()`.
+{% elif last.status == "inprogress" %}
+Previous step signalled inprogress. Continue the computation — read `context_vars` for state from prior steps and write the next `async def main()`.
+{% else %}
+Continue from previous results. Update `context_vars` if needed and write the next `async def main()`.
+{% endif %}
+{% endif %}
+
+Return only the Python code block. No explanation, no markdown outside the code.
