@@ -1,11 +1,35 @@
 import json
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from loguru import logger
 from financial_agent.reasoner import Reasoner
 from financial_agent.executor import Executor, ExecutionResult
+
+# Optional LangSmith tracing — graceful no-op when langsmith is not installed
+try:
+    from langsmith import trace as _ls_trace
+    _HAS_LANGSMITH = True
+except ImportError:
+    _HAS_LANGSMITH = False
+
+
+@contextmanager
+def _step_trace(name: str, inputs: dict):
+    """Create a LangSmith span if available, otherwise no-op."""
+    if _HAS_LANGSMITH:
+        with _ls_trace(name=name, run_type="tool", inputs=inputs) as run:
+            yield run
+    else:
+        yield None
+
+
+def _end_trace(run: Any, outputs: dict) -> None:
+    """Finalise a LangSmith span with outputs (no-op when tracing is off)."""
+    if run is not None:
+        run.end(outputs=outputs)
 
 
 @dataclass
@@ -154,8 +178,28 @@ class CodeActLoop:
             logger.info("CodeAct step {}/{}", step, self._max_steps)
 
             t0 = time.perf_counter()
-            reasoner_result = await self._reasoner.generate_code(task, history, step, complex)
-            exec_result = await self._executor.run(reasoner_result.code, namespace)
+
+            # ── Code generation span ─────────────────────────────────────────
+            with _step_trace(
+                name="codeact_generate_code",
+                inputs={"step": step, "task": task},
+            ) as gen_run:
+                reasoner_result = await self._reasoner.generate_code(task, history, step, complex)
+                _end_trace(gen_run, outputs={"code": reasoner_result.code})
+
+            # ── Code execution span ──────────────────────────────────────────
+            with _step_trace(
+                name="codeact_execute_code",
+                inputs={"step": step, "code": reasoner_result.code},
+            ) as exec_run:
+                exec_result = await self._executor.run(reasoner_result.code, namespace)
+                _end_trace(exec_run, outputs={
+                    "status": exec_result.status,
+                    "result": str(exec_result.result) if exec_result.result is not None else None,
+                    "error": exec_result.error,
+                    "stdout": exec_result.stdout or "",
+                })
+
             elapsed_ms = (time.perf_counter() - t0) * 1000
 
             step_result = StepResult(

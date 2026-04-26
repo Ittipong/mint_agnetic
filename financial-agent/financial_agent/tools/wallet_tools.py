@@ -2,7 +2,6 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from loguru import logger
 from financial_agent.db import queries
-from financial_agent.finance.precision import money, to_decimal
 
 
 class WalletTools:
@@ -48,15 +47,15 @@ class WalletTools:
             bal = await self.get_balance(g["sync_id"])
             goal_balances.append(bal)
 
-        debt_balances = [to_decimal(o["outstanding_principal"]) for o in obligations]
+        debt_balances = [Decimal(str(o["outstanding_principal"])) for o in obligations]
 
-        total_assets = money(sum(wallet_balances + goal_balances, Decimal("0")))
-        total_debts = money(sum(debt_balances, Decimal("0")))
+        total_assets = sum(wallet_balances + goal_balances, Decimal("0"))
+        total_debts = sum(debt_balances, Decimal("0"))
 
         return {
             "total_assets": total_assets,
             "total_debts": total_debts,
-            "net_worth": money(total_assets - total_debts),
+            "net_worth": total_assets - total_debts,
             "wallets": [
                 {"name": w["name"], "balance": bal}
                 for w, bal in zip(wallets, wallet_balances)

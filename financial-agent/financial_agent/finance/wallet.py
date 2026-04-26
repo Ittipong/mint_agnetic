@@ -1,5 +1,8 @@
 from decimal import Decimal
-from .precision import money
+
+
+def _money(v) -> Decimal:
+    return Decimal(str(v)).quantize(Decimal("0.01"))
 
 
 def running_balance(initial_balance: Decimal, transactions: list[dict]) -> Decimal:
@@ -8,10 +11,10 @@ def running_balance(initial_balance: Decimal, transactions: list[dict]) -> Decim
         amount = Decimal(str(txn["amount"]))
         effect = int(txn.get("effect_on_wallet", 0))
         total += amount * effect
-    return money(total)
+    return _money(total)
 
 
 def net_worth(wallet_balances: list[Decimal], debt_balances: list[Decimal]) -> Decimal:
     assets = sum((Decimal(str(b)) for b in wallet_balances), Decimal("0"))
     debts = sum((Decimal(str(b)) for b in debt_balances), Decimal("0"))
-    return money(assets - debts)
+    return _money(assets - debts)

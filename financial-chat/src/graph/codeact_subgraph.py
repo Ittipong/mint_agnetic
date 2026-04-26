@@ -1,0 +1,113 @@
+"""Dedicated CodeAct subgraph — wraps FinancialCodeActAgent as a LangGraph node.
+
+Studio sees this as a distinct 'codeact' node (not a hidden tool execution).
+ReAct routes here when it decides to analyze financial data.
+
+Per-step LangSmith tracing (code generation + execution) happens inside
+financial_agent/loop.py so each step is visible as a child span in real time.
+"""
+
+import sys
+from pathlib import Path
+from typing_extensions import TypedDict
+
+from langchain_core.messages import ToolMessage
+from langgraph.graph import StateGraph, START, END
+
+# Resolve financial-agent package path
+_FA_PATH = Path(__file__).parent.parent.parent.parent.parent / "financial-agent"
+if str(_FA_PATH) not in sys.path:
+    sys.path.insert(0, str(_FA_PATH))
+
+from financial_agent.agent import FinancialCodeActAgent  # noqa: E402
+from financial_agent.config import Settings as FinancialSettings  # noqa: E402
+from src.config import settings as _chat_settings  # noqa: E402
+from src.graph.state import AgentState  # noqa: E402
+
+# Tool name that triggers routing to this subgraph
+CODEACT_TOOL_NAME = "analyze_user_finances"
+
+
+# ── CodeAct subgraph state ───────────────────────────────────────────────────
+
+class CodeActSubState(TypedDict):
+    """Internal state for the CodeAct subgraph — isolated from parent AgentState."""
+
+    task: str
+    user_id: str
+    result: str  # plain-text result written by _codeact_run, read by the bridge
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _make_financial_settings() -> FinancialSettings:
+    """Build FinancialSettings from the chat agent config."""
+    db_url = _chat_settings.backend_database_url
+    if not db_url.startswith("postgresql+asyncpg://"):
+        db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return FinancialSettings(
+        openrouter_api_key=_chat_settings.openrouter_api_key,
+        database_url=db_url,
+        openrouter_base_url=_chat_settings.base_url,
+        model=_chat_settings.model,
+        complex_model=_chat_settings.model,
+    )
+
+
+# ── Subgraph node ────────────────────────────────────────────────────────────
+
+async def _codeact_run(state: CodeActSubState) -> dict:
+    """Run the full CodeAct agent loop and return result as plain text.
+
+    Real-time per-step tracing (code + execution) is handled by
+    financial_agent/loop.py using langsmith.trace context managers.
+    """
+    fin_settings = _make_financial_settings()
+    async with FinancialCodeActAgent(settings=fin_settings) as agent:
+        tool_result = await agent.solve_as_tool(state["task"], user_id=state["user_id"])
+    return {"result": tool_result.to_tool_content()}
+
+
+# ── Compiled subgraph ────────────────────────────────────────────────────────
+
+_codeact_builder = StateGraph(CodeActSubState)
+_codeact_builder.add_node("run", _codeact_run)
+_codeact_builder.add_edge(START, "run")
+_codeact_builder.add_edge("run", END)
+
+# This compiled subgraph is what Studio shows as a drill-down node
+codeact_subgraph = _codeact_builder.compile()
+
+
+# ── Bridge: AgentState → subgraph → ToolMessage ──────────────────────────────
+
+async def codeact_node(state: AgentState) -> dict:
+    """Bridge node in the parent graph.
+
+    Extracts the tool call from ReAct's last message, invokes the CodeAct subgraph,
+    and returns a ToolMessage so ReAct can continue its reasoning loop.
+    """
+    last_msg = state["messages"][-1]
+
+    # Extract the analyze_user_finances tool call placed by ReAct
+    tool_call = next(
+        tc for tc in last_msg.tool_calls
+        if tc["name"] == CODEACT_TOOL_NAME
+    )
+
+    sub_result = await codeact_subgraph.ainvoke({
+        "task": tool_call["args"]["task"],
+        "user_id": state.get("user_id", ""),
+        "result": "",
+    })
+
+    # Wrap result as ToolMessage — ReAct sees this as the tool's response
+    return {
+        "messages": [
+            ToolMessage(
+                content=sub_result["result"],
+                tool_call_id=tool_call["id"],
+                name=CODEACT_TOOL_NAME,
+            )
+        ]
+    }

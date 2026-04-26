@@ -3,7 +3,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy import text
 from financial_agent.db import queries
 from financial_agent.finance import credit_card as cc
-from financial_agent.finance.precision import money, to_decimal
 
 
 class CreditCardTools:
@@ -37,7 +36,7 @@ class CreditCardTools:
             row = result.mappings().first()
             if not row:
                 return Decimal("0")
-            return money(to_decimal(row["initial_used"]) + to_decimal(row["txn_total"]))
+            return Decimal(str(row["initial_used"])) + Decimal(str(row["txn_total"]))
 
     async def get_statement(self, card_sync_id: str) -> dict:
         cards = await self.get_cards()
@@ -49,7 +48,7 @@ class CreditCardTools:
         limit = card["credit_limit"]
         util = cc.utilization(used, limit)
         min_pay = cc.minimum_payment(used)
-        available = money(to_decimal(limit) - used)
+        available = Decimal(str(limit)) - used
 
         return {
             "name": card["name"],

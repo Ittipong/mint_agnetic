@@ -1,9 +1,8 @@
-from decimal import Decimal
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy import text
 from financial_agent.finance import forecast as fc
-from financial_agent.finance.precision import money, to_decimal
 
 
 class ForecastTools:
@@ -28,7 +27,7 @@ class ForecastTools:
             """)
             result = await session.execute(sql, {"user_id": self._user_id, "since": since})
             rows = result.mappings().all()
-        return [to_decimal(row["total"]) for row in rows]
+        return [D(str(row["total"])) for row in rows]
 
     async def _monthly_income_totals(self, months_back: int = 6) -> list[Decimal]:
         since = datetime.now(timezone.utc) - timedelta(days=months_back * 30)
@@ -47,7 +46,7 @@ class ForecastTools:
             """)
             result = await session.execute(sql, {"user_id": self._user_id, "since": since})
             rows = result.mappings().all()
-        return [to_decimal(row["total"]) for row in rows]
+        return [D(str(row["total"])) for row in rows]
 
     async def predict_spending(self, months_ahead: int = 3) -> list[dict]:
         history = await self._monthly_totals(months_back=6)
@@ -61,12 +60,12 @@ class ForecastTools:
         income_history = await self._monthly_income_totals(months_back=6)
 
         avg_income = (
-            money(sum(income_history, Decimal("0")) / Decimal(str(len(income_history))))
-            if income_history else Decimal("0")
+            sum(income_history, D("0")) / D(str(len(income_history)))
+            if income_history else D("0")
         )
         avg_expense = (
-            money(sum(expense_history, Decimal("0")) / Decimal(str(len(expense_history))))
-            if expense_history else Decimal("0")
+            sum(expense_history, D("0")) / D(str(len(expense_history)))
+            if expense_history else D("0")
         )
 
         return fc.cashflow_projection(avg_income, avg_expense, [], months)

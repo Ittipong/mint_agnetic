@@ -2,7 +2,6 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from financial_agent.db import queries
 from financial_agent.finance import budget as budget_calc
-from financial_agent.finance.precision import to_decimal
 
 
 class BudgetTools:
@@ -22,8 +21,8 @@ class BudgetTools:
         if not b:
             raise ValueError(f"Budget {budget_sync_id} not found")
 
-        budgeted = to_decimal(b["amount"])
-        spent = to_decimal(b["spent_amount"])
+        budgeted = Decimal(str(b["amount"]))
+        spent = Decimal(str(b["spent_amount"]))
         diff, pct_diff, label = budget_calc.variance(budgeted, spent)
         util_pct = budget_calc.utilization_pct(spent, budgeted)
 
@@ -42,8 +41,8 @@ class BudgetTools:
         budgets = await self.get_budgets(active_only=True)
         overspent = []
         for b in budgets:
-            budgeted = to_decimal(b["amount"])
-            spent = to_decimal(b["spent_amount"])
+            budgeted = Decimal(str(b["amount"]))
+            spent = Decimal(str(b["spent_amount"]))
             if budget_calc.overspend_flag(spent, budgeted):
                 diff, pct_diff, _ = budget_calc.variance(budgeted, spent)
                 overspent.append({

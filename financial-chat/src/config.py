@@ -17,12 +17,12 @@ class Settings(BaseSettings):
     backend_database_url: str = "postgresql://postgres:postgres@localhost:5432/mint_money_dev"
     langgraph_studio_port: int = 8080
 
-    # Writer model (Gemma) — for LLM Writer step
     model: str = "google/gemma-4-26b-a4b-it"
     base_url: str = "https://openrouter.ai/api/v1"
-
-    # Intent router model (ministral) — for classification step
     intent_model: str = "mistralai/ministral-3b-2512"
+
+    server_host: str = "0.0.0.0"
+    server_port: int = 8000
 
 
 settings = Settings()

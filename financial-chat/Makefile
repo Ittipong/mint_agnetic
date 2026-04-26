@@ -4,7 +4,7 @@ PY := python
 UV := uv
 DB_URL ?= postgresql://mint:mint123@localhost:5433/mint_agentic
 BACKEND_DB_URL ?= postgresql://postgres:postgres@localhost:5432/mint_money_dev
-STUDIO_PORT ?= 8080
+STUDIO_PORT ?= 2024
 
 # === Development ===
 
@@ -18,20 +18,39 @@ dev-chat: ## Run the agent in chat mode
 dev-react: ## Run the agent in ReAct mode
 	$(UV) run $(PY) -m src.main --mode react
 
+# === FastAPI Server ===
+
+SERVER_HOST ?= 0.0.0.0
+SERVER_PORT ?= 8000
+
+server: ## Start FastAPI chat server (streaming SSE)
+	$(UV) sync
+	$(UV) run uvicorn src.server:app --host $(SERVER_HOST) --port $(SERVER_PORT) --reload
+
+server-prod: ## Start FastAPI chat server (production, no reload)
+	$(UV) run uvicorn src.server:app --host $(SERVER_HOST) --port $(SERVER_PORT) --workers 2
+
+# Test streaming endpoint
+test-stream: ## Test SSE stream (usage: USER_ID=<uuid> THREAD_ID=<uuid> MSG="question")
+	@curl -sN -X POST http://localhost:$(SERVER_PORT)/chat/stream \
+		-H "Content-Type: application/json" \
+		-d '{"user_id":"$(USER_ID)","thread_id":"$(THREAD_ID)","message":"$(MSG)"}' \
+		| while IFS= read -r line; do echo "$$line"; done
+
 # === LangGraph Studio ===
 
 studio: ## Start LangGraph Studio API server
-	@echo "🚀 Starting LangGraph Studio on http://localhost:$(STUDIO_PORT)"
-	@echo "   Studio UI: https://smith.langchain.com/studio/?baseUrl=http://localhost:$(STUDIO_PORT)"
-	@echo "   API Docs:  http://localhost:$(STUDIO_PORT)/docs"
-	@echo ""
+	-lsof -ti :$(STUDIO_PORT) | xargs kill -9 2>/dev/null; sleep 1
+	@echo "Starting LangGraph Studio on http://localhost:$(STUDIO_PORT)"
+	@echo "Studio UI: https://smith.langchain.com/studio/?baseUrl=http://localhost:$(STUDIO_PORT)"
 	$(UV) run langgraph dev \
 		--config langgraph.json \
 		--port $(STUDIO_PORT) \
 		--no-browser
 
 studio-stop: ## Stop LangGraph dev server
-	pkill -f "langgraph dev" 2>/dev/null || true
+	-lsof -ti :$(STUDIO_PORT) | xargs kill -9 2>/dev/null || true
+	-pkill -f "langgraph dev" 2>/dev/null || true
 
 studio-restart: studio-stop studio ## Restart LangGraph Studio
 
