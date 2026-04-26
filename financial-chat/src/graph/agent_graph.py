@@ -16,7 +16,7 @@ from src.graph.state import AgentState
 from src.graph.nodes import reason_node, REGULAR_TOOLS, CODEACT_TOOL_NAMES
 from src.graph.codeact_subgraph import codeact_node
 
-_MAX_HISTORY = 40  # keep last N messages to avoid context overflow
+_MAX_HISTORY = 40
 
 
 def _should_continue(state: AgentState) -> str:
@@ -35,7 +35,6 @@ def _should_continue(state: AgentState) -> str:
 
 
 def _trim_history(state: AgentState) -> dict:
-    """Keep only the last _MAX_HISTORY messages to bound context size."""
     msgs = state["messages"]
     if len(msgs) > _MAX_HISTORY:
         return {"messages": msgs[-_MAX_HISTORY:]}
@@ -48,7 +47,7 @@ def _build_builder() -> StateGraph:
 
     builder.add_node("reason", reason_node)
     builder.add_node("tools", tool_node)
-    builder.add_node("codeact", codeact_node)  # dedicated CodeAct subgraph node
+    builder.add_node("codeact", codeact_node)
     builder.add_node("trim", _trim_history)
 
     builder.add_edge(START, "reason")

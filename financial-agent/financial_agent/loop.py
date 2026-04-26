@@ -45,6 +45,7 @@ class StepResult:
 class BreakdownItem:
     label: str
     value: str
+    unit: str = ""
 
 
 @dataclass
@@ -70,7 +71,7 @@ class ToolResult:
             d["result"] = self.result
             d["currency"] = self.currency
         if self.breakdown:
-            d["breakdown"] = [{"label": b.label, "value": b.value} for b in self.breakdown]
+            d["breakdown"] = [{"label": b.label, "value": b.value, "unit": b.unit} for b in self.breakdown]
         if self.confidence:
             d["confidence"] = self.confidence
         if self.data_range:
@@ -88,7 +89,7 @@ class ToolResult:
 
         lines = [f"status: {self.status}"]
         if self.result is not None:
-            lines.append(f"result: {self.result} {self.currency}")
+            lines.append(f"result: {self.result}")
         if self.confidence:
             lines.append(f"confidence: {self.confidence}")
         if self.data_range:
@@ -96,7 +97,8 @@ class ToolResult:
         if self.breakdown:
             lines.append("breakdown:")
             for item in self.breakdown:
-                lines.append(f"  - {item.label}: {item.value} {self.currency}")
+                unit = item.unit or self.currency
+                lines.append(f"  - {item.label}: {item.value} {unit}")
         if self.caveat:
             lines.append(f"caveat: {self.caveat}")
         if self.status == "partial":
@@ -122,7 +124,11 @@ class LoopResult:
             )
 
         breakdown = [
-            BreakdownItem(label=item.get("label", ""), value=str(item.get("value", "")))
+            BreakdownItem(
+                label=item.get("label", ""),
+                value=str(item.get("value", "")),
+                unit=str(item.get("unit", "")),
+            )
             for item in self.breakdown
         ]
         return ToolResult(

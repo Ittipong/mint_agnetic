@@ -1,6 +1,5 @@
 from decimal import Decimal
 from sqlalchemy.ext.asyncio import async_sessionmaker
-from loguru import logger
 from financial_agent.db import queries
 
 
@@ -13,6 +12,10 @@ class WalletTools:
         async with self._sf() as session:
             return await queries.fetch_general_wallets(session, self._user_id)
 
+    async def get_all_balances(self) -> list[dict]:
+        async with self._sf() as session:
+            return await queries.fetch_all_wallet_balances(session, self._user_id)
+
     async def get_balance(self, wallet_sync_id: str) -> Decimal:
         async with self._sf() as session:
             return await queries.fetch_wallet_balance(session, self._user_id, wallet_sync_id)
@@ -20,44 +23,14 @@ class WalletTools:
     async def get_transactions(
         self,
         wallet_sync_id: str | None = None,
-        limit: int | None = None,
         days: int | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
+        limit: int | None = None,
+        type: str | None = None,
     ) -> list[dict]:
         async with self._sf() as session:
             return await queries.fetch_transactions(
-                session, self._user_id, wallet_sync_id, limit, days, start_date, end_date
+                session, self._user_id, wallet_sync_id, limit, days, start_date, end_date, type
             )
 
-    async def get_net_worth(self) -> dict:
-        async with self._sf() as session:
-            wallets = await queries.fetch_general_wallets(session, self._user_id)
-            goals = await queries.fetch_goal_wallets(session, self._user_id)
-            obligations = await queries.fetch_obligation_wallets(session, self._user_id)
-
-        # Compute real wallet balances (cached_balance may be NULL)
-        wallet_balances = []
-        for w in wallets:
-            bal = await self.get_balance(w["sync_id"])
-            wallet_balances.append(bal)
-
-        goal_balances = []
-        for g in goals:
-            bal = await self.get_balance(g["sync_id"])
-            goal_balances.append(bal)
-
-        debt_balances = [Decimal(str(o["outstanding_principal"])) for o in obligations]
-
-        total_assets = sum(wallet_balances + goal_balances, Decimal("0"))
-        total_debts = sum(debt_balances, Decimal("0"))
-
-        return {
-            "total_assets": total_assets,
-            "total_debts": total_debts,
-            "net_worth": total_assets - total_debts,
-            "wallets": [
-                {"name": w["name"], "balance": bal}
-                for w, bal in zip(wallets, wallet_balances)
-            ],
-        }

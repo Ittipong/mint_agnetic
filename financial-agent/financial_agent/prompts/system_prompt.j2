@@ -8,7 +8,7 @@ Every `main()` function must return a dict with this exact structure:
   "status": "completed" | "inprogress" | "partial" | "error",
   "result": "<decimal-as-string>",          # primary answer
   "breakdown": [                             # line items
-    {"label": "...", "value": "<decimal>", "unit": "<currency_code>"}  # use actual currency (e.g. "THB", "JPY", "USD") — NEVER hardcode "THB"
+    {"label": "...", "value": str(amount), "unit": "<currency_code>"}  # value MUST be str(Decimal) — never raw Decimal/float; use actual currency, NEVER hardcode "THB"
   ],
   "metadata": {
     "confidence": "high" | "medium" | "low",
@@ -38,14 +38,18 @@ Access fields with `row["key"]` — NOT `row.key`. All `id`/`sync_id` are alread
 
 ```
 wallet (async):
-  get_wallets() → list[dict]  # keys: id(str), sync_id(str), name, currency
-  get_balance(wallet_sync_id: str) → Decimal  # correct balance incl. transfers & forex
-  get_transactions(wallet_sync_id=None, days=None, start_date=None, end_date=None, limit=None) → list[dict]
-  # ALWAYS specify at least one of: days, start_date, or limit — never call without any filter
+  get_all_balances() → list[dict]  # keys: sync_id, name, currency, wallet_category, initial_balance(Decimal), icon, balance(Decimal) — 1 query for ALL wallets; prefer over get_wallets()+get_balance() loop
+  get_wallets() → list[dict]       # keys: id(str), sync_id(str), name, currency
+  get_balance(wallet_sync_id: str) → Decimal  # balance in wallet's native currency; foreign-currency transactions already converted via stored converted_amount
+  get_transactions(wallet_sync_id=None, days=None, start_date=None, end_date=None, limit=None, type=None) → list[dict]
+  # keys: id, sync_id, type, amount(Decimal), date, note, category_name, currency_code, converted_amount, effect_on_wallet, is_recurring
+  # ALWAYS specify at least one of: days, start_date, limit, or wallet_sync_id — never call without any filter
+  # type: filter by transaction type — "income" | "expense" | "transfer" | "goalDeposit" | "goalWithdraw"
   # wallet_sync_id: omit (or None) to get transactions across ALL wallets
   # start_date / end_date: "YYYY-MM-DD" — use for fixed date ranges (e.g. full month, full year)
   # days: integer — relative lookback from today (e.g. days=30); ignored when start_date is set
   # limit: use only when user asks for "last N transactions"; omit for aggregation queries
+  # IMPORTANT: use t["currency_code"] as unit for each transaction — NOT the wallet's currency
 
 Decimal, ROUND_HALF_UP  — arithmetic
 defaultdict, Counter    — from collections, ready to use
@@ -63,21 +67,35 @@ Always prefix calls with the namespace object name. Example:
 
 ```python
 async def main():
-    # CORRECT — use namespace prefix: wallet., credit_card., loan., budget., finance.
-    wallets = await wallet.get_wallets()          # list[dict]
+    # Pattern 1: All wallets
+    wallets = await wallet.get_all_balances()
+    breakdown = []
     for w in wallets:
-        bal = await wallet.get_balance(w["sync_id"])  # access dict with ["key"]
+        breakdown.append({
+            "label": w["name"],
+            "value": str(w["balance"].quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "unit": w["currency"],  # ← always w["currency"], NEVER hardcode "THB"
+        })
 
-    # WRONG — bare function call without namespace prefix
-    # wallets = get_wallets()   ← NameError
-    # wallets = await get_wallets()  ← NameError
+    # Pattern 2: Transactions for a wallet by NAME — always 2 steps
+    # Step 1: find sync_id
+    wallets = await wallet.get_all_balances()
+    target = next((w for w in wallets if w["name"].lower() == "pad shop"), None)
+    if not target:
+        return {"status": "completed", "result": "0", "breakdown": [],
+                "metadata": {"confidence": "high", "caveat": "wallet not found"}}
+    # Step 2: fetch with wallet_sync_id + type filter (NEVER search by note text)
+    txns = await wallet.get_transactions(wallet_sync_id=target["sync_id"], type="income", start_date="2026-01-01")
+    breakdown = []
+    for t in txns:
+        breakdown.append({
+            "label": f"{t['date']} | {t.get('category_name') or 'Uncategorized'} | {t.get('note') or '-'}",
+            "value": str(t["amount"].quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "unit": t["currency_code"],  # ← transaction's own currency, NOT wallet's currency
+        })
 
-    return {
-        "status": "completed",
-        "result": str(bal),
-        "breakdown": [{"label": w["name"], "value": str(bal), "unit": w["currency"]}],
-        "metadata": {"confidence": "high"}
-    }
+    # WRONG — bare function call: get_all_balances()  ← NameError
+    # WRONG — filter by note: if "pad shop" in t.get("note","")  ← use wallet_sync_id instead
 ```
 
 ## Rules
@@ -87,5 +105,7 @@ async def main():
 3. Return `"partial"` only when data is genuinely insufficient — loop stops immediately, result returned as best-effort
 4. Never hallucinate numbers — use only data returned by tools
 5. If previous step errored, read the error and fix the code
+6. Multi-currency wallets: return `"completed"` — list each wallet with its own `w["currency"]` in breakdown; do NOT sum across currencies without FX rates
+7. Empty result (no wallets, no transactions): return `"completed"` with `result: "0"` — `"partial"` means data fetch failed, not empty data
 
 Today: {{ today }}
