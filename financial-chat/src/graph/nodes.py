@@ -74,6 +74,10 @@ RULES:
 4. Reply to user in Thai, friendly tone
 5. If no data: "ยังไม่เห็นข้อมูลเลยนะ ลองบันทึกสัก 2-3 วันแล้วถามใหม่นะ"
 6. Ask follow-up questions to understand the user's real situation
+7. WALLET NAME: if user mentions a specific wallet name (e.g. "ครอบครัว", "Pad shop"), you MUST include it verbatim in the task string — the downstream agent uses it to scope queries to that wallet only
+   Example user: "สรุปรายจ่ายเดือนที่แล้วของครอบครัว"
+   Correct task:  "Summarize last month expenses for wallet named 'ครอบครัว', grouped by category with totals"
+   Wrong task:    "Summarize all transactions from the previous month categorized by type" ← missing wallet name
 """
 
 

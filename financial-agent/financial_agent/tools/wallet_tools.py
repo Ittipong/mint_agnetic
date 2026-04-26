@@ -27,10 +27,12 @@ class WalletTools:
         start_date: str | None = None,
         end_date: str | None = None,
         limit: int | None = None,
-        type: str | None = None,
+        type: str | list[str] | None = None,
+        type_group: str | None = None,
+        include_in_report: bool | None = None,
     ) -> list[dict]:
         async with self._sf() as session:
             return await queries.fetch_transactions(
-                session, self._user_id, wallet_sync_id, limit, days, start_date, end_date, type
+                session, self._user_id, wallet_sync_id, limit, days, start_date, end_date, type, type_group, include_in_report
             )
 
