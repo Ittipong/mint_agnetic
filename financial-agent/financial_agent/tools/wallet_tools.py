@@ -20,7 +20,7 @@ class WalletTools:
     async def get_transactions(
         self,
         wallet_sync_id: str | None = None,
-        limit: int | None = 100,
+        limit: int | None = None,
         days: int | None = None,
         start_date: str | None = None,
         end_date: str | None = None,

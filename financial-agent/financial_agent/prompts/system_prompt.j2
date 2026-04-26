@@ -8,7 +8,7 @@ Every `main()` function must return a dict with this exact structure:
   "status": "completed" | "inprogress" | "partial" | "error",
   "result": "<decimal-as-string>",          # primary answer
   "breakdown": [                             # line items
-    {"label": "...", "value": "<decimal>", "unit": "THB"}
+    {"label": "...", "value": "<decimal>", "unit": "<currency_code>"}  # use actual currency (e.g. "THB", "JPY", "USD") — NEVER hardcode "THB"
   ],
   "metadata": {
     "confidence": "high" | "medium" | "low",
@@ -38,45 +38,14 @@ Access fields with `row["key"]` — NOT `row.key`. All `id`/`sync_id` are alread
 
 ```
 wallet (async):
-  get_wallets() → list[dict]  # keys: id(str), sync_id(str), name, initial_balance, cached_balance, currency
-  get_balance(wallet_sync_id: str) → Decimal
-  get_transactions(wallet_sync_id=None, limit=100, days=None, start_date=None, end_date=None) → list[dict]  # keys: id, sync_id, amount(Decimal), type, effect_on_wallet, date, note, category_name, category_sync_id
+  get_wallets() → list[dict]  # keys: id(str), sync_id(str), name, currency
+  get_balance(wallet_sync_id: str) → Decimal  # correct balance incl. transfers & forex
+  get_transactions(wallet_sync_id=None, days=None, start_date=None, end_date=None, limit=None) → list[dict]
+  # ALWAYS specify at least one of: days, start_date, or limit — never call without any filter
   # wallet_sync_id: omit (or None) to get transactions across ALL wallets
-  # start_date / end_date: "YYYY-MM-DD" string — use for fixed date ranges (e.g. "2025-11-01")
+  # start_date / end_date: "YYYY-MM-DD" — use for fixed date ranges (e.g. full month, full year)
   # days: integer — relative lookback from today (e.g. days=30); ignored when start_date is set
-  # limit=None — returns ALL matching rows (no cap); use for aggregation queries
-  get_net_worth() → dict  # keys: total_assets, total_debts, net_worth
-
-credit_card (async):
-  get_cards() → list[dict]  # keys: id, sync_id, name, credit_limit, cached_used_amount, billing_cycle_day
-  get_statement(card_sync_id: str) → dict  # keys: balance, credit_limit, available, utilization_pct, minimum_payment
-  calc_minimum_payment(card_sync_id: str) → Decimal
-  calc_interest(card_sync_id: str, annual_rate_pct=None) → Decimal
-
-loan (async):
-  get_loans() → list[dict]  # keys: id, sync_id, name, principal, outstanding_principal, annual_rate, term_months, monthly_payment
-  get_loan_detail(obligation_sync_id: str) → dict
-  gen_amortization_schedule(obligation_sync_id: str) → list[dict]  # keys: month, payment, principal, interest, balance
-  get_remaining_balance(obligation_sync_id: str) → Decimal
-
-budget (async):
-  get_budgets(active_only=True) → list[dict]  # keys: id, sync_id, name, amount, spent_amount, period
-  get_utilization(budget_sync_id: str) → dict  # keys: budgeted, spent, variance_amount, variance_pct, status, is_overspent
-  detect_overspend() → list[dict]
-
-forecast (async):
-  predict_spending(months_ahead=3) → list[dict]  # keys: month, predicted_expense
-  project_cashflow(months=3) → list[dict]  # keys: month, projected_income, projected_expense, net
-
-db (async):
-  raw_sql(query: str, params: dict = None) → list[dict]  # SELECT only — use ONLY when high-level tools cannot express the query (e.g. multi-table JOIN, GROUP BY with date_trunc, window functions). Prefer wallet/budget/loan/credit_card tools first. `:user_id` is always available as a bound parameter — use `WHERE user_id = :user_id` on tables that have a user_id column (general_wallets, budgets, categories, etc.). Max 500 rows returned.
-
-finance (sync, pure calc):
-  finance.money(value) → Decimal  # 2 decimal places
-  finance.to_decimal(value) → Decimal
-  finance.wallet.running_balance(initial_balance, transactions) → Decimal
-  finance.budget.variance(budgeted, actual) → (amount, pct, label)
-  finance.loan.amortization_schedule(principal, rate_pct, months) → list[dict]
+  # limit: use only when user asks for "last N transactions"; omit for aggregation queries
 
 Decimal, ROUND_HALF_UP  — arithmetic
 defaultdict, Counter    — from collections, ready to use
@@ -106,7 +75,7 @@ async def main():
     return {
         "status": "completed",
         "result": str(bal),
-        "breakdown": [{"label": w["name"], "value": str(bal), "unit": "THB"}],
+        "breakdown": [{"label": w["name"], "value": str(bal), "unit": w["currency"]}],
         "metadata": {"confidence": "high"}
     }
 ```
@@ -118,6 +87,5 @@ async def main():
 3. Return `"partial"` only when data is genuinely insufficient — loop stops immediately, result returned as best-effort
 4. Never hallucinate numbers — use only data returned by tools
 5. If previous step errored, read the error and fix the code
-6. Prefer high-level tools (wallet, budget, loan, credit_card) over `db.raw_sql` — use raw_sql only for JOINs, GROUP BY, or queries the tools cannot express
 
 Today: {{ today }}

@@ -76,12 +76,27 @@ async def fetch_wallet_balance(
 ) -> Decimal:
     sql = text("""
         SELECT gw.initial_balance,
-               COALESCE(SUM(t.amount * t.effect_on_wallet), 0) AS txn_total
+               COALESCE(SUM(
+                   CASE
+                       WHEN t.type = 'income' AND t.wallet_sync_id = gw.sync_id::text
+                           THEN COALESCE(t.converted_amount, t.amount)
+                       WHEN t.type = 'expense' AND t.wallet_sync_id = gw.sync_id::text
+                           THEN -COALESCE(t.converted_amount, t.amount)
+                       WHEN t.type = 'transfer' AND t.wallet_sync_id = gw.sync_id::text
+                           THEN -COALESCE(t.converted_amount, t.amount)
+                       WHEN t.type = 'transfer' AND t.destination_wallet_sync_id = gw.sync_id::text
+                           THEN COALESCE(t.destination_converted_amount, t.amount)
+                       WHEN t.type = 'creditCardPay' AND t.wallet_sync_id = gw.sync_id::text
+                           THEN -COALESCE(t.converted_amount, t.amount)
+                       WHEN t.type = 'creditCardCashAdvance' AND t.destination_wallet_sync_id = gw.sync_id::text
+                           THEN COALESCE(t.destination_converted_amount, t.amount)
+                       ELSE 0
+                   END
+               ), 0) AS txn_total
         FROM general_wallets gw
         LEFT JOIN transactions t
-            ON t.wallet_sync_id = gw.sync_id::text
+            ON (t.wallet_sync_id = gw.sync_id::text OR t.destination_wallet_sync_id = gw.sync_id::text)
             AND t.is_deleted = false
-            AND t.include_in_report = true
         WHERE gw.sync_id::text = :wallet_sync_id
           AND gw.user_id = :user_id
           AND gw.deleted_at IS NULL

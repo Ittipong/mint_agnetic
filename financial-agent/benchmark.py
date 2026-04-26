@@ -14,7 +14,6 @@ Usage:
     python benchmark.py calc07_daily_avg_spend
     python benchmark.py calc08_monthly_cashflow
     python benchmark.py calc09_mom_change_pct
-    python benchmark.py calc10_loan_interest
 """
 import asyncio
 import sys
@@ -61,7 +60,7 @@ QUERIES = {
     "calc09_mom_change_pct": "Calculate the month-over-month percentage change in total spending. Compare April 2026 vs March 2026. Show the % increase or decrease.",
 
     # 10. คำนวณ loan interest → outstanding_principal * annual_rate / 12
-    "calc10_loan_interest": "For each active loan, calculate the monthly interest: outstanding_principal * (annual_rate / 100) / 12. Show principal, rate, and monthly interest.",
+
 }
 
 # sorted by total cost (in + out) per 1M tokens — ascending

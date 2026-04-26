@@ -21,42 +21,7 @@ _SOLVE_TIMEOUT_EXCEEDED = "solve_timeout_exceeded"
 
 _DB_SCHEMA_SUMMARY = """\
 Tables (key columns only):
-- transactions: amount(float→Decimal!), type(income|expense|transfer|goalDeposit|goalWithdraw), wallet_sync_id(text), category_sync_id(text), effect_on_wallet(+1/-1/0), date, status(confirmed|scheduled), is_deleted
-- general_wallets: sync_id(uuid), name, initial_balance(NUMERIC15,2), cached_balance(may be NULL→use initial_balance + tx sum), user_id
-- creditcard_wallets: sync_id, name, credit_limit(NUMERIC15,2), initial_used, cached_used_amount, billing_cycle_day, payment_due_day
-- goal_wallets: sync_id, name, target_amount(NUMERIC15,2), initial_balance(NUMERIC15,2), cached_balance(WARNING: often NULL), target_date, is_closed, is_deleted
-- obligation_wallets: sync_id, name, status(active|closed), obligation_mode, monthly_payment(NUMERIC15,2), due_day
-- obligation_plan_versions: obligation_id(FK), principal(NUMERIC15,2), outstanding_principal, annual_rate(NUMERIC6,2 = % e.g.5.50), term_months, effective_to(NULL=latest)
-- obligation_transactions: obligation_id(FK), event_type, amount(NUMERIC15,2), principal_paid, interest_paid, remaining_balance
-- budgets: name, amount(NUMERIC15,2), spent_amount, period, start_date, end_date, is_deleted
-- categories: sync_id(text), name, type(income|expense), wallet_sync_id(text), is_deleted
-
-FK: transactions.wallet_sync_id (TEXT) → any wallet's sync_id (UUID)
-  In SQL:  WHERE t.wallet_sync_id = gw.sync_id::text
-  In Python (SQLAlchemy param): always pass str(sync_id), never raw UUID object
-  WRONG: wallet_sync_id = $2  with UUID('abc...')  → DataError
-  RIGHT: wallet_sync_id = $2  with '6a3b4243-...'  (string)
-
-CRITICAL — goal_wallet balance (cached_balance is often NULL, never use it alone):
-  current_balance = COALESCE(gw.cached_balance,
-    gw.initial_balance + COALESCE((
-      SELECT SUM(t.amount * t.effect_on_wallet)
-      FROM transactions t
-      WHERE t.wallet_sync_id = gw.sync_id::text
-        AND t.is_deleted = false AND t.status = 'confirmed'
-    ), 0)
-  )
-  goal_wallet tx types: goalDeposit (effect_on_wallet=+1), goalWithdraw (effect_on_wallet=-1)
-
-CRITICAL — general_wallet balance (cached_balance may also be NULL):
-  current_balance = COALESCE(gw.cached_balance,
-    gw.initial_balance + COALESCE((
-      SELECT SUM(t.amount * t.effect_on_wallet)
-      FROM transactions t
-      WHERE t.wallet_sync_id = gw.sync_id::text
-        AND t.is_deleted = false AND t.status = 'confirmed'
-    ), 0)
-  )
+- general_wallets: sync_id(uuid), name, currency, user_id  — balance: always call wallet.get_balance(sync_id), never compute manually
 """
 
 
