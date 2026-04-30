@@ -1,0 +1,12 @@
+{
+    "mcpServers": {
+        "LangSmith": {
+            "command": "/Users/ittipong.it/.pyenv/shims/uvx",
+            "args": ["langsmith-mcp-server"],
+            "env": {
+                "LANGSMITH_API_KEY": "REDACTED_LANGSMITH_PAT",
+                "LANGSMITH_PROJECT": "mint-agentic"
+            }
+        }
+    }
+}

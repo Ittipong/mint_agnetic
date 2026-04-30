@@ -39,6 +39,7 @@ Access fields with `row["key"]` — NOT `row.key`. All `id`/`sync_id` are alread
 ```
 wallet (async):
   get_all_balances() → list[dict]  # keys: sync_id, name, currency, wallet_category, initial_balance(Decimal), icon, balance(Decimal) — 1 query for ALL wallets; prefer over get_wallets()+get_balance() loop
+  # wallet_category valid values: "savings" | "cash" | "eWallet" | "promptPay" | "salary" | "sales" | "other" | null
   get_wallets() → list[dict]       # keys: id(str), sync_id(str), name, currency
   get_balance(wallet_sync_id: str) → Decimal  # balance in wallet's native currency; foreign-currency transactions already converted via stored converted_amount
   get_transactions(wallet_sync_id=None, days=None, start_date=None, end_date=None, limit=None, type=None, type_group=None, include_in_report=None) → list[dict]
@@ -164,5 +165,10 @@ async def main():
 6. Multi-currency wallets: return `"completed"` — list each wallet with its own `w["currency"]` in breakdown; do NOT sum across currencies without FX rates
 7. Empty result (no wallets, no transactions): return `"completed"` with `result: "0"` — `"partial"` means data fetch failed, not empty data
 8. Named wallet = MANDATORY wallet_sync_id: if user mentions a wallet name ("ครอบครัว", "Pad shop", etc.), resolve its sync_id first (Pattern 2/3) and ALWAYS pass `wallet_sync_id=` to get_transactions — NEVER fetch all transactions and filter in Python
+9. Multi-currency aggregation (applies to ALL groupings — by category, by tag, by date, by wallet, income/expense totals, etc.):
+   - ALWAYS use `t["amount"]` (native transaction amount) — NEVER `t["converted_amount"]` for per-group totals
+   - ALWAYS group by `(key, t["currency_code"])` — NEVER merge amounts across currencies
+   - Label every breakdown row as `"Label (CURRENCY)"` e.g. `"แท็กซี่ (THB)"`, `"Income (USD)"`, `"March (THB)"`
+   - When computing a single net/total across mixed currencies: compute per-currency separately, add each as its own breakdown row, set `result` to the primary-currency net (THB if present, else first currency), include `caveat: "multi-currency — see breakdown for full detail"`
 
 Today: {{ today }}

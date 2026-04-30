@@ -97,17 +97,27 @@ update: ## Upgrade all dependencies
 
 # === Evaluation ===
 
-eval: ## Run all evaluation tests
-	$(UV) run python -m tests.data.chat_eval
+eval: ## Run upload + eval (usage: make eval FILE=evaluation/dataset_poc.jsonl [ALL_MODELS=1] [BASELINE_MODEL=x] [RUN_BY=ci])
+	$(UV) run python -m tests.data.chat_eval --file $(FILE) \
+		$(if $(ALL_MODELS),--all-models,) \
+		$(if $(BASELINE_MODEL),--baseline-model $(BASELINE_MODEL),) \
+		$(if $(RUN_BY),--run-by $(RUN_BY),)
 
+eval-all-models: eval ## Alias for ALL_MODELS=1
 eval-intent: ## Run evaluation for specific intent (usage: make eval-intent INTENT=GOAL_PROGRESS)
 	$(UV) run python -m tests.data.chat_eval --intent $(INTENT)
 
-eval-export: ## Run evaluation and export to JSON (usage: make eval-export FILE=results.json)
-	$(UV) run python -m tests.data.chat_eval --export $(FILE)
+compare: ## Run model comparison (usage: make compare FILE=evaluation/dataset_poc.jsonl [OUTPUT_DIR=./results])
+	$(UV) run python evaluation/compare.py --file $(FILE) --output-dir $(if $(OUTPUT_DIR),$(OUTPUT_DIR),./eval_results)
+
+compare-dataset-id: ## Run comparison on existing dataset (usage: make compare-dataset-id DATASET_ID=xxx DATASET_NAME=xxx)
+	$(UV) run python evaluation/compare.py --dataset-id $(DATASET_ID) --dataset-name $(DATASET_NAME) --output-dir $(if $(OUTPUT_DIR),$(OUTPUT_DIR),./eval_results)
+
+eval-export: ## Run evaluation and export to JSON (usage: make eval FILE=dataset_poc.jsonl OUTPUT=results.json)
+	$(UV) run python -m tests.data.chat_eval --file $(FILE) --export $(OUTPUT)
 
 eval-langsmith: ## Run evaluation and log to LangSmith
-	$(UV) run python -m tests.data.chat_eval --langsmith
+	$(UV) run python -m tests.data.chat_eval --file $(FILE)
 
 # === Testing ===
 

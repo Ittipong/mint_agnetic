@@ -36,6 +36,9 @@ class CodeActSubState(TypedDict):
     task: str
     user_id: str
     result: str  # plain-text result written by _codeact_run, read by the bridge
+    total_steps: int  # number of CodeAct loop iterations
+    loop_status: str  # completed/partial/error
+    steps_detail: list  # detailed step info for evaluation
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -48,24 +51,49 @@ def _make_financial_settings() -> FinancialSettings:
     return FinancialSettings(
         openrouter_api_key=_chat_settings.openrouter_api_key,
         database_url=db_url,
-        openrouter_base_url=_chat_settings.base_url,
-        model=_chat_settings.model,
-        complex_model=_chat_settings.model,
+        openrouter_base_url=_chat_settings.codeact_base_url,
+        model=_chat_settings.codeact_model,
+        complex_model=_chat_settings.codeact_model,
     )
 
 
 # ── Subgraph node ────────────────────────────────────────────────────────────
 
 async def _codeact_run(state: CodeActSubState) -> dict:
-    """Run the full CodeAct agent loop and return result as plain text.
+    """Run the full CodeAct agent loop and return detailed result.
+
+    Returns dict with:
+    - result: plain text for ToolMessage
+    - total_steps: number of loop iterations
+    - loop_status: completed/partial/error
+    - steps_detail: list of step info for evaluation
 
     Real-time per-step tracing (code + execution) is handled by
     financial_agent/loop.py using langsmith.trace context managers.
     """
     fin_settings = _make_financial_settings()
     async with FinancialCodeActAgent(settings=fin_settings) as agent:
-        tool_result = await agent.solve_as_tool(state["task"], user_id=state["user_id"])
-    return {"result": tool_result.to_tool_content()}
+        loop_result = await agent.solve(state["task"], user_id=state["user_id"])
+        tool_result = loop_result.to_tool_result()
+
+    # Build step details for evaluation
+    steps_detail = []
+    for s in loop_result.steps:
+        steps_detail.append({
+            "step": s.step,
+            "code": s.code,
+            "elapsed_ms": s.elapsed_ms,
+            "status": s.execution.status,
+            "result": str(s.execution.result) if s.execution.result is not None else None,
+            "error": s.execution.error,
+        })
+
+    return {
+        "result": tool_result.to_tool_content(),
+        "loop_status": loop_result.status,
+        "total_steps": loop_result.total_steps,
+        "steps_detail": steps_detail,
+    }
 
 
 # ── Compiled subgraph ────────────────────────────────────────────────────────
@@ -86,7 +114,12 @@ async def codeact_node(state: AgentState) -> dict:
 
     Extracts the tool call from ReAct's last message, invokes the CodeAct subgraph,
     and returns a ToolMessage so ReAct can continue its reasoning loop.
+
+    Also embeds step info (total_steps, steps_detail) in the ToolMessage content
+    as a JSON block for evaluation purposes.
     """
+    import json
+
     last_msg = state["messages"][-1]
 
     # Extract the analyze_user_finances tool call placed by ReAct
@@ -101,11 +134,23 @@ async def codeact_node(state: AgentState) -> dict:
         "result": "",
     })
 
+    # Build step info JSON for evaluation
+    step_info = {
+        "codeact_total_steps": sub_result.get("total_steps", 0),
+        "codeact_steps": sub_result.get("steps_detail", []),
+        "codeact_status": sub_result.get("loop_status", "unknown"),
+    }
+
+    # ToolMessage content = result + step info as special marker
+    # Use unique delimiters that won't conflict with JSON in result
+    step_info_json = json.dumps(step_info)
+    content = sub_result["result"] + f"\n\n__CODEACT_INFO_START__{step_info_json}__CODEACT_INFO_END__"
+
     # Wrap result as ToolMessage — ReAct sees this as the tool's response
     return {
         "messages": [
             ToolMessage(
-                content=sub_result["result"],
+                content=content,
                 tool_call_id=tool_call["id"],
                 name=CODEACT_TOOL_NAME,
             )

@@ -65,7 +65,9 @@ QUERIES = {
 
 # sorted by total cost (in + out) per 1M tokens — ascending
 MODELS = [
-    "google/gemini-2.5-flash-lite", # in $0.10   out $0.40   total $0.50/M
+    "google/gemini-2.5-flash-lite",
+    "openai/gpt-oss-safeguard-20b:nitro",
+    "qwen/qwen3-vl-30b-a3b-instruct",
     # "openai/gpt-oss-120b",          # in $0.039  out $0.19   total $0.229/M
     # "qwen/qwen3.5-9b",              # in $0.10   out $0.15   total $0.25/M
     # "qwen/qwen3-8b",                # in $0.05   out $0.40   total $0.45/M

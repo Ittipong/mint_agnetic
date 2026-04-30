@@ -1,35 +1,24 @@
-"""OpenRouter LLM setup — uses LangChain OpenRouter integration.
+"""OpenRouter LLM setup — uses LangChain OpenRouter integration."""
 
-Two models:
-- writer_llm: Gemma for LLM Writer (friendly Thai responses)
-- intent_llm: ministral-3b-2512 for Intent Router (classification)
-"""
+import os
 
 from langchain_openrouter import ChatOpenRouter
 
 from src.config import settings
 
+# LangChain's ChatOpenRouter reads OPENROUTER_API_KEY from os.environ directly.
+# Set it here so the validation passes.
+os.environ["OPENROUTER_API_KEY"] = settings.typhoon_api_key
+
 
 def create_writer_llm() -> ChatOpenRouter:
-    """Create OpenRouter LLM with Gemma model for writer."""
+    """Create OpenRouter LLM for ReAct reasoning (Typhoon)."""
     return ChatOpenRouter(
-        model=settings.model,
-        openrouter_api_key=settings.openrouter_api_key,
-        base_url=settings.base_url,
+        model=settings.react_model,
+        openrouter_api_key=settings.typhoon_api_key,
+        base_url=settings.react_base_url,
     )
 
 
-def create_intent_llm() -> ChatOpenRouter:
-    """Create OpenRouter LLM with ministral for intent classification."""
-    return ChatOpenRouter(
-        model=settings.intent_model,
-        openrouter_api_key=settings.openrouter_api_key,
-        base_url=settings.base_url,
-    )
-
-
-# Default LLM (writer/gemma) — for backward compatibility
+# Default LLM — used by reason_node in the ReAct loop
 llm = create_writer_llm()
-
-# Intent router LLM
-intent_llm = create_intent_llm()
