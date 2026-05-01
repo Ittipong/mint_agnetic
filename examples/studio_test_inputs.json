@@ -1,118 +1,52 @@
-{
-  "_comment": "Test inputs for the new ReAct + CodeAct dedicated node workflow. Covers all 3 routing paths: codeact node, tools node, and direct END.",
-  "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-  "examples": [
-    {
-      "label": "1. [DIRECT] ถามทั่วไป — ไม่ใช้ tool",
-      "description": "ทดสอบ path: reason → END (ไม่มี tool call). ReAct ตอบจากความรู้ทั่วไปได้เลย",
-      "expected_path": "reason → END",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "สวัสดี Fin! วันนี้ฉันควรเริ่มต้นจัดการการเงินยังไงดี" }
-        ]
-      }
-    },
-    {
-      "label": "2. [CODEACT] วิเคราะห์รายจ่าย 3 เดือน",
-      "description": "ทดสอบ path: reason → codeact node → trim → reason → END. CodeAct ต้อง query DB แบบ ad-hoc",
-      "expected_path": "reason → codeact → trim → reason → END",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "รายจ่ายของฉัน 3 เดือนที่ผ่านมาเป็นยังไงบ้าง มีแนวโน้มเพิ่มขึ้นหรือลดลง" }
-        ]
-      }
-    },
-    {
-      "label": "3. [CODEACT] ดูยอดเงินทุก wallet",
-      "description": "ทดสอบ CodeAct node — ดึงข้อมูล general_wallets + creditcard_wallets + goal_wallets",
-      "expected_path": "reason → codeact → trim → reason → END",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "ตอนนี้ฉันมีเงินในบัญชีไหนบ้าง แต่ละบัญชีเหลืออยู่เท่าไร" }
-        ]
-      }
-    },
-    {
-      "label": "4. [CODEACT] วิเคราะห์ goal ออมเงิน",
-      "description": "ทดสอบ CodeAct node — ดึง goal_wallets + คำนวณ monthly required savings",
-      "expected_path": "reason → codeact → trim → reason → END",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "goal ออมเงินของฉันเป็นยังไงบ้าง ต้องออมเดือนละเท่าไรถึงจะถึงเป้าตามเวลา" }
-        ]
-      }
-    },
-    {
-      "label": "5. [TOOLS] ขอคำแนะนำหนี้บัตรเครดิต",
-      "description": "ทดสอบ path: reason → tools node (get_financial_advice) → trim → reason → END",
-      "expected_path": "reason → tools → trim → reason → END",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "อธิบายกับดักบัตรเครดิตให้หน่อย แล้วมีวิธีจัดการหนี้บัตรยังไงบ้าง" }
-        ]
-      }
-    },
-    {
-      "label": "6. [TOOLS] กฎ 50/30/20 และการออม",
-      "description": "ทดสอบ tools node — get_financial_advice สองหัวข้อในการสนทนา",
-      "expected_path": "reason → tools → trim → reason → END",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "กฎ 50/30/20 คืออะไร แล้วถ้าอยากออมแบบ compound interest ต้องทำยังไง" }
-        ]
-      }
-    },
-    {
-      "label": "7. [CODEACT → TOOLS] ดูหนี้แล้วขอกลยุทธ์",
-      "description": "ทดสอบ multi-step: codeact node ก่อน (ดึงข้อมูลหนี้) แล้ว tools node (ขอกลยุทธ์) — MUST be separate steps",
-      "expected_path": "reason → codeact → trim → reason → tools → trim → reason → END",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "ฉันมีหนี้อะไรบ้างและยอดเท่าไร แล้วควรใช้กลยุทธ์ debt_snowball หรือ debt_avalanche ดีกว่า" }
-        ]
-      }
-    },
-    {
-      "label": "8. [CODEACT → TOOLS] วางแผน goal + saving strategy",
-      "description": "ทดสอบ multi-step: analyze goal ด้วย CodeAct แล้วดึง saving_strategies ด้วย ToolNode",
-      "expected_path": "reason → codeact → trim → reason → tools → trim → reason → END",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "ดู goal ออมเงินของฉัน แล้วช่วยแนะนำวิธีออมเงินให้ถึงเป้าได้ไว" }
-        ]
-      }
-    },
-    {
-      "label": "9. [CODEACT] เปรียบเทียบรายรับ-รายจ่าย",
-      "description": "ทดสอบ CodeAct node — income vs expense ratio analysis ที่ template tool ทำไม่ได้",
-      "expected_path": "reason → codeact → trim → reason → END",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "เดือนนี้รายรับกับรายจ่ายของฉันต่างกันเท่าไร อัตราส่วนรายจ่ายต่อรายรับเป็นยังไง" }
-        ]
-      }
-    },
-    {
-      "label": "10. [MULTI-TURN] ต่อเนื่องจาก context เดิม",
-      "description": "ทดสอบ conversation history — user ถามต่อจากการสนทนาก่อนหน้า (multi-turn)",
-      "expected_path": "reason → codeact → trim → reason → END",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "ฉันใช้จ่ายเยอะมากเดือนนี้" },
-          { "role": "assistant", "content": "เข้าใจเลยครับ! ขอดูข้อมูลให้หน่อยนะ จะได้ช่วยวิเคราะห์ได้ถูก" },
-          { "role": "user", "content": "ช่วยดูหน่อยว่าหมวดไหนใช้มากที่สุด แล้วถ้าอยากลด 20% ควรตัดหมวดไหนก่อน" }
-        ]
-      }
-    }
-  ]
-}
+[
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "สวัสดี Fin! วันนี้ฉันควรเริ่มต้นจัดการการเงินยังไงดี"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "รายจ่ายของฉัน 3 เดือนที่ผ่านมาเป็นยังไงบ้าง มีแนวโน้มเพิ่มขึ้นหรือลดลง"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "ตอนนี้ฉันมีเงินในบัญชีไหนบ้าง แต่ละบัญชีเหลืออยู่เท่าไร"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "goal ออมเงินของฉันเป็นยังไงบ้าง ต้องออมเดือนละเท่าไรถึงจะถึงเป้าตามเวลา"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "อธิบายกับดักบัตรเครดิตให้หน่อย แล้วมีวิธีจัดการหนี้บัตรยังไงบ้าง"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "กฎ 50/30/20 คืออะไร แล้วถ้าอยากออมแบบ compound interest ต้องทำยังไง"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "ฉันมีหนี้อะไรบ้างและยอดเท่าไร แล้วควรใช้กลยุทธ์ debt_snowball หรือ debt_avalanche ดีกว่า"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "ดู goal ออมเงินของฉัน แล้วช่วยแนะนำวิธีออมเงินให้ถึงเป้าได้ไว"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "เดือนนี้รายรับกับรายจ่ายของฉันต่างกันเท่าไร อัตราส่วนรายจ่ายต่อรายรับเป็นยังไง"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "ฉันใช้จ่ายเยอะมากเดือนนี้ แล้วถ้าอยากลด 20% ควรตัดหมวดไหนก่อน"
+  }
+]

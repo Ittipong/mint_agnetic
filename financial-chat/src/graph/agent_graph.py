@@ -1,64 +1,73 @@
-"""Main graph — ReAct orchestrator with dedicated CodeAct subgraph node.
+"""ReAct LangGraph with dedicated Reasoner and Actor.
 
-For LangGraph Studio: `graph` is exported without a checkpointer (Studio manages its own).
-For server use: call `build_async_graph(checkpointer)` with an AsyncPostgresSaver.
+Architecture (Standard ReAct):
+  START → reason → [act|tool|respond] → reason (loop) → END
 
-Routing:
-  reason → "codeact"  when ReAct calls analyze_user_finances
-  reason → "tools"    when ReAct calls any regular tool
-  reason → END        when ReAct has a final answer (no tool calls)
+ReAct Loop:
+  1. Reason: LLM decides action (call tool or respond)
+  2. Act: Execute tool → return ToolMessage
+  3. Loop: LLM sees ToolMessage in state → decides next step
+  4. Repeat until final response → END
+
+Key concept: After tool execution, state contains ToolMessage.
+The next reason_node call automatically sees it — no separate "observe" needed.
 """
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
 
 from src.graph.state import AgentState
-from src.graph.nodes import reason_node, REGULAR_TOOLS, CODEACT_TOOL_NAMES
-from src.graph.codeact_subgraph import codeact_node
+from src.graph.nodes import (
+    reason_node,
+    REGULAR_TOOLS,
+    CODEACT_TOOL_NAMES,
+)
+from src.graph.codeact_subgraph import act_node
 
-_MAX_HISTORY = 40
 
-
-def _should_continue(state: AgentState) -> str:
-    """Route after reason_node: codeact subgraph, regular tools, or done."""
+def _should_route(state: AgentState) -> str:
+    """Route after reason_node: CodeAct, regular tools, or respond directly."""
     last_msg = state["messages"][-1]
+
     if not hasattr(last_msg, "tool_calls") or not last_msg.tool_calls:
-        return END
+        # No tool call = LLM gave direct answer
+        return "respond"
 
     tool_names = {tc["name"] for tc in last_msg.tool_calls}
 
-    # Any call to the financial analysis tool → dedicated CodeAct node
+    # CodeAct tool → run CodeAct subgraph
     if tool_names & CODEACT_TOOL_NAMES:
-        return "codeact"
+        return "act"
 
-    return "tools"
-
-
-def _trim_history(state: AgentState) -> dict:
-    msgs = state["messages"]
-    if len(msgs) > _MAX_HISTORY:
-        return {"messages": msgs[-_MAX_HISTORY:]}
-    return {}
+    # Regular tools → run via ToolNode
+    return "tool"
 
 
 def _build_builder() -> StateGraph:
     builder = StateGraph(AgentState)
-    tool_node = ToolNode(REGULAR_TOOLS)
 
-    builder.add_node("reason", reason_node)
-    builder.add_node("tools", tool_node)
-    builder.add_node("codeact", codeact_node)
-    builder.add_node("trim", _trim_history)
+    # Nodes - ReAct loop
+    builder.add_node("reason", reason_node)      # Think: LLM decides action
+    builder.add_node("act", act_node)            # Act: CodeAct execution
+    builder.add_node("tool", ToolNode(REGULAR_TOOLS))  # Act: regular tools
 
+    # Edges
     builder.add_edge(START, "reason")
+
+    # After reasoning: decide route
     builder.add_conditional_edges(
         "reason",
-        _should_continue,
-        {"codeact": "codeact", "tools": "tools", END: END},
+        _should_route,
+        {
+            "act": "act",        # CodeAct for computations
+            "tool": "tool",       # Regular tools
+            "respond": END,        # Direct answer → END
+        },
     )
-    builder.add_edge("codeact", "trim")
-    builder.add_edge("tools", "trim")
-    builder.add_edge("trim", "reason")
+
+    # ReAct loop: Act/Tool → Reason (LLM sees ToolMessage automatically)
+    builder.add_edge("act", "reason")
+    builder.add_edge("tool", "reason")
 
     return builder
 

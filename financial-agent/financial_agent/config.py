@@ -13,8 +13,8 @@ class Settings(BaseSettings):
     executor_timeout: int = 30
     thinking_budget_tokens: int = 8000
     solve_timeout: int = 180
-    log_level: str = "INFO"
-    debug: bool = False
+    log_level: str = "DEBUG"
+    debug: bool = True
 
 
 _settings: Settings | None = None

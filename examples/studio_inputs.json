@@ -1,107 +1,52 @@
-{
-  "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-  "examples": [
-    {
-      "label": "1. สอบถามรายจ่ายเดือนนี้",
-      "description": "ใช้ get_spent_budget tool",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "เดือนนี้ฉันใช้เงินไปเท่าไรแล้ว งบเหลือเท่าไร" }
-        ]
-      }
-    },
-    {
-      "label": "2. สรุปรายจ่ายสัปดาห์นี้",
-      "description": "ใช้ get_weekly_summary tool",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "สัปดาห์นี้ใช้จ่ายไปเท่าไร แบ่งตามหมวดหมู่ด้วย" }
-        ]
-      }
-    },
-    {
-      "label": "3. ดูเป้าหมายออมเงิน",
-      "description": "ใช้ get_goal_progress tool",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "goal ออมเงินของฉันเป็นยังไงบ้าง ใกล้ถึงเป้าหมายแล้วไหม" }
-        ]
-      }
-    },
-    {
-      "label": "4. ขอคำแนะนำวางแผนการเงิน",
-      "description": "ใช้ get_spent_budget + get_financial_advice tool",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "ช่วยดูสถานการณ์การเงินของฉันและแนะนำวิธีวางแผนให้ดีขึ้นได้ไหม" }
-        ]
-      }
-    },
-    {
-      "label": "5. ถามกลยุทธ์แก้หนี้บัตรเครดิต",
-      "description": "ใช้ get_financial_advice tool (credit_card_trap)",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "มีหนี้บัตรเครดิตอยู่ ควรจัดการยังไงดี มีกลยุทธ์อะไรบ้าง" }
-        ]
-      }
-    },
-    {
-      "label": "6. วิเคราะห์แนวโน้มรายจ่าย (complex)",
-      "description": "ใช้ query_user_finances tool สำหรับ ad-hoc analysis",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "รายจ่ายของฉัน 3 เดือนที่ผ่านมาเป็นยังไงบ้าง มีแนวโน้มเพิ่มขึ้นหรือลดลง" }
-        ]
-      }
-    },
-    {
-      "label": "7. Multi-turn: ถามต่อเนื่อง",
-      "description": "ทดสอบ conversation history — ส่ง messages หลาย turn",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "รายจ่ายเดือนนี้เป็นยังไง" },
-          { "role": "assistant", "content": "(ตอบโดย agent)" },
-          { "role": "user", "content": "แล้วถ้าอยากลดรายจ่ายลง 20% ควรเริ่มจากหมวดไหนก่อน" }
-        ]
-      }
-    },
-    {
-      "label": "8. ดูรายการธุรกรรมล่าสุด",
-      "description": "ใช้ get_recent_transactions tool",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "ช่วยดูรายการใช้จ่าย 10 รายการล่าสุดให้หน่อย" }
-        ]
-      }
-    },
-    {
-      "label": "9. กฎ 50/30/20 และการออม",
-      "description": "ใช้ get_financial_advice tool (50_30_20_rule + saving_strategies)",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "ฉันมีหนี้สินทั้งหมดเท่าไหร่" }
-        ]
-      }
-    },
-    {
-      "label": "10. วางแผนออมเงินเพื่อ goal",
-      "description": "ใช้ get_goal_progress + get_financial_advice tool",
-      "input": {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "messages": [
-          { "role": "user", "content": "ดู goal ออมเงินของฉัน แล้วช่วยวางแผนว่าต้องออมเดือนละเท่าไรถึงจะถึงเป้าตามเวลา" }
-        ]
-      }
-    }
-  ]
-}
+[
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "เดือนนี้ฉันใช้เงินไปเท่าไรแล้ว งบเหลือเท่าไร"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "สัปดาห์นี้ใช้จ่ายไปเท่าไร แบ่งตามหมวดหมู่ด้วย"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "goal ออมเงินของฉันเป็นยังไงบ้าง ใกล้ถึงเป้าหมายแล้วไหม"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "ช่วยดูสถานการณ์การเงินของฉันและแนะนำวิธีวางแผนให้ดีขึ้นได้ไหม"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "มีหนี้บัตรเครดิตอยู่ ควรจัดการยังไงดี มีกลยุทธ์อะไรบ้าง"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "รายจ่ายของฉัน 3 เดือนที่ผ่านมาเป็นยังไงบ้าง มีแนวโน้มเพิ่มขึ้นหรือลดลง"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "ตอนนี้ฉันมีเงินในบัญชีไหนบ้าง แต่ละบัญชีเหลืออยู่เท่าไร"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "ช่วยดูรายการใช้จ่าย 10 รายการล่าสุดให้หน่อย"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "ฉันมีหนี้สินทั้งหมดเท่าไหร่"
+  },
+  {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "thread_id": "test-thread",
+    "message": "ดู goal ออมเงินของฉัน แล้วช่วยวางแผนว่าต้องออมเดือนละเท่าไรถึงจะถึงเป้าตามเวลา"
+  }
+]

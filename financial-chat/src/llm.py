@@ -1,22 +1,19 @@
-"""OpenRouter LLM setup — uses LangChain OpenRouter integration."""
+"""LLM setup for ReAct agent."""
 
 import os
 
-from langchain_openrouter import ChatOpenRouter
+from langchain_openai import ChatOpenAI
 
 from src.config import settings
 
-# LangChain's ChatOpenRouter reads OPENROUTER_API_KEY from os.environ directly.
-# Set it here so the validation passes.
-os.environ["OPENROUTER_API_KEY"] = settings.typhoon_api_key
 
-
-def create_writer_llm() -> ChatOpenRouter:
-    """Create OpenRouter LLM for ReAct reasoning (Typhoon)."""
-    return ChatOpenRouter(
+def create_writer_llm() -> ChatOpenAI:
+    """Create Typhoon LLM for ReAct reasoning using OpenAI-compatible client."""
+    return ChatOpenAI(
         model=settings.react_model,
-        openrouter_api_key=settings.typhoon_api_key,
+        api_key=settings.typhoon_api_key,
         base_url=settings.react_base_url,
+        temperature=0.7,
     )
 
 
