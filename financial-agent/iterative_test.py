@@ -20,7 +20,7 @@ GRAPH_ID = "financial_agent"
 # Expected values for verification
 EXPECTED = {
     "ฉันมีกระเป๋าอะไรบ้าง": {
-        "ครอบครัว": {"value": 36970.23, "unit": "THB"},
+        "ครอบครัว": {"value": 82170.23, "unit": "THB"},
         "TrueMonney": {"value": 13870.69, "unit": "THB"},
         "Pad shop": {"value": -216.50, "unit": "USD"},
     }

@@ -14,7 +14,7 @@ from financial_agent.db.connection import create_engine, get_session_factory, di
 from financial_agent.executor import Executor
 from financial_agent.loop import CodeActLoop, LoopResult, ToolResult
 from financial_agent.reasoner import Reasoner
-from financial_agent.tools import build_namespace
+from financial_agent.tools import build_tool_registry
 
 _SOLVE_TIMEOUT_EXCEEDED = "solve_timeout_exceeded"
 
@@ -57,7 +57,7 @@ class FinancialCodeActAgent:
         if self._engine:
             await dispose_engine(self._engine)
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(self, tool_schemas: str = "") -> str:
         from jinja2 import Environment, FileSystemLoader
         from pathlib import Path
         jinja = Environment(
@@ -69,15 +69,18 @@ class FinancialCodeActAgent:
         return tmpl.render(
             db_schema_summary=_DB_SCHEMA_SUMMARY,
             today=date.today().isoformat(),
+            tool_schemas=tool_schemas,
         )
 
     async def solve(self, task: str, user_id: str, complex: bool = False) -> LoopResult:
         if self._loop is None or self._reasoner is None:
             raise RuntimeError("Use agent as async context manager: async with FinancialCodeActAgent() as agent:")
 
-        self._reasoner.set_system_prompt(self._build_system_prompt())
+        registry = build_tool_registry(self._session_factory, user_id)
+        namespace = registry.get_namespace()
+        tool_schemas = registry.get_schema_for_prompt()
 
-        namespace = build_namespace(self._session_factory, user_id)
+        self._reasoner.set_system_prompt(self._build_system_prompt(tool_schemas=tool_schemas))
         try:
             return await asyncio.wait_for(
                 self._loop.run(task, namespace, complex=complex),

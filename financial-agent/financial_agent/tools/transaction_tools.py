@@ -26,6 +26,10 @@ class TransactionTools:
         type_group: str | None = None,
         include_in_report: bool | None = None,
     ) -> list[dict]:
+        """Fetch transactions with flexible filtering. Returns list of transaction dicts.
+
+        Use when: user wants custom filtering with specific type/type_group, or need advanced query beyond get_expenses/get_income.
+        """
         async with self._sf() as session:
             return await self._fetch_transactions(
                 session, wallet_sync_id, limit, days, start_date, end_date, type, type_group, include_in_report
@@ -40,7 +44,10 @@ class TransactionTools:
         limit: int | None = None,
         include_in_report: bool | None = None,
     ) -> list[dict]:
-        """All outgoing transactions: expense + transfer-out + goalDeposit + creditCardPay + ..."""
+        """All outgoing transactions: expense + transfer-out + goalDeposit + creditCardPay + ...
+
+        Use when: user asks "รายจ่าย", "ค่าใช้จ่าย", "expenses", "spending", "ใช้ไปเท่าไหร่", "spent"
+        """
         async with self._sf() as session:
             return await self._fetch_transactions(
                 session, wallet_sync_id, limit, days, start_date, end_date,
@@ -56,7 +63,10 @@ class TransactionTools:
         limit: int | None = None,
         include_in_report: bool | None = None,
     ) -> list[dict]:
-        """All incoming transactions: income + transfer-in + goalWithdraw + ..."""
+        """All incoming transactions: income + transfer-in + goalWithdraw + ...
+
+        Use when: user asks "รายรับ", "income", "เงินเข้า", "ได้รับ", "received"
+        """
         async with self._sf() as session:
             return await self._fetch_transactions(
                 session, wallet_sync_id, limit, days, start_date, end_date,
@@ -72,7 +82,10 @@ class TransactionTools:
         limit: int | None = None,
         include_in_report: bool | None = None,
     ) -> list[dict]:
-        """Only transfer transactions (type=transfer)."""
+        """Only transfer transactions (type=transfer).
+
+        Use when: user asks about money transfers between wallets, "โอนเงิน", "transfer"
+        """
         async with self._sf() as session:
             return await self._fetch_transactions(
                 session, wallet_sync_id, limit, days, start_date, end_date,
@@ -85,7 +98,10 @@ class TransactionTools:
         limit: int = 10,
         include_in_report: bool | None = None,
     ) -> list[dict]:
-        """Last N transactions ordered by date desc. Use for "recent transactions" / "last N"."""
+        """Last N transactions ordered by date desc. Use for "recent transactions" / "last N".
+
+        Use when: user asks "recent transactions", "last 5", "ล่าสุด", "รายการล่าสุด", "recent"
+        """
         async with self._sf() as session:
             return await self._fetch_transactions(
                 session, wallet_sync_id, limit=limit, days=None,
@@ -100,12 +116,95 @@ class TransactionTools:
         type_group: str | None = None,
         include_in_report: bool | None = None,
     ) -> list[dict]:
-        """Transactions within a date range. dates as "YYYY-MM-DD"."""
+        """Transactions within a date range. dates as "YYYY-MM-DD".
+
+        Use when: user specifies a date range like "this month", "last week", "มกราคม", "ระหว่างวันที่"
+        """
         async with self._sf() as session:
             return await self._fetch_transactions(
                 session, wallet_sync_id, limit=None, days=None,
                 start_date=start_date, end_date=end_date, type=None, type_group=type_group, include_in_report=include_in_report
             )
+
+    async def get_scheduled(
+        self,
+        wallet_sync_id: str | None = None,
+        days: int | None = 30,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """Scheduled/future transactions (status='scheduled' and date > today).
+
+        Use when: user asks about "upcoming", "scheduled", "future transactions", "ที่จะเกิดขึ้น", "กำหนดการ"
+
+        Args:
+            wallet_sync_id: Filter by specific wallet
+            days: Look ahead N days (default 30). Set to None for all future.
+            limit: Max number of results
+        """
+        async with self._sf() as session:
+            conditions = ["t.created_by_user_id = :user_id", "t.is_deleted = false", "t.status = 'scheduled'"]
+            params: dict = {"user_id": self._user_id}
+
+            if wallet_sync_id:
+                conditions.append("(t.wallet_sync_id = :wallet_sync_id OR t.destination_wallet_sync_id = :wallet_sync_id)")
+                params["wallet_sync_id"] = wallet_sync_id
+
+            if days is not None:
+                future_date = datetime.now(timezone.utc).date() + timedelta(days=days)
+                conditions.append("t.date <= :future_date")
+                params["future_date"] = future_date
+
+            where = " AND ".join(conditions)
+            limit_clause = f"LIMIT {int(limit)}" if limit is not None else ""
+
+            sql = text(f"""
+                SELECT t.id, t.sync_id, t.type,
+                       'expense' AS type_group,
+                       t.amount, t.date, t.note,
+                       t.destination_note,
+                       t.wallet_sync_id, t.destination_wallet_sync_id,
+                       t.category_sync_id,
+                       COALESCE(t.category_name, c.name) AS category_name,
+                       COALESCE(t.category_name, c.name) AS display_category,
+                       t.effect_on_wallet, t.effect_on_destination,
+                       t.currency_code, t.currency_symbol,
+                       t.converted_amount,
+                       t.destination_currency_code, t.destination_currency_symbol,
+                       t.destination_converted_amount,
+                       t.exchange_rate,
+                       t.is_recurring, t.recurring_frequency, t.recurring_transaction_sync_id,
+                       t.include_in_report, t.status, t.icon,
+                       COALESCE(
+                           (SELECT JSON_AGG(JSON_BUILD_OBJECT('sync_id', tg.sync_id, 'name', tg.name))
+                            FROM transaction_tags tt
+                            JOIN tags tg ON tg.sync_id = tt.tag_sync_id AND tg.is_deleted = false
+                            WHERE tt.transaction_sync_id = t.sync_id),
+                           '[]'::json
+                       ) AS tags
+                FROM transactions t
+                LEFT JOIN categories c ON c.sync_id::text = t.category_sync_id AND c.deleted_at IS NULL
+                WHERE {where}
+                ORDER BY t.date ASC
+                {limit_clause}
+            """)
+
+            result = await session.execute(sql, params)
+            rows = result.mappings().all()
+
+            return [
+                {
+                    **dict(row),
+                    "id": str(row["id"]),
+                    "sync_id": str(row["sync_id"]),
+                    "amount": _to_decimal(row["amount"]),
+                    "converted_amount": _to_decimal(row["converted_amount"]) if row["converted_amount"] is not None else None,
+                    "destination_converted_amount": _to_decimal(row["destination_converted_amount"]) if row["destination_converted_amount"] is not None else None,
+                    "exchange_rate": _to_decimal(row["exchange_rate"]) if row["exchange_rate"] is not None else None,
+                    "tags": row["tags"] if isinstance(row["tags"], list) else [],
+                    "icon": row["icon"] if isinstance(row["icon"], dict) else None,
+                }
+                for row in rows
+            ]
 
     async def _fetch_transactions(
         self,

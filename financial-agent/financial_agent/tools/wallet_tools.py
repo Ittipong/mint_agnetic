@@ -32,6 +32,10 @@ class WalletTools:
         self._user_id = user_id
 
     async def get_wallets(self) -> list[dict]:
+        """Return all non-deleted wallets for the user.
+
+        Use when: user asks "มีกระเป๋าอะไรบ้าง", "what wallets", "list wallets", "ดูกระเป๋า"
+        """
         async with self._sf() as session:
             result = await session.execute(
                 text("""
@@ -61,6 +65,8 @@ class WalletTools:
         Balance formula per docs/balance_calculation.md:
         balance = initial_balance + SUM(effect_on_wallet * converted_amount)
         Only confirmed transactions with date <= today are included.
+
+        Use when: user asks "ยอดเงินทุกกระเป๋า", "ดูยอดเงิน", "wallet balances", "balance of all wallets"
         """
         async with self._sf() as session:
             result = await session.execute(
@@ -114,6 +120,8 @@ class WalletTools:
         Balance formula per docs/balance_calculation.md:
         balance = initial_balance + SUM(effect_on_wallet * converted_amount)
         Only confirmed transactions with date <= today are included.
+
+        Use when: user asks about a specific named wallet's balance. Requires wallet_sync_id (resolve via get_all_balances or get_wallets first if unknown).
         """
         async with self._sf() as session:
             result = await session.execute(

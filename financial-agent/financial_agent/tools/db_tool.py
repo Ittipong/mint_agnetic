@@ -33,6 +33,13 @@ class DBTools:
         self._user_id = user_id
 
     async def raw_sql(self, query: str, params: dict | None = None) -> list[dict]:
+        """Execute a read-only SQL query. Returns list of row dicts.
+
+        Use when: user needs custom SQL query beyond what other tools provide, or asks to "query database", "ดึงข้อมูลดิบ"
+
+        Security: Only SELECT allowed. FORBIDDEN: INSERT, UPDATE, DELETE, DROP, TRUNCATE, ALTER, CREATE, GRANT, REVOKE.
+        Max 200 rows. :user_id always injected.
+        """
         stripped = _strip_comments(query)
         match = _FORBIDDEN_RE.search(stripped)
         if match:
