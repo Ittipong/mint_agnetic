@@ -1,6 +1,9 @@
 from decimal import Decimal
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from financial_agent.db import queries
+from financial_agent.db.wallet_query import running_balance, net_worth
+
+__all__ = ["WalletTools", "running_balance", "net_worth"]
 
 
 class WalletTools:
@@ -19,20 +22,3 @@ class WalletTools:
     async def get_balance(self, wallet_sync_id: str) -> Decimal:
         async with self._sf() as session:
             return await queries.fetch_wallet_balance(session, self._user_id, wallet_sync_id)
-
-    async def get_transactions(
-        self,
-        wallet_sync_id: str | None = None,
-        days: int | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        limit: int | None = None,
-        type: str | list[str] | None = None,
-        type_group: str | None = None,
-        include_in_report: bool | None = None,
-    ) -> list[dict]:
-        async with self._sf() as session:
-            return await queries.fetch_transactions(
-                session, self._user_id, wallet_sync_id, limit, days, start_date, end_date, type, type_group, include_in_report
-            )
-

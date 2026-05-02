@@ -42,44 +42,48 @@ wallet (async):
   # wallet_category valid values: "savings" | "cash" | "eWallet" | "promptPay" | "salary" | "sales" | "other" | null
   get_wallets() → list[dict]       # keys: id(str), sync_id(str), name, currency
   get_balance(wallet_sync_id: str) → Decimal  # balance in wallet's native currency; foreign-currency transactions already converted via stored converted_amount
-  get_transactions(wallet_sync_id=None, days=None, start_date=None, end_date=None, limit=None, type=None, type_group=None, include_in_report=None) → list[dict]
-  # keys: id, sync_id, type(raw), type_group("income"|"expense"), amount(Decimal), date, note, destination_note,
-  #        wallet_sync_id, destination_wallet_sync_id,
-  #        category_sync_id, category_name,
-  #        display_category(str|None) — category_name if set, else auto-label by type:
-  #          goalDeposit→"ฝากเงิน", goalWithdraw→"ถอนเงิน",
-  #          transfer→"โอนเงิน", creditCardPay→"จ่ายบัตรเครดิต",
-  #          creditCardCashAdvance→"เบิกเงินสดบัตรเครดิต", creditCardCashback→"เงินคืนบัตรเครดิต"
-  #        ← ALWAYS use display_category for labels/grouping — never raw category_name
-  #        currency_code, currency_symbol,
-  #        converted_amount(Decimal|None),           # amount in wallet's base currency (set when transaction currency ≠ wallet currency)
-  #        destination_currency_code, destination_currency_symbol,
-  #        destination_converted_amount(Decimal|None), # for transfers: amount received in destination wallet's currency
-  #        exchange_rate(Decimal|None),              # FX rate used at time of transaction
-  #        effect_on_wallet(int), effect_on_destination(int),
-  #        is_recurring(bool), recurring_frequency(str|None), recurring_transaction_sync_id(str|None),
-  #        include_in_report(bool), status(str),
-  #        icon(dict|None)  — {"bg": "0xFF...", "type": "asset", "value": "assets/..."} or None
-  #        tags(list[dict])  — each: {"sync_id": str, "name": str}; empty list if no tags
-  # ALWAYS specify at least one of: days, start_date, limit, or wallet_sync_id — never call without any filter
-  # type: filter by exact raw type — str or list[str]
-  #   single:  type="expense"
-  #   multi:   type=["expense", "transfer"]
-  #   values:  "income" | "expense" | "transfer" | "goalDeposit" | "goalWithdraw"
-  # type_group: semantic filter — covers ALL types that flow in/out of wallet
-  #   type_group="expense" → all outgoing (expense + transfer-out + goalDeposit + …)
-  #   type_group="income"  → all incoming (income + transfer-in + goalWithdraw + …)
-  #   ← PREFER type_group when user asks "how much did I spend" / "total income"
-  # include_in_report: filter by report flag (default None = include all transactions)
-  #   None  → no filter — include ALL transactions regardless of flag (default)
-  #   True  → only transactions marked include_in_report=true
-  #   False → only transactions marked include_in_report=false
-  #   ← use True when user says "เฉพาะที่นับในรายงาน" / "ไม่รวมที่ซ่อน" / "only report transactions"
-  # wallet_sync_id: MANDATORY when user mentions a specific wallet name — omit ONLY when user asks about ALL wallets
-  # start_date / end_date: "YYYY-MM-DD" — use for fixed date ranges (e.g. full month, full year)
-  # days: integer — relative lookback from today (e.g. days=30); ignored when start_date is set
-  # limit: use only when user asks for "last N transactions"; omit for aggregation queries
+
+transaction (async):
+  get_expenses(wallet_sync_id=None, days=None, start_date=None, end_date=None, limit=None, include_in_report=None) → list[dict]
+    # All outgoing: expense + transfer-out + goalDeposit + creditCardPay + ...
+  get_income(wallet_sync_id=None, days=None, start_date=None, end_date=None, limit=None, include_in_report=None) → list[dict]
+    # All incoming: income + transfer-in + goalWithdraw + ...
+  get_transfers(wallet_sync_id=None, days=None, start_date=None, end_date=None, limit=None, include_in_report=None) → list[dict]
+    # Only type=transfer transactions
+  get_recent(wallet_sync_id=None, limit=10, include_in_report=None) → list[dict]
+    # Last N transactions ordered by date desc. Use for "recent transactions"
+  get_by_date_range(wallet_sync_id=None, start_date=None, end_date=None, type_group=None, include_in_report=None) → list[dict]
+    # Transactions within date range. Dates as "YYYY-MM-DD"
+  get_transactions(...) → list[dict]  # advanced: for custom type/type_group filters
+
+  # Shared keys across all transaction methods:
+  #   id, sync_id, type(raw), type_group, amount(Decimal), date, note, destination_note,
+  #   wallet_sync_id, destination_wallet_sync_id, category_sync_id, category_name,
+  #   display_category(str|None) — use for labels/grouping; auto-labeled when category_name is null:
+  #     goalDeposit→"ฝากเงิน", goalWithdraw→"ถอนเงิน", transfer→"โอนเงิน",
+  #     creditCardPay→"จ่ายบัตรเครดิต", creditCardCashAdvance→"เบิกเงินสดบัตรเครดิต", creditCardCashback→"เงินคืนบัตรเครดิต"
+  #   currency_code, currency_symbol, converted_amount(Decimal|None),
+  #   destination_currency_code, destination_currency_symbol, destination_converted_amount(Decimal|None),
+  #   exchange_rate(Decimal|None), effect_on_wallet(int), effect_on_destination(int),
+  #   is_recurring(bool), recurring_frequency(str|None), recurring_transaction_sync_id(str|None),
+  #   include_in_report(bool), status(str),
+  #   icon(dict|None) — {"bg": "0xFF...", "type": "asset", "value": "assets/..."} or None
+  #   tags(list[dict]) — each: {"sync_id": str, "name": str}; empty list if no tags
   # IMPORTANT: use t["currency_code"] as unit for each transaction — NOT the wallet's currency
+  # wallet_sync_id: MANDATORY when user mentions a specific wallet name
+
+# Transaction aggregation (sync — no await needed):
+total_expenses(transactions) → Decimal  # sum of effect_on_wallet < 0
+total_income(transactions) → Decimal   # sum of effect_on_wallet > 0
+net_change(transactions) → Decimal     # income - expenses
+group_by_category(transactions) → dict  # {display_category: [txns]}
+group_by_date(transactions) → dict     # {"YYYY-MM-DD": [txns]}
+group_by_currency(transactions) → dict  # {currency_code: [txns]}
+sum_by_category(transactions) → dict   # {display_category: total Decimal}
+sum_by_currency(transactions) → dict   # {currency_code: total Decimal}
+filter_by_tags(transactions, tag_names: list[str]) → list[dict]
+filter_by_type(transactions, types: str|list[str]) → list[dict]
+balance_from_transactions(initial_balance: Decimal, transactions) → Decimal
 
 Decimal, ROUND_HALF_UP  — arithmetic
 defaultdict, Counter    — from collections, ready to use
@@ -114,8 +118,8 @@ async def main():
     if not target:
         return {"status": "completed", "result": "0", "breakdown": [],
                 "metadata": {"confidence": "high", "caveat": "wallet not found"}}
-    # Step 2: fetch with wallet_sync_id + type filter (NEVER search by note text)
-    txns = await wallet.get_transactions(wallet_sync_id=target["sync_id"], type="income", start_date="2026-01-01")
+    # Step 2: fetch with wallet_sync_id + intent-based method (NEVER search by note text)
+    txns = await transaction.get_income(wallet_sync_id=target["sync_id"], start_date="2026-01-01")
     breakdown = []
     for t in txns:
         notes = " | ".join(filter(None, [t.get("note"), t.get("destination_note")]))
@@ -132,10 +136,9 @@ async def main():
     if not target:
         return {"status": "completed", "result": "0", "breakdown": [],
                 "metadata": {"confidence": "high", "caveat": "wallet not found"}}
-    # Step 2: fetch with wallet_sync_id — NEVER omit this
-    txns = await wallet.get_transactions(
+    # Step 2: use get_expenses — wallet_sync_id MANDATORY
+    txns = await transaction.get_expenses(
         wallet_sync_id=target["sync_id"],   # ← MANDATORY — scopes to this wallet only
-        type_group="expense",
         start_date="2026-03-01", end_date="2026-03-31",
     )
     totals = defaultdict(Decimal)
@@ -151,8 +154,7 @@ async def main():
     # WRONG — bare function call: get_all_balances()  ← NameError
     # WRONG — filter by note: if "pad shop" in t.get("note","")  ← use wallet_sync_id instead
     # WRONG — fetch all wallets then filter in Python:
-    #   txns = await wallet.get_transactions(type_group="expense", start_date="...")
-    #   for t in txns: if t["wallet_sync_id"] == target["sync_id"]  ← fetches ALL wallets, slow & wrong totals
+    #   txns = await transaction.get_expenses(start_date="...")  # ← fetches ALL wallets, slow & wrong totals
 ```
 
 ## Rules
@@ -164,7 +166,7 @@ async def main():
 5. If previous step errored, read the error and fix the code
 6. Multi-currency wallets: return `"completed"` — list each wallet with its own `w["currency"]` in breakdown; do NOT sum across currencies without FX rates
 7. Empty result (no wallets, no transactions): return `"completed"` with `result: "0"` — `"partial"` means data fetch failed, not empty data
-8. Named wallet = MANDATORY wallet_sync_id: if user mentions a wallet name ("ครอบครัว", "Pad shop", etc.), resolve its sync_id first (Pattern 2/3) and ALWAYS pass `wallet_sync_id=` to get_transactions — NEVER fetch all transactions and filter in Python
+8. Named wallet = MANDATORY wallet_sync_id: if user mentions a wallet name ("ครอบครัว", "Pad shop", etc.), resolve its sync_id first (Pattern 2/3) and ALWAYS pass `wallet_sync_id=` to the intent-based method — NEVER fetch all transactions and filter in Python
 9. Multi-currency aggregation (applies to ALL groupings — by category, by tag, by date, by wallet, income/expense totals, etc.):
    - ALWAYS use `t["amount"]` (native transaction amount) — NEVER `t["converted_amount"]` for per-group totals
    - ALWAYS group by `(key, t["currency_code"])` — NEVER merge amounts across currencies

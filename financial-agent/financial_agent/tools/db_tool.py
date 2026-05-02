@@ -3,7 +3,7 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-_MAX_ROWS = 500
+_MAX_ROWS = 200
 
 _COMMENT_RE = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
 _FORBIDDEN_RE = re.compile(
