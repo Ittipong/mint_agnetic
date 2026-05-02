@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from financial_agent.executor import ExecutionResult
-from financial_agent.loop import BreakdownItem, CodeActLoop, LoopResult, ToolResult
+from financial_agent.loop import CodeActLoop, LoopResult, ToolResult
 from financial_agent.reasoner import ReasonerResult
 
 
@@ -176,7 +176,7 @@ def test_tool_content_completed_full():
     tr = ToolResult(
         status="completed",
         result="50000",
-        breakdown=[BreakdownItem("Food", "10000"), BreakdownItem("Travel", "40000")],
+        breakdown=[{"label": "Food", "value": "10000"}, {"label": "Travel", "value": "40000"}],
         confidence="high",
         data_range="2026-04",
         caveat="estimate only",
@@ -205,7 +205,7 @@ def test_tool_result_to_dict_completed():
     tr = ToolResult(
         status="completed",
         result="5000",
-        breakdown=[BreakdownItem("A", "3000"), BreakdownItem("B", "2000")],
+        breakdown=[{"label": "A", "value": "3000"}, {"label": "B", "value": "2000"}],
         confidence="medium",
     )
     d = tr.to_dict()

@@ -42,13 +42,6 @@ class StepResult:
 
 
 @dataclass
-class BreakdownItem:
-    label: str
-    value: str
-    unit: str = ""
-
-
-@dataclass
 class ToolResult:
     """Clean response format for LangGraph ReAct agent tool calls.
 
@@ -59,7 +52,7 @@ class ToolResult:
     status: Literal["completed", "partial", "error"]
     result: str | None = None
     currency: str = "THB"
-    breakdown: list[BreakdownItem] = field(default_factory=list)
+    breakdown: list[dict] = field(default_factory=list)
     confidence: str | None = None
     data_range: str | None = None
     caveat: str | None = None
@@ -71,7 +64,7 @@ class ToolResult:
             d["result"] = self.result
             d["currency"] = self.currency
         if self.breakdown:
-            d["breakdown"] = [{"label": b.label, "value": b.value, "unit": b.unit} for b in self.breakdown]
+            d["breakdown"] = self.breakdown
         if self.confidence:
             d["confidence"] = self.confidence
         if self.data_range:
@@ -97,8 +90,7 @@ class ToolResult:
         if self.breakdown:
             lines.append("breakdown:")
             for item in self.breakdown:
-                unit = item.unit or self.currency
-                lines.append(f"  - {item.label}: {item.value} {unit}")
+                lines.append(f"  {item}")
         if self.caveat:
             lines.append(f"caveat: {self.caveat}")
         if self.status == "partial":
@@ -123,18 +115,10 @@ class LoopResult:
                 error=str(self.metadata.get("error", "unknown error")),
             )
 
-        breakdown = [
-            BreakdownItem(
-                label=item.get("label", ""),
-                value=str(item.get("value", "")),
-                unit=str(item.get("unit", "")),
-            )
-            for item in self.breakdown
-        ]
         return ToolResult(
             status=self.status,  # type: ignore[arg-type]
             result=str(self.result) if self.result is not None else None,
-            breakdown=breakdown,
+            breakdown=self.breakdown,
             confidence=self.metadata.get("confidence"),
             data_range=self.metadata.get("data_range"),
             caveat=self.metadata.get("caveat"),

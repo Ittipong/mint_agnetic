@@ -31,46 +31,40 @@ class WalletTools:
         self._sf = session_factory
         self._user_id = user_id
 
-    async def get_wallets(self) -> list[dict]:
-        """Return all non-deleted wallets for the user.
+    async def get_wallets(
+        self,
+        id: str | None = None,
+        search_text: str | None = None,
+    ) -> list[dict]:
+        """Return wallets with optional filtering.
 
-        Use when: user asks "มีกระเป๋าอะไรบ้าง", "what wallets", "list wallets", "ดูกระเป๋า"
+        Returns list of wallet dicts with keys: wallet_id, wallet_name, wallet_balance, wallet_currency, wallet_category, wallet_icon. Use these keys directly - DO NOT remap.
+
+        Args:
+            id: Exact match on wallet_id (uuid). Use when user provides specific wallet ID.
+            search_text: Fuzzy match on wallet_name (case-insensitive partial match). Use when user asks about a specific wallet by name.
+
+        Use when: user asks about wallets. Examples:
+            - "มีกระเป๋าอะไรบ้าง" → get_wallets()
+            - "Pad shop มีเท่าไหร่" → get_wallets(search_text="Pad shop")
+            - "กระเป๋า id=xxx" → get_wallets(id="xxx")
         """
         async with self._sf() as session:
+            conditions = ["gw.user_id = :user_id", "gw.deleted_at IS NULL"]
+            params: dict = {"user_id": str(self._user_id)}
+
+            if id:
+                conditions.append("gw.sync_id::text = :wallet_id")
+                params["wallet_id"] = id
+
+            if search_text:
+                conditions.append("LOWER(gw.name) LIKE LOWER(:search_text)")
+                params["search_text"] = f"%{search_text}%"
+
+            where_clause = " AND ".join(conditions)
+
             result = await session.execute(
-                text("""
-                    SELECT id, sync_id, name, initial_balance, cached_balance,
-                           currency, wallet_category, created_at
-                    FROM general_wallets
-                    WHERE user_id = :user_id AND deleted_at IS NULL
-                    ORDER BY created_at
-                """),
-                {"user_id": self._user_id},
-            )
-            rows = result.mappings().all()
-            return [
-                {
-                    **dict(row),
-                    "id": str(row["id"]),
-                    "sync_id": str(row["sync_id"]),
-                    "initial_balance": Decimal(str(row["initial_balance"])),
-                    "cached_balance": Decimal(str(row["cached_balance"])),
-                }
-                for row in rows
-            ]
-
-    async def get_all_balances(self) -> list[dict]:
-        """Return all wallets with balance computed from initial_balance + transactions up to today (past only, no future).
-
-        Balance formula per docs/balance_calculation.md:
-        balance = initial_balance + SUM(effect_on_wallet * converted_amount)
-        Only confirmed transactions with date <= today are included.
-
-        Use when: user asks "ยอดเงินทุกกระเป๋า", "ดูยอดเงิน", "wallet balances", "balance of all wallets"
-        """
-        async with self._sf() as session:
-            result = await session.execute(
-                text("""
+                text(f"""
                     SELECT gw.sync_id::text AS sync_id,
                            gw.name,
                            gw.currency,
@@ -93,63 +87,21 @@ class WalletTools:
                         AND t.is_deleted = false
                         AND t.status = 'confirmed'
                         AND t.date <= CURRENT_DATE
-                    WHERE gw.user_id = :user_id
-                      AND gw.deleted_at IS NULL
+                    WHERE {where_clause}
                     GROUP BY gw.sync_id, gw.name, gw.currency, gw.wallet_category, gw.initial_balance, gw.icon, gw.created_at
                     ORDER BY gw.created_at
                 """),
-                {"user_id": str(self._user_id)},
+                params,
             )
             rows = result.mappings().all()
             return [
                 {
-                    "sync_id": row["sync_id"],
-                    "name": row["name"],
-                    "currency": row["currency"],
+                    "wallet_id": row["sync_id"],
+                    "wallet_name": row["name"],
+                    "wallet_currency": row["currency"],
                     "wallet_category": row["wallet_category"],
-                    "initial_balance": Decimal(str(row["initial_balance"])),
-                    "icon": row["icon"],
-                    "balance": Decimal(str(row["balance"])) if row["balance"] is not None else Decimal("0"),
+                    "wallet_icon": row["icon"],
+                    "wallet_balance": (Decimal(str(row["balance"])).quantize(Decimal("0.01")) if row["balance"] is not None else Decimal("0")),
                 }
                 for row in rows
             ]
-
-    async def get_balance(self, wallet_sync_id: str) -> Decimal:
-        """Return balance for a specific wallet (past transactions only, up to today).
-
-        Balance formula per docs/balance_calculation.md:
-        balance = initial_balance + SUM(effect_on_wallet * converted_amount)
-        Only confirmed transactions with date <= today are included.
-
-        Use when: user asks about a specific named wallet's balance. Requires wallet_sync_id (resolve via get_all_balances or get_wallets first if unknown).
-        """
-        async with self._sf() as session:
-            result = await session.execute(
-                text("""
-                    SELECT gw.initial_balance +
-                           COALESCE(SUM(
-                               CASE
-                                   WHEN t.wallet_sync_id = gw.sync_id::text
-                                       THEN t.effect_on_wallet * COALESCE(t.converted_amount, t.amount)
-                                   WHEN t.destination_wallet_sync_id = gw.sync_id::text
-                                       THEN COALESCE(t.effect_on_destination, 0) * COALESCE(t.destination_converted_amount, t.amount)
-                                   ELSE 0
-                               END
-                           ), 0) AS balance
-                    FROM general_wallets gw
-                    LEFT JOIN transactions t
-                        ON (t.wallet_sync_id = gw.sync_id::text OR t.destination_wallet_sync_id = gw.sync_id::text)
-                        AND t.is_deleted = false
-                        AND t.status = 'confirmed'
-                        AND t.date <= CURRENT_DATE
-                    WHERE gw.sync_id::text = :wallet_sync_id
-                      AND gw.user_id = :user_id
-                      AND gw.deleted_at IS NULL
-                    GROUP BY gw.initial_balance
-                """),
-                {"wallet_sync_id": str(wallet_sync_id), "user_id": str(self._user_id)},
-            )
-            row = result.mappings().first()
-            if not row:
-                return Decimal("0")
-            return Decimal(str(row["balance"])) if row["balance"] is not None else Decimal("0")
