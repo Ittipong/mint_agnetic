@@ -9,7 +9,7 @@ from datetime import datetime, date, timedelta, timezone
 from typing import Any
 
 from financial_agent.tools.schema_builder import ToolDef, build_async_method_schema, build_sync_function_schema
-from financial_agent.tools.wallet_tools import WalletTools, running_balance, net_worth
+from financial_agent.tools.wallet_tools import WalletTools
 from financial_agent.tools.transaction_tools import TransactionTools
 from financial_agent.tools.db_tool import DBTools
 from financial_agent.tools.transaction_functions import (
@@ -68,8 +68,6 @@ class ToolRegistry:
                 namespace[prefix] = registered.instance
 
         # Add sync functions
-        namespace["running_balance"] = running_balance
-        namespace["net_worth"] = net_worth
         namespace["total_expenses"] = total_expenses
         namespace["total_income"] = total_income
         namespace["net_change"] = net_change
@@ -187,8 +185,6 @@ def build_tool_registry(session_factory, user_id: str) -> ToolRegistry:
 
     # Register sync functions
     sync_funcs = {
-        "running_balance": running_balance,
-        "net_worth": net_worth,
         "total_expenses": total_expenses,
         "total_income": total_income,
         "net_change": net_change,

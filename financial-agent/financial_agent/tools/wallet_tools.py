@@ -1,9 +1,8 @@
 from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
-from financial_agent.tools.wallet_functions import running_balance, net_worth
 
-__all__ = ["WalletTools", "running_balance", "net_worth"]
+__all__ = ["WalletTools"]
 
 _BALANCE_CASE_SQL = """
     COALESCE(SUM(
@@ -35,19 +34,20 @@ class WalletTools:
         self,
         id: str | None = None,
         search_text: str | None = None,
+        include_balance: bool = True,
     ) -> list[dict]:
-        """Return wallets with optional filtering.
-
-        Returns list of wallet dicts with keys: wallet_id, wallet_name, wallet_balance, wallet_currency, wallet_category, wallet_icon. Use these keys directly - DO NOT remap.
+        """Return wallets with optional filtering. Returns list of dicts with keys: wallet_id, wallet_name, wallet_balance (Decimal), wallet_currency, wallet_category, wallet_icon, wallet_ai_intension. Use these exact keys - DO NOT use name/balance/currency/category/icon/sync_id.
 
         Args:
             id: Exact match on wallet_id (uuid). Use when user provides specific wallet ID.
             search_text: Fuzzy match on wallet_name (case-insensitive partial match). Use when user asks about a specific wallet by name.
+            include_balance: If True (default), joins transactions to calculate real balance (slower). If False, returns initial_balance as balance (faster, no transaction join).
 
         Use when: user asks about wallets. Examples:
-            - "มีกระเป๋าอะไรบ้าง" → get_wallets()
-            - "Pad shop มีเท่าไหร่" → get_wallets(search_text="Pad shop")
-            - "กระเป๋า id=xxx" → get_wallets(id="xxx")
+            - "what wallets do I have" → get_wallets(include_balance=False)
+            - "list all wallet names" → get_wallets(include_balance=False)
+            - "how much in Pad shop" → get_wallets(search_text="Pad shop")
+            - "wallet id=xxx" → get_wallets(id="xxx")
         """
         async with self._sf() as session:
             conditions = ["gw.user_id = :user_id", "gw.deleted_at IS NULL"]
@@ -63,36 +63,57 @@ class WalletTools:
 
             where_clause = " AND ".join(conditions)
 
-            result = await session.execute(
-                text(f"""
-                    SELECT gw.sync_id::text AS sync_id,
-                           gw.name,
-                           gw.currency,
-                           gw.wallet_category,
-                           gw.initial_balance,
-                           gw.icon,
-                           gw.initial_balance +
-                           COALESCE(SUM(
-                               CASE
-                                   WHEN t.wallet_sync_id = gw.sync_id::text
-                                       THEN t.effect_on_wallet * COALESCE(t.converted_amount, t.amount)
-                                   WHEN t.destination_wallet_sync_id = gw.sync_id::text
-                                       THEN COALESCE(t.effect_on_destination, 0) * COALESCE(t.destination_converted_amount, t.amount)
-                                   ELSE 0
-                               END
-                           ), 0) AS balance
-                    FROM general_wallets gw
-                    LEFT JOIN transactions t
-                        ON (t.wallet_sync_id = gw.sync_id::text OR t.destination_wallet_sync_id = gw.sync_id::text)
-                        AND t.is_deleted = false
-                        AND t.status = 'confirmed'
-                        AND t.date <= CURRENT_DATE
-                    WHERE {where_clause}
-                    GROUP BY gw.sync_id, gw.name, gw.currency, gw.wallet_category, gw.initial_balance, gw.icon, gw.created_at
-                    ORDER BY gw.created_at
-                """),
-                params,
-            )
+            if include_balance:
+                # Slow: joins transactions to calculate real balance
+                result = await session.execute(
+                    text(f"""
+                        SELECT gw.sync_id::text AS sync_id,
+                               gw.name,
+                               gw.currency,
+                               gw.wallet_category,
+                               gw.initial_balance,
+                               gw.icon,
+                               gw.ai_message as wallet_ai_intension,
+                               gw.initial_balance +
+                               COALESCE(SUM(
+                                   CASE
+                                       WHEN t.wallet_sync_id = gw.sync_id::text
+                                           THEN t.effect_on_wallet * COALESCE(t.converted_amount, t.amount)
+                                       WHEN t.destination_wallet_sync_id = gw.sync_id::text
+                                           THEN COALESCE(t.effect_on_destination, 0) * COALESCE(t.destination_converted_amount, t.amount)
+                                       ELSE 0
+                                   END
+                               ), 0) AS balance
+                        FROM general_wallets gw
+                        LEFT JOIN transactions t
+                            ON (t.wallet_sync_id = gw.sync_id::text OR t.destination_wallet_sync_id = gw.sync_id::text)
+                            AND t.is_deleted = false
+                            AND t.status = 'confirmed'
+                            AND t.date <= CURRENT_DATE
+                        WHERE {where_clause}
+                        GROUP BY gw.sync_id, gw.name, gw.currency, gw.wallet_category, gw.initial_balance, gw.icon, gw.ai_message, gw.created_at
+                        ORDER BY gw.created_at
+                    """),
+                    params,
+                )
+            else:
+                # Fast: no transaction join, returns initial_balance
+                result = await session.execute(
+                    text(f"""
+                        SELECT gw.sync_id::text AS sync_id,
+                               gw.name,
+                               gw.currency,
+                               gw.wallet_category,
+                               gw.initial_balance,
+                               gw.icon,
+                               gw.ai_message as wallet_ai_intension,
+                               gw.initial_balance AS balance
+                        FROM general_wallets gw
+                        WHERE {where_clause}
+                        ORDER BY gw.created_at
+                    """),
+                    params,
+                )
             rows = result.mappings().all()
             return [
                 {
@@ -102,6 +123,7 @@ class WalletTools:
                     "wallet_category": row["wallet_category"],
                     "wallet_icon": row["icon"],
                     "wallet_balance": (Decimal(str(row["balance"])).quantize(Decimal("0.01")) if row["balance"] is not None else Decimal("0")),
+                    "wallet_ai_intension": row["wallet_ai_intension"],
                 }
                 for row in rows
             ]

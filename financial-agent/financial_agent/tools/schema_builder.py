@@ -81,6 +81,15 @@ def _extract_use_when(doc: str) -> str | None:
     return None
 
 
+def _extract_returns(doc: str) -> str | None:
+    """Extract 'Returns:' section from docstring, return None if not present."""
+    for line in doc.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("Returns:"):
+            return stripped[len("Returns:"):].strip()
+    return None
+
+
 def _build_description_from_docstring(func: Callable, param_names: list[str], param_defaults: dict) -> str:
     """Build description from function docstring + parameter context."""
     doc = inspect.getdoc(func) or ""
@@ -94,6 +103,10 @@ def _build_description_from_docstring(func: Callable, param_names: list[str], pa
         use_when = _extract_use_when(doc)
         if use_when:
             descriptions.append(f"Use when: {use_when}")
+
+        returns = _extract_returns(doc)
+        if returns:
+            descriptions.append(f"Returns: {returns}")
 
     return " ".join(descriptions) if descriptions else f"Call {func.__name__}"
 

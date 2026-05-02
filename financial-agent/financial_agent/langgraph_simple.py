@@ -68,9 +68,10 @@ def format_response(state: AgentState) -> AgentState:
     if breakdown:
         lines.append("\nรายละเอียด:")
         for item in breakdown:
-            label = item.get("label", "")
-            value = item.get("value", "")
-            unit = item.get("unit", "THB")
+            # Support both old format (label/value/unit) and new format (wallet_name/wallet_balance/wallet_currency)
+            label = item.get("wallet_name") or item.get("label", "")
+            value = item.get("wallet_balance") or item.get("value", "")
+            unit = item.get("wallet_currency") or item.get("unit", "THB")
             lines.append(f"  • {label}: {value} {unit}")
     if metadata.get("caveat"):
         lines.append(f"\nหมายเหตุ: {metadata['caveat']}")

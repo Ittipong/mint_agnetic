@@ -3,7 +3,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, date, timedelta, timezone
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from financial_agent.tools.wallet_tools import WalletTools, running_balance, net_worth
+from financial_agent.tools.wallet_tools import WalletTools
 from financial_agent.tools.transaction_tools import TransactionTools
 from financial_agent.tools.db_tool import DBTools
 from financial_agent.tools.transaction_functions import (
