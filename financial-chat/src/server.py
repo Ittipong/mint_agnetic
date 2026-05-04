@@ -118,6 +118,13 @@ async def _stream_graph(
             kind = event["event"]
 
             if kind == "on_chat_model_stream":
+                # Only stream tokens from the user-facing reasoner. The
+                # planner / codeact-step / time-resolver fallback also call
+                # LLMs (with structured output) — their tokens are internal
+                # plumbing and should NOT bleed into the user's chat bubble.
+                node = (event.get("metadata") or {}).get("langgraph_node")
+                if node != "reason":
+                    continue
                 chunk = event["data"]["chunk"]
                 if chunk.content:
                     yield _sse({"type": "token", "content": chunk.content})
@@ -130,12 +137,30 @@ async def _stream_graph(
                 _debug_log("STREAM", "Tool ended", tool=event["name"])
                 yield _sse({"type": "tool_end", "tool": event["name"]})
 
+            elif kind == "on_custom_event" and event.get("name") == "structured_data":
+                # The analyze subgraph dispatched its UI payload via
+                # `adispatch_custom_event` — this surfaces in LangSmith as
+                # a first-class event AND lets us forward it to the SSE
+                # stream without parsing message internals.
+                payload = event.get("data")
+                if payload is not None:
+                    _debug_log(
+                        "STREAM",
+                        "data event",
+                        kind=payload.get("kind"),
+                        metric=payload.get("metric"),
+                        rows=len(payload.get("rows") or []) if isinstance(payload.get("rows"), list) else None,
+                    )
+                    yield _sse({"type": "data", "payload": payload})
+
         _debug_log("STREAM", "Done", user_id=user_id)
         yield _sse({"type": "done"})
 
     except Exception as exc:
         _debug_log("STREAM", "Error", error=str(exc), user_id=user_id)
         yield _sse({"type": "error", "message": str(exc)})
+
+
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

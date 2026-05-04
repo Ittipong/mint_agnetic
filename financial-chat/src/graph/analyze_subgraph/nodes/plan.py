@@ -45,6 +45,18 @@ Output rules:
     "รายจ่ายของ budget X", "รายการในงบ X", "ดูรายการของงบ", "transactions in
     budget X", "top X รายการของงบ". Use this instead of `list` whenever the
     user references a budget by name.
+  - `goal_list` — user wants to see savings goals they've set up. Trigger
+    phrases: "เป้าหมายการออม", "savings goals", "ดูเป้าหมาย", "มีเป้าหมายอะไรบ้าง".
+  - `goal_progress` — user wants to see how close they are to a goal
+    (current balance, % completed, days left, daily required to hit target).
+    Trigger phrases: "เป้าหมายเก็บได้กี่ %", "เก็บได้เท่าไหร่แล้ว",
+    "ต้องเก็บวันละเท่าไหร่", "ใกล้ถึงเป้าหรือยัง", "savings progress".
+  - `goal_transactions` — drill-down: deposits/withdrawals on a goal.
+    Trigger phrases: "เคยใส่เงิน goal เท่าไหร่", "transactions in goal X".
+
+  Goal rule: ANY question that mentions "เป้าหมาย" / "goal" / "ออม" /
+  "เก็บเงิน" / "saving plan" must use a goal_* metric, never sum_*.
+
   - `freeform_codeact` — escape hatch for questions that NO single metric
     above can answer alone. Pick this whenever the answer requires
     **combining or comparing the output of more than one query**.
@@ -88,12 +100,38 @@ metric=`sum_by_wallet` set group_by="wallet".
 
 **currency** — "ALL" unless the user explicitly says THB/USD.
 
+**convert_to_thb** — set to True when the user wants a single THB number
+across mixed-currency data. The aggregation drops the per-currency split and
+returns one THB total via the hybrid FX chain (per-tx converted_amount /
+exchange_rate / today's currencies.rate). Trigger phrases:
+  - "รวมเป็นบาท", "คิดเป็นบาท", "เป็น THB ทั้งหมด", "in THB total",
+    "convert to THB"
+  - "รายจ่ายทั้งหมดกี่บาท" / "spent how much total in baht"
+  - When user expects ONE number and the user has multi-currency data.
+Leave False (default) when:
+  - User asks per-wallet / per-currency view
+  - User explicitly mentions a single currency (use `currency` field instead)
+
 **budget_name_phrase** — set when the user names a specific budget. Trigger:
 "งบ<X>" / "budget for X" / "<X> budget". Examples:
   - "งบอาหารเหลือเท่าไหร่" → metric=`budget_remaining`, budget_name_phrase="อาหาร"
   - "ดูงบประมาณรายเดือน" → metric=`budget_remaining`, budget_name_phrase="รายเดือน"
   - "ตรวจสอบงบประมาณ" (no specific name) → budget_name_phrase=null
 The phrase is matched as ILIKE %X%, so partial names work.
+
+**goal_name_phrase** — set when the user names a specific savings goal.
+  - "เป้าหมาย Japan เก็บได้กี่ %" → metric=`goal_progress`, goal_name_phrase="Japan"
+  - "เคยใส่เงิน goal เที่ยวอังกฤษ" → metric=`goal_transactions`, goal_name_phrase="เที่ยวอังกฤษ"
+  - "เป้าหมายทั้งหมด" → goal_name_phrase=null
+Use the canonical goal name from the catalog whenever recognizable.
+
+**transaction_type** — set when the user clearly asks for one specific type
+on `metric=list`. Maps directly to the DB column. Trigger phrases:
+  - "รายการรายรับ" / "income transactions" / "list of income" → "income"
+  - "รายการรายจ่าย" / "expense transactions" / "list of expenses" → "expense"
+  - "รายการโอน" / "transfer list" / "การโอนเงิน" → "transfer"
+  - "จ่ายบัตรเครดิต" / "credit card payments" → "creditCardPay"
+Leave null when the user asks for "all transactions" or doesn't specify.
 
 **order_by + limit** — control the sort and cap on metric=`list` results:
   - "top 5 ใหญ่สุด / เยอะที่สุด / สูงสุด" → order_by=`amount_desc`, limit=5

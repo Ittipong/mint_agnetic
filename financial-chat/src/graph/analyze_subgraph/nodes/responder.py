@@ -114,10 +114,53 @@ def _format_result(spec: QuerySpec, rows: list[ExecRow]) -> str:
     body = _body(spec, rows)
     parts = [header, body]
     # `list` and `budget_transactions` share the row-level breakdown format —
-    # _body() already emitted the summary line; we append the per-tx detail.
+    # _body() already emitted the summary line; we append (a) a code-computed
+    # per-category / per-wallet aggregate so the downstream LLM never has to
+    # group rows by hand, and (b) the per-tx detail for transparency.
     if spec.metric in _LIST_METRICS:
+        summaries = _row_aggregates(rows)
+        if summaries:
+            parts.append(summaries)
         parts.append(_breakdown(rows))
     return "\n".join(p for p in parts if p)
+
+
+def _row_aggregates(rows: list[ExecRow]) -> str:
+    """Pre-compute per-category and per-wallet totals from list-style rows.
+
+    The LLM gets these as plain text so a question like 'ใช้ไปกับหมวดอะไรเยอะ
+    ที่สุด' or 'wallet ไหนสูงสุด' can be answered by copying numbers verbatim
+    — never by summing the rows itself. Multi-currency stays separate (we
+    bucket by (key, currency) so we never mix THB and USD into one figure).
+    """
+    by_cat: dict[tuple[str, str], Decimal] = {}
+    by_wallet: dict[tuple[str, str], Decimal] = {}
+    for r in rows:
+        amount = _to_decimal(r.amount) or Decimal(0)
+        ccy = r.currency or "THB"
+        cat = r.extra.get("category_name") or "(uncategorized)"
+        wallet = r.extra.get("wallet_name") or "(unknown wallet)"
+        by_cat[(cat, ccy)] = by_cat.get((cat, ccy), Decimal(0)) + amount
+        by_wallet[(wallet, ccy)] = by_wallet.get((wallet, ccy), Decimal(0)) + amount
+
+    sections: list[str] = []
+    if len(by_cat) > 1 or (len(by_cat) == 1 and len(rows) > 1):
+        lines = ["Summary by category:"]
+        for (cat, ccy), total in sorted(
+            by_cat.items(), key=lambda kv: (-kv[1], kv[0][0])
+        ):
+            lines.append(f"  - {cat}: {decimal_to_display(total)} {ccy}".rstrip())
+        sections.append("\n".join(lines))
+
+    if len(by_wallet) > 1 or (len(by_wallet) == 1 and len(rows) > 1):
+        lines = ["Summary by wallet:"]
+        for (wallet, ccy), total in sorted(
+            by_wallet.items(), key=lambda kv: (-kv[1], kv[0][0])
+        ):
+            lines.append(f"  - {wallet}: {decimal_to_display(total)} {ccy}".rstrip())
+        sections.append("\n".join(lines))
+
+    return "\n".join(sections)
 
 
 def _header(spec: QuerySpec) -> str:
@@ -136,6 +179,11 @@ def _header(spec: QuerySpec) -> str:
         bits.append("tags=" + ", ".join(t.display_name for t in spec.tags))
     if spec.currency != "ALL":
         bits.append(f"currency={spec.currency}")
+    if spec.convert_to_thb:
+        # Mark the result as FX-converted so the AI cannot mistake it for
+        # a native-currency total. The note is intentionally explicit so the
+        # downstream LLM relays the caveat to the user.
+        bits.append("currency=THB(converted at today's rate)")
     return "[" + " | ".join(bits) + "]"
 
 
@@ -156,7 +204,80 @@ def _body(spec: QuerySpec, rows: list[ExecRow]) -> str:
         return _format_budget_list(rows)
     if spec.metric == "budget_remaining":
         return _format_budget_remaining(rows)
+    if spec.metric == "goal_list":
+        return _format_goal_list(rows)
+    if spec.metric == "goal_progress":
+        return _format_goal_progress(rows)
+    if spec.metric == "goal_transactions":
+        return _format_list_summary(rows)
     return ""
+
+
+def _format_goal_list(rows: list[ExecRow]) -> str:
+    lines = ["Goals:"]
+    for r in rows:
+        d = r.extra
+        amount = decimal_to_display(_to_decimal(r.amount))
+        ccy = r.currency or d.get("currency", "")
+        target_date = d.get("target_date") or "(no deadline)"
+        closed = " [closed]" if d.get("is_closed") else ""
+        lines.append(
+            f"  - {d.get('name','(unnamed)')}: target={amount} {ccy} | "
+            f"target_date={target_date}{closed}".rstrip()
+        )
+    return "\n".join(lines)
+
+
+def _format_goal_progress(rows: list[ExecRow]) -> str:
+    """One line per goal: name | target | balance | remaining | pct | status |
+    days_left | daily_required. Status derived in code (`achieved` / `expired` /
+    `on_track` / `behind`) so the LLM never has to classify it."""
+    lines = ["Goals progress:"]
+    for r in rows:
+        d = r.extra
+        target = _to_decimal(r.amount)
+        balance = _to_decimal(d.get("balance"))
+        remaining = _to_decimal(d.get("remaining_to_target"))
+        pct = _to_decimal(d.get("pct_completed"))
+        ccy = r.currency or d.get("currency", "")
+        days_left = d.get("days_left")
+        daily_required = d.get("daily_required")
+        status = _goal_status(d, pct)
+        if daily_required is None:
+            daily_str = "expired" if status == "expired" else "n/a"
+        else:
+            daily_str = (
+                f"{decimal_to_display(_to_decimal(daily_required))} {ccy}/day"
+            )
+        lines.append(
+            f"  - {d.get('name','(unnamed)')}: "
+            f"target={decimal_to_display(target)} {ccy} | "
+            f"balance={decimal_to_display(balance)} {ccy} | "
+            f"remaining={decimal_to_display(remaining)} {ccy} | "
+            f"pct_completed={pct or 0}% | status={status} | "
+            f"days_left={days_left if days_left is not None else 'n/a'} | "
+            f"daily_required={daily_str} | "
+            f"target_date={d.get('target_date') or '(no deadline)'}"
+        )
+    return "\n".join(lines)
+
+
+def _goal_status(extra: dict, pct) -> str:
+    if extra.get("is_closed"):
+        return "closed"
+    if extra.get("achieved_at"):
+        return "achieved"
+    target_date = extra.get("target_date")
+    days_left = extra.get("days_left")
+    try:
+        p = float(pct) if pct is not None else 0.0
+    except (TypeError, ValueError):
+        p = 0.0
+    if p >= 100:
+        return "achieved"
+    if target_date and (days_left == 0 or days_left is None):
+        return "expired"
+    return "on_track" if p >= 50 else "behind"
 
 
 def _format_budget_list(rows: list[ExecRow]) -> str:

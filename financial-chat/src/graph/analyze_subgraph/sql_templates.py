@@ -84,6 +84,45 @@ def _base_params(spec: QuerySpec, user_id: str) -> list[Any]:
     return [user_id, spec.time_range.start, spec.time_range.end]
 
 
+# ── Hybrid FX expression ─────────────────────────────────────────────────────
+
+
+# Best-effort transaction → THB amount. Priority:
+#   1. native THB → use raw amount.
+#   2. user-recorded converted_amount when it differs from raw amount
+#      (rules out the case where the input pipeline left it equal to amount).
+#   3. per-tx exchange_rate.
+#   4. today's rate from the currencies table.
+#   5. final fallback: raw amount (treats as THB; should not normally hit).
+#
+# Uses table aliases `t` (transactions) and `c` (currencies) — every caller
+# that uses this expression must JOIN currencies as `c` on the tx currency.
+_AMOUNT_THB_EXPR = """COALESCE(
+    CASE
+        WHEN COALESCE(t.currency_code, 'THB') = 'THB' THEN t.amount::numeric
+        WHEN t.converted_amount IS NOT NULL
+             AND t.converted_amount::numeric <> t.amount::numeric
+            THEN t.converted_amount::numeric
+        ELSE NULL
+    END,
+    CASE
+        WHEN t.exchange_rate IS NOT NULL AND t.exchange_rate > 0
+            THEN t.amount::numeric / t.exchange_rate::numeric
+        ELSE NULL
+    END,
+    t.amount::numeric / NULLIF(c.rate, 0),
+    t.amount::numeric
+)"""
+
+
+def _currency_join() -> str:
+    """JOIN clause for the currencies lookup, only needed when converting."""
+    return (
+        "LEFT JOIN currencies c "
+        "ON c.code = COALESCE(t.currency_code, 'THB')"
+    )
+
+
 # ── Metric builders ──────────────────────────────────────────────────────────
 
 
@@ -92,25 +131,45 @@ def _sum_by_type(spec: QuerySpec, user_id: str, type_value: str) -> tuple[str, l
     params.append(type_value)
     type_idx = len(params)
     extra = _common_filters(spec, params)
-    sql = f"""
-        SELECT
-            COALESCE(t.currency_code, 'THB') AS currency,
-            SUM(t.amount::numeric)           AS amount,
-            COUNT(*)                          AS cnt
-        FROM transactions t
-        JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
-        WHERE w.user_id = $1
-          AND w.deleted_at IS NULL
-          AND t.date >= $2
-          AND t.date <  ($3::date + INTERVAL '1 day')
-          AND t.type = ${type_idx}
-          AND t.is_deleted = false
-          AND t.status = 'confirmed'
-          AND t.include_in_report = true
-          {extra}
-        GROUP BY COALESCE(t.currency_code, 'THB')
-        ORDER BY currency
-    """
+    if spec.convert_to_thb:
+        sql = f"""
+            SELECT
+                'THB'                AS currency,
+                SUM({_AMOUNT_THB_EXPR}) AS amount,
+                COUNT(*)              AS cnt
+            FROM transactions t
+            JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
+            {_currency_join()}
+            WHERE w.user_id = $1
+              AND w.deleted_at IS NULL
+              AND t.date >= $2
+              AND t.date <  ($3::date + INTERVAL '1 day')
+              AND t.type = ${type_idx}
+              AND t.is_deleted = false
+              AND t.status = 'confirmed'
+              AND t.include_in_report = true
+              {extra}
+        """
+    else:
+        sql = f"""
+            SELECT
+                COALESCE(t.currency_code, 'THB') AS currency,
+                SUM(t.amount::numeric)           AS amount,
+                COUNT(*)                          AS cnt
+            FROM transactions t
+            JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
+            WHERE w.user_id = $1
+              AND w.deleted_at IS NULL
+              AND t.date >= $2
+              AND t.date <  ($3::date + INTERVAL '1 day')
+              AND t.type = ${type_idx}
+              AND t.is_deleted = false
+              AND t.status = 'confirmed'
+              AND t.include_in_report = true
+              {extra}
+            GROUP BY COALESCE(t.currency_code, 'THB')
+            ORDER BY currency
+        """
     return sql, params
 
 
@@ -146,9 +205,15 @@ def build_count(spec: QuerySpec, user_id: str) -> tuple[str, list]:
 
 def build_list(spec: QuerySpec, user_id: str) -> tuple[str, list]:
     """Detailed rows. `order_by` + `limit` come from the planner so users can
-    ask for "top 5 by amount" or "latest 20 by date" without a new metric."""
+    ask for "top 5 by amount" or "latest 20 by date" without a new metric.
+    `transaction_type` (income/expense/transfer/creditCardPay) narrows by
+    `t.type` so 'ดูรายการรายรับ' returns income rows only."""
     params = _base_params(spec, user_id)
     extra = _common_filters(spec, params)
+    type_clause = ""
+    if spec.transaction_type is not None:
+        params.append(spec.transaction_type)
+        type_clause = f"AND t.type = ${len(params)}"
     order_clause = (
         "ORDER BY t.amount::numeric DESC, t.date DESC"
         if spec.order_by == "amount_desc"
@@ -173,6 +238,7 @@ def build_list(spec: QuerySpec, user_id: str) -> tuple[str, list]:
           AND t.date <  ($3::date + INTERVAL '1 day')
           AND t.is_deleted = false
           AND t.status = 'confirmed'
+          {type_clause}
           {extra}
         {order_clause}
         LIMIT {cap}
@@ -185,6 +251,11 @@ def build_balance(spec: QuerySpec, user_id: str) -> tuple[str, list]:
 
     initial_balance + sum of (effect_on_wallet * amount) for transactions
     on or before the end date. Uses effect_on_wallet so transfers behave correctly.
+
+    When `convert_to_thb=True`: convert wallet's native balance to THB via
+    the currencies table (initial_balance + per-tx amounts both run through
+    the hybrid FX expression). Wallets stay as separate rows, but each row's
+    `amount` is now in THB and the row's `currency` reads 'THB'.
     """
     params = [user_id, spec.time_range.end]
     wallet_clause = ""
@@ -198,27 +269,58 @@ def build_balance(spec: QuerySpec, user_id: str) -> tuple[str, list]:
         params.append(spec.currency)
         currency_clause = f"AND w.currency = ${len(params)}"
 
-    sql = f"""
-        SELECT
-            w.sync_id::text                                              AS wallet_sync_id,
-            w.name                                                        AS wallet_name,
-            w.currency                                                    AS currency,
-            (w.initial_balance + COALESCE(SUM(
-                t.effect_on_wallet * t.amount::numeric
-            ) FILTER (
-                WHERE t.is_deleted = false
-                  AND t.status = 'confirmed'
-                  AND t.date < ($2::date + INTERVAL '1 day')
-            ), 0))                                                        AS amount
-        FROM general_wallets w
-        LEFT JOIN transactions t ON t.wallet_sync_id = w.sync_id::text
-        WHERE w.user_id = $1
-          AND w.deleted_at IS NULL
-          {wallet_clause}
-          {currency_clause}
-        GROUP BY w.sync_id, w.name, w.currency, w.initial_balance
-        ORDER BY w.name
-    """
+    if spec.convert_to_thb:
+        # initial_balance is in wallet.currency; wallet has no per-tx record
+        # so we use the currencies table (cw) for the initial conversion.
+        # Per-transaction amounts use the hybrid chain via _AMOUNT_THB_EXPR.
+        sql = f"""
+            SELECT
+                w.sync_id::text                                              AS wallet_sync_id,
+                w.name                                                        AS wallet_name,
+                'THB'                                                         AS currency,
+                (
+                    (w.initial_balance / NULLIF(cw.rate, 0))
+                    + COALESCE(SUM(
+                        t.effect_on_wallet * {_AMOUNT_THB_EXPR}
+                    ) FILTER (
+                        WHERE t.is_deleted = false
+                          AND t.status = 'confirmed'
+                          AND t.date < ($2::date + INTERVAL '1 day')
+                    ), 0)
+                )                                                             AS amount
+            FROM general_wallets w
+            LEFT JOIN currencies cw ON cw.code = w.currency
+            LEFT JOIN transactions t ON t.wallet_sync_id = w.sync_id::text
+            LEFT JOIN currencies c ON c.code = COALESCE(t.currency_code, 'THB')
+            WHERE w.user_id = $1
+              AND w.deleted_at IS NULL
+              {wallet_clause}
+              {currency_clause}
+            GROUP BY w.sync_id, w.name, w.initial_balance, cw.rate
+            ORDER BY w.name
+        """
+    else:
+        sql = f"""
+            SELECT
+                w.sync_id::text                                              AS wallet_sync_id,
+                w.name                                                        AS wallet_name,
+                w.currency                                                    AS currency,
+                (w.initial_balance + COALESCE(SUM(
+                    t.effect_on_wallet * t.amount::numeric
+                ) FILTER (
+                    WHERE t.is_deleted = false
+                      AND t.status = 'confirmed'
+                      AND t.date < ($2::date + INTERVAL '1 day')
+                ), 0))                                                        AS amount
+            FROM general_wallets w
+            LEFT JOIN transactions t ON t.wallet_sync_id = w.sync_id::text
+            WHERE w.user_id = $1
+              AND w.deleted_at IS NULL
+              {wallet_clause}
+              {currency_clause}
+            GROUP BY w.sync_id, w.name, w.currency, w.initial_balance
+            ORDER BY w.name
+        """
     return sql, params
 
 
@@ -230,28 +332,52 @@ def build_sum_by_category(spec: QuerySpec, user_id: str) -> tuple[str, list]:
     params.append("expense")
     type_idx = len(params)
     extra = _common_filters(spec, params)
-    sql = f"""
-        SELECT
-            COALESCE(t.category_name, '(uncategorized)') AS bucket,
-            COALESCE(t.currency_code, 'THB')             AS currency,
-            SUM(t.amount::numeric)                        AS amount,
-            COUNT(*)                                      AS cnt
-        FROM transactions t
-        JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
-        WHERE w.user_id = $1
-          AND w.deleted_at IS NULL
-          AND t.date >= $2
-          AND t.date <  ($3::date + INTERVAL '1 day')
-          AND t.type = ${type_idx}
-          AND t.is_deleted = false
-          AND t.status = 'confirmed'
-          AND t.include_in_report = true
-          {extra}
-        GROUP BY COALESCE(t.category_name, '(uncategorized)'),
-                 COALESCE(t.currency_code, 'THB')
-        ORDER BY amount DESC
-        LIMIT 30
-    """
+    if spec.convert_to_thb:
+        sql = f"""
+            SELECT
+                COALESCE(t.category_name, '(uncategorized)') AS bucket,
+                'THB'                                          AS currency,
+                SUM({_AMOUNT_THB_EXPR})                        AS amount,
+                COUNT(*)                                       AS cnt
+            FROM transactions t
+            JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
+            {_currency_join()}
+            WHERE w.user_id = $1
+              AND w.deleted_at IS NULL
+              AND t.date >= $2
+              AND t.date <  ($3::date + INTERVAL '1 day')
+              AND t.type = ${type_idx}
+              AND t.is_deleted = false
+              AND t.status = 'confirmed'
+              AND t.include_in_report = true
+              {extra}
+            GROUP BY COALESCE(t.category_name, '(uncategorized)')
+            ORDER BY amount DESC
+            LIMIT 30
+        """
+    else:
+        sql = f"""
+            SELECT
+                COALESCE(t.category_name, '(uncategorized)') AS bucket,
+                COALESCE(t.currency_code, 'THB')             AS currency,
+                SUM(t.amount::numeric)                        AS amount,
+                COUNT(*)                                      AS cnt
+            FROM transactions t
+            JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
+            WHERE w.user_id = $1
+              AND w.deleted_at IS NULL
+              AND t.date >= $2
+              AND t.date <  ($3::date + INTERVAL '1 day')
+              AND t.type = ${type_idx}
+              AND t.is_deleted = false
+              AND t.status = 'confirmed'
+              AND t.include_in_report = true
+              {extra}
+            GROUP BY COALESCE(t.category_name, '(uncategorized)'),
+                     COALESCE(t.currency_code, 'THB')
+            ORDER BY amount DESC
+            LIMIT 30
+        """
     return sql, params
 
 
@@ -260,26 +386,49 @@ def build_sum_by_wallet(spec: QuerySpec, user_id: str) -> tuple[str, list]:
     params.append("expense")
     type_idx = len(params)
     extra = _common_filters(spec, params)
-    sql = f"""
-        SELECT
-            w.name                            AS bucket,
-            COALESCE(t.currency_code, 'THB') AS currency,
-            SUM(t.amount::numeric)            AS amount,
-            COUNT(*)                          AS cnt
-        FROM transactions t
-        JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
-        WHERE w.user_id = $1
-          AND w.deleted_at IS NULL
-          AND t.date >= $2
-          AND t.date <  ($3::date + INTERVAL '1 day')
-          AND t.type = ${type_idx}
-          AND t.is_deleted = false
-          AND t.status = 'confirmed'
-          AND t.include_in_report = true
-          {extra}
-        GROUP BY w.name, COALESCE(t.currency_code, 'THB')
-        ORDER BY amount DESC
-    """
+    if spec.convert_to_thb:
+        sql = f"""
+            SELECT
+                w.name                  AS bucket,
+                'THB'                    AS currency,
+                SUM({_AMOUNT_THB_EXPR}) AS amount,
+                COUNT(*)                 AS cnt
+            FROM transactions t
+            JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
+            {_currency_join()}
+            WHERE w.user_id = $1
+              AND w.deleted_at IS NULL
+              AND t.date >= $2
+              AND t.date <  ($3::date + INTERVAL '1 day')
+              AND t.type = ${type_idx}
+              AND t.is_deleted = false
+              AND t.status = 'confirmed'
+              AND t.include_in_report = true
+              {extra}
+            GROUP BY w.name
+            ORDER BY amount DESC
+        """
+    else:
+        sql = f"""
+            SELECT
+                w.name                            AS bucket,
+                COALESCE(t.currency_code, 'THB') AS currency,
+                SUM(t.amount::numeric)            AS amount,
+                COUNT(*)                          AS cnt
+            FROM transactions t
+            JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
+            WHERE w.user_id = $1
+              AND w.deleted_at IS NULL
+              AND t.date >= $2
+              AND t.date <  ($3::date + INTERVAL '1 day')
+              AND t.type = ${type_idx}
+              AND t.is_deleted = false
+              AND t.status = 'confirmed'
+              AND t.include_in_report = true
+              {extra}
+            GROUP BY w.name, COALESCE(t.currency_code, 'THB')
+            ORDER BY amount DESC
+        """
     return sql, params
 
 
@@ -518,6 +667,181 @@ def build_budget_transactions(spec: QuerySpec, user_id: str) -> tuple[str, list]
     return sql, params
 
 
+# ── Goal metrics ─────────────────────────────────────────────────────────────
+
+
+def build_goal_list(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """Every non-deleted savings goal — definition only, no compute."""
+    params: list = [user_id]
+    name_clause = ""
+    if spec.goal_name_phrase:
+        params.append(f"%{spec.goal_name_phrase}%")
+        name_clause = f"AND g.name ILIKE ${len(params)}"
+    sql = f"""
+        SELECT
+            g.sync_id::text         AS sync_id,
+            g.name                   AS name,
+            g.target_amount::numeric AS amount,
+            g.currency               AS currency,
+            g.target_date            AS target_date,
+            g.start_date             AS start_date,
+            g.is_closed              AS is_closed,
+            g.achieved_at            AS achieved_at,
+            g.note                   AS note
+        FROM goal_wallets g
+        WHERE g.is_deleted = false
+          AND g.user_id = $1
+          {name_clause}
+        ORDER BY g.target_date NULLS LAST
+    """
+    return sql, params
+
+
+def build_goal_progress(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """Per-goal balance + completion stats.
+
+    Goal balance is computed live from transactions whose
+    `destination_wallet_sync_id` matches the goal's sync_id (deposits) less
+    any whose `wallet_sync_id` matches (withdrawals from the goal). The
+    cached `goal_wallets.cached_balance` is ignored — the test data shows it
+    is often null/stale.
+
+    Outputs: target, balance, remaining_to_target, pct_completed,
+    days_left (clamped at 0), daily_required (NULL if expired or already
+    achieved). currency stays in the goal's native currency — no FX.
+    """
+    params: list = [user_id]
+    name_clause = ""
+    if spec.goal_name_phrase:
+        params.append(f"%{spec.goal_name_phrase}%")
+        name_clause = f"AND g.name ILIKE ${len(params)}"
+
+    sql = f"""
+        WITH goals AS (
+            SELECT
+                g.sync_id            AS goal_sync_id,
+                g.name               AS name,
+                g.target_amount::numeric AS target,
+                g.currency           AS currency,
+                g.target_date        AS target_date,
+                g.start_date         AS start_date,
+                g.initial_balance::numeric AS initial_balance,
+                g.is_closed          AS is_closed,
+                g.achieved_at        AS achieved_at
+            FROM goal_wallets g
+            WHERE g.is_deleted = false
+              AND g.user_id = $1
+              {name_clause}
+        ),
+        bal AS (
+            SELECT
+                gs.goal_sync_id,
+                COALESCE(SUM(
+                    CASE
+                        WHEN t.destination_wallet_sync_id = gs.goal_sync_id::text
+                            THEN COALESCE(t.destination_converted_amount::numeric, t.amount::numeric)
+                        WHEN t.wallet_sync_id = gs.goal_sync_id::text
+                            THEN -t.amount::numeric
+                        ELSE 0
+                    END
+                ) FILTER (
+                    WHERE t.is_deleted = false AND t.status = 'confirmed'
+                ), 0) AS deposited
+            FROM goals gs
+            LEFT JOIN transactions t
+                   ON (t.destination_wallet_sync_id = gs.goal_sync_id::text
+                    OR t.wallet_sync_id = gs.goal_sync_id::text)
+            GROUP BY gs.goal_sync_id
+        )
+        SELECT
+            gs.goal_sync_id::text                        AS sync_id,
+            gs.name                                       AS name,
+            gs.target                                     AS amount,
+            (gs.initial_balance + COALESCE(bal.deposited, 0)) AS balance,
+            (gs.target - (gs.initial_balance + COALESCE(bal.deposited, 0))) AS remaining_to_target,
+            CASE WHEN gs.target > 0
+                 THEN ROUND(
+                    ((gs.initial_balance + COALESCE(bal.deposited, 0)) / gs.target) * 100,
+                    1
+                 )
+                 ELSE 0 END                                AS pct_completed,
+            CASE WHEN gs.target_date IS NULL THEN NULL
+                 ELSE GREATEST(0, gs.target_date - CURRENT_DATE)
+            END                                            AS days_left,
+            CASE
+                WHEN gs.is_closed THEN NULL
+                WHEN gs.target_date IS NULL THEN NULL
+                WHEN gs.target_date < CURRENT_DATE THEN NULL
+                WHEN gs.target <= (gs.initial_balance + COALESCE(bal.deposited, 0)) THEN 0
+                ELSE ROUND(
+                    GREATEST(0, gs.target - (gs.initial_balance + COALESCE(bal.deposited, 0)))
+                    / GREATEST(1, (gs.target_date - CURRENT_DATE)),
+                    2
+                )
+            END                                            AS daily_required,
+            gs.currency                                    AS currency,
+            gs.target_date                                 AS target_date,
+            gs.start_date                                  AS start_date,
+            gs.is_closed                                   AS is_closed,
+            gs.achieved_at                                 AS achieved_at
+        FROM goals gs
+        LEFT JOIN bal ON bal.goal_sync_id = gs.goal_sync_id
+        ORDER BY gs.target_date NULLS LAST
+    """
+    return sql, params
+
+
+def build_goal_transactions(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """Drill-down: deposits/withdrawals on a goal wallet."""
+    params: list = [user_id]
+    name_clause = ""
+    if spec.goal_name_phrase:
+        params.append(f"%{spec.goal_name_phrase}%")
+        name_clause = f"AND g.name ILIKE ${len(params)}"
+
+    order_clause = (
+        "ORDER BY t.amount::numeric DESC, t.date DESC"
+        if spec.order_by == "amount_desc"
+        else "ORDER BY t.date DESC"
+    )
+    cap = max(1, min(spec.limit or 50, 100))
+
+    sql = f"""
+        WITH goals AS (
+            SELECT g.sync_id AS goal_sync_id, g.name AS goal_name
+            FROM goal_wallets g
+            WHERE g.is_deleted = false AND g.user_id = $1
+              {name_clause}
+        )
+        SELECT
+            t.sync_id                AS sync_id,
+            t.date::date             AS date,
+            t.type                   AS type,
+            CASE
+                WHEN t.destination_wallet_sync_id = gs.goal_sync_id::text
+                    THEN 'deposit'
+                ELSE 'withdraw'
+            END                       AS direction,
+            CASE
+                WHEN t.destination_wallet_sync_id = gs.goal_sync_id::text
+                    THEN COALESCE(t.destination_converted_amount::numeric, t.amount::numeric)
+                ELSE t.amount::numeric
+            END                       AS amount,
+            COALESCE(t.currency_code, 'THB') AS currency,
+            t.note                    AS note,
+            gs.goal_name              AS goal_name
+        FROM goals gs
+        JOIN transactions t
+              ON (t.destination_wallet_sync_id = gs.goal_sync_id::text
+               OR t.wallet_sync_id = gs.goal_sync_id::text)
+             AND t.is_deleted = false
+             AND t.status = 'confirmed'
+        {order_clause}
+        LIMIT {cap}
+    """
+    return sql, params
+
+
 _BUILDERS = {
     "sum_income": build_sum_income,
     "sum_expense": build_sum_expense,
@@ -529,6 +853,9 @@ _BUILDERS = {
     "budget_list": build_budget_list,
     "budget_remaining": build_budget_remaining,
     "budget_transactions": build_budget_transactions,
+    "goal_list": build_goal_list,
+    "goal_progress": build_goal_progress,
+    "goal_transactions": build_goal_transactions,
 }
 
 

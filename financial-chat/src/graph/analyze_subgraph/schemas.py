@@ -28,6 +28,10 @@ Metric = Literal[
     "budget_list",          # definitions only (name, amount, period, dates)
     "budget_remaining",     # name, amount, spent, remaining, pct_used per budget
     "budget_transactions",  # individual transactions counted toward a budget
+    # Goal family — savings goals from the goal_wallets table.
+    "goal_list",            # definitions: name, target_amount, target_date, currency
+    "goal_progress",        # + current_balance, pct_completed, days_left, daily_required
+    "goal_transactions",    # deposits/withdrawals on a specific goal wallet
     # Templates-as-Tools escape hatch — used for compose / diff / anomaly /
     # multi-step queries that no single metric can answer. The LLM writes
     # Python that calls the templates above; the sandbox blocks anything else.
@@ -37,6 +41,9 @@ Metric = Literal[
 Granularity = Literal["day", "week", "month", "quarter", "year", "all"]
 GroupBy = Literal["day", "week", "month", "year", "wallet", "category", "tag"]
 SlotKind = Literal["wallet", "category", "tag"]
+# Transaction `type` column has 4 distinct values in this schema. Used by
+# `metric=list` so users asking "ดูรายการรายรับ" actually get income only.
+TxType = Literal["income", "expense", "transfer", "creditCardPay"]
 
 
 class TimeRange(BaseModel):
@@ -83,6 +90,17 @@ class QueryPlan(BaseModel):
     # Used by metric=budget_* — filter to budgets whose name matches.
     # Set whenever the user mentions a specific budget ("งบอาหาร" → "อาหาร").
     budget_name_phrase: str | None = None
+    # Used by metric=goal_* — filter to savings goals whose name matches.
+    goal_name_phrase: str | None = None
+    # Cross-currency rollup. When True, aggregation metrics drop the
+    # currency split and report a single THB total (using the hybrid FX
+    # chain: converted_amount → exchange_rate → currencies.rate). Default
+    # False keeps the per-currency separation that prevents implicit FX.
+    convert_to_thb: bool = False
+    # Filter rows by transaction.type — only meaningful for metric=list and
+    # metric=budget_transactions. Aggregation metrics already imply the type
+    # (sum_income, sum_expense). Leave None to include all types.
+    transaction_type: TxType | None = None
     note: str | None = None  # planner's free-text rationale (debug only)
 
 
@@ -99,6 +117,9 @@ class QuerySpec(BaseModel):
     order_by: Literal["date_desc", "amount_desc"] = "date_desc"
     limit: int | None = None
     budget_name_phrase: str | None = None
+    goal_name_phrase: str | None = None
+    convert_to_thb: bool = False
+    transaction_type: TxType | None = None
 
 
 class ClarificationPayload(BaseModel):

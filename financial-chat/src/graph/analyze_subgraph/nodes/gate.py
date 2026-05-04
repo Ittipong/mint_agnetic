@@ -101,6 +101,9 @@ async def gate_node(state: AnalyzeSubState) -> dict:
         order_by=plan.order_by,
         limit=plan.limit,
         budget_name_phrase=plan.budget_name_phrase,
+        goal_name_phrase=plan.goal_name_phrase,
+        convert_to_thb=plan.convert_to_thb,
+        transaction_type=plan.transaction_type,
     )
 
     return {

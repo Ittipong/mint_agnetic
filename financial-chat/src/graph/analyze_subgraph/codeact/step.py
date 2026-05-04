@@ -33,26 +33,37 @@ on them is exact. Dates are ISO strings or date objects. Use the catalog
 names verbatim.
 
   sum_income(start, end, *, wallet_names=None, category_names=None,
-             tag_names=None, currency='ALL') -> list[dict]
+             tag_names=None, currency='ALL',
+             convert_to_thb=False) -> list[dict]
       # rows: [{"currency": ..., "amount": Decimal, "cnt": int}, ...]
+      # With convert_to_thb=True you get ONE row in THB instead of one per
+      # currency. PREFER this over manually summing across currency rows.
 
   sum_expense(start, end, *, wallet_names=None, category_names=None,
-              tag_names=None, currency='ALL') -> list[dict]
+              tag_names=None, currency='ALL',
+              convert_to_thb=False) -> list[dict]
 
-  sum_by_category(start, end, *, wallet_names=None, currency='ALL') -> list[dict]
+  sum_by_category(start, end, *, wallet_names=None, currency='ALL',
+                  convert_to_thb=False) -> list[dict]
       # rows: [{"bucket": <category_name>, "currency": ..., "amount": Decimal,
       #         "cnt": int}, ...]
 
-  sum_by_wallet(start, end, *, currency='ALL') -> list[dict]
+  sum_by_wallet(start, end, *, currency='ALL',
+                convert_to_thb=False) -> list[dict]
 
   list_transactions(start, end, *, wallet_names=None, category_names=None,
                     tag_names=None, currency='ALL',
-                    order_by='date_desc' | 'amount_desc', limit=50) -> list[dict]
+                    order_by='date_desc' | 'amount_desc', limit=50,
+                    transaction_type=None) -> list[dict]
       # rows: [{"date": ..., "type": ..., "amount": Decimal, "currency": ...,
       #         "note": ..., "category_name": ..., "wallet_name": ...}, ...]
+      # `transaction_type` ∈ {'income','expense','transfer','creditCardPay'}
+      # narrows to one type. Use this for 'รายการรายรับ' / 'income only'.
 
-  balance(*, as_of=None, wallet_names=None, currency='ALL') -> list[dict]
+  balance(*, as_of=None, wallet_names=None, currency='ALL',
+          convert_to_thb=False) -> list[dict]
       # rows: [{"wallet_name": ..., "currency": ..., "amount": Decimal}, ...]
+      # With convert_to_thb=True each wallet's balance is rolled up in THB.
 
   budget_remaining(*, start=None, end=None, budget_name_phrase=None) -> list[dict]
       # rows: [{"name": ..., "amount": ..., "spent": ..., "remaining": ...,
@@ -75,6 +86,11 @@ Rules:
   - Set `result = <whatever you want returned>` when finished (a dict / list /
     Decimal / str — keep it small, under 5 KB).
   - NEVER use float() for money — keep everything Decimal.
+  - NEVER sum across currency rows yourself. If you need a single THB total
+    across mixed-currency data, pass convert_to_thb=True to the tool —
+    the SQL applies a vetted FX chain (per-tx converted_amount → exchange_rate
+    → today's rate from the currencies table). Trying to do FX in Python
+    is forbidden.
   - NEVER call functions not listed above.
   - NEVER use import, open, exec, eval, getattr, dunder access.
   - You may print() to log intermediate values; the runtime captures stdout

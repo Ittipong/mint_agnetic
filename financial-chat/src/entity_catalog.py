@@ -48,6 +48,14 @@ class BudgetEntry:
 
 
 @dataclass(frozen=True)
+class GoalEntry:
+    sync_id: str
+    name: str
+    currency: str
+    target_amount: str  # stringified Decimal — display only, not for math
+
+
+@dataclass(frozen=True)
 class EntityCatalog:
     """Snapshot of one user's named entities at a point in time."""
 
@@ -55,6 +63,7 @@ class EntityCatalog:
     categories: list[CategoryEntry] = field(default_factory=list)
     tags: list[TagEntry] = field(default_factory=list)
     budgets: list[BudgetEntry] = field(default_factory=list)
+    goals: list[GoalEntry] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -70,6 +79,11 @@ class EntityCatalog:
             "budgets": [
                 {"sync_id": b.sync_id, "name": b.name, "currency": b.currency, "period": b.period}
                 for b in self.budgets
+            ],
+            "goals": [
+                {"sync_id": g.sync_id, "name": g.name, "currency": g.currency,
+                 "target_amount": g.target_amount}
+                for g in self.goals
             ],
         }
 
@@ -115,6 +129,13 @@ class EntityCatalog:
                 f"- `{b.name}` ({b.period}, {b.currency})" for b in self.budgets
             )
 
+        if self.goals:
+            lines.append("\n### Savings Goals")
+            lines.extend(
+                f"- `{g.name}` (target {g.target_amount} {g.currency})"
+                for g in self.goals
+            )
+
         return "\n".join(lines)
 
 
@@ -150,6 +171,13 @@ _BUDGETS_SQL = (
     "ORDER BY start_date DESC"
 )
 
+_GOALS_SQL = (
+    "SELECT sync_id, name, currency, target_amount "
+    "FROM goal_wallets "
+    "WHERE user_id = $1 AND is_deleted = false "
+    "ORDER BY target_date NULLS LAST"
+)
+
 
 async def fetch_user_catalog(user_id: str) -> EntityCatalog:
     """Single call that pulls everything the LLM may need to name."""
@@ -164,6 +192,7 @@ async def fetch_user_catalog(user_id: str) -> EntityCatalog:
         categories_rows = await conn.fetch(_CATEGORIES_SQL, user_id)
         tags_rows = await conn.fetch(_TAGS_SQL, user_id)
         budgets_rows = await conn.fetch(_BUDGETS_SQL, user_id)
+        goals_rows = await conn.fetch(_GOALS_SQL, user_id)
 
     # Dedup categories by (name, type). Each wallet has its own copy of the
     # system categories (so "อาหาร" appears 6× for a 6-wallet user). For the
@@ -206,4 +235,13 @@ async def fetch_user_catalog(user_id: str) -> EntityCatalog:
         categories=deduped_categories,
         tags=[TagEntry(sync_id=str(r["sync_id"]), name=r["name"]) for r in tags_rows],
         budgets=deduped_budgets,
+        goals=[
+            GoalEntry(
+                sync_id=str(r["sync_id"]),
+                name=r["name"],
+                currency=r["currency"],
+                target_amount=str(r["target_amount"]),
+            )
+            for r in goals_rows
+        ],
     )

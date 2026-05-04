@@ -142,6 +142,9 @@ class _Wrappers:
         order_by: str = "date_desc",
         limit: int | None = None,
         budget_name_phrase: str | None = None,
+        goal_name_phrase: str | None = None,
+        convert_to_thb: bool = False,
+        transaction_type: str | None = None,
     ) -> QuerySpec:
         return QuerySpec(
             metric=metric,  # type: ignore[arg-type]
@@ -158,6 +161,9 @@ class _Wrappers:
             order_by=order_by,  # type: ignore[arg-type]
             limit=limit,
             budget_name_phrase=budget_name_phrase,
+            goal_name_phrase=goal_name_phrase,
+            convert_to_thb=convert_to_thb,
+            transaction_type=transaction_type,  # type: ignore[arg-type]
         )
 
     def _exec(self, spec: QuerySpec) -> list[dict]:
@@ -178,9 +184,14 @@ class _Wrappers:
         category_names: list[str] | None = None,
         tag_names: list[str] | None = None,
         currency: str = "ALL",
+        convert_to_thb: bool = False,
     ) -> list[dict]:
-        """Total income per currency in [start, end]. Returns rows like
-        {currency: 'THB', amount: Decimal('20000'), cnt: 1}."""
+        """Total income per currency in [start, end].
+
+        With convert_to_thb=True the per-currency split is dropped and you
+        get ONE row in THB via the hybrid FX chain. Use this whenever you
+        need a single THB total — never sum across currency rows yourself.
+        """
         return self._exec(
             self._spec(
                 metric="sum_income",
@@ -190,11 +201,13 @@ class _Wrappers:
                 category_names=category_names,
                 tag_names=tag_names,
                 currency=currency,
+                convert_to_thb=convert_to_thb,
             )
         )
 
     def sum_expense(self, **kw) -> list[dict]:
-        """Total expense per currency. Same kwargs as sum_income."""
+        """Total expense per currency. Same kwargs as sum_income, including
+        convert_to_thb=True for a single THB total."""
         kw["metric"] = "sum_expense"
         return self._exec(self._spec(**kw))
 
@@ -205,9 +218,9 @@ class _Wrappers:
         end: str | date,
         wallet_names: list[str] | None = None,
         currency: str = "ALL",
+        convert_to_thb: bool = False,
     ) -> list[dict]:
-        """Spending breakdown by category (expense only).
-        Returns rows like {bucket: 'อาหาร', currency: 'THB', amount: Decimal, cnt: N}."""
+        """Spending breakdown by category (expense only)."""
         return self._exec(
             self._spec(
                 metric="sum_by_category",
@@ -215,6 +228,7 @@ class _Wrappers:
                 end=end,
                 wallet_names=wallet_names,
                 currency=currency,
+                convert_to_thb=convert_to_thb,
             )
         )
 
@@ -224,6 +238,7 @@ class _Wrappers:
         start: str | date,
         end: str | date,
         currency: str = "ALL",
+        convert_to_thb: bool = False,
     ) -> list[dict]:
         """Spending breakdown by wallet (expense only)."""
         return self._exec(
@@ -232,6 +247,7 @@ class _Wrappers:
                 start=start,
                 end=end,
                 currency=currency,
+                convert_to_thb=convert_to_thb,
             )
         )
 
@@ -246,8 +262,12 @@ class _Wrappers:
         currency: str = "ALL",
         order_by: str = "date_desc",
         limit: int | None = 50,
+        transaction_type: str | None = None,
     ) -> list[dict]:
-        """Individual transactions matching filters."""
+        """Individual transactions matching filters.
+
+        `transaction_type` narrows to one of: 'income', 'expense', 'transfer',
+        'creditCardPay'. Leave None for all types."""
         return self._exec(
             self._spec(
                 metric="list",
@@ -259,6 +279,7 @@ class _Wrappers:
                 currency=currency,
                 order_by=order_by,
                 limit=limit,
+                transaction_type=transaction_type,
             )
         )
 
@@ -268,8 +289,10 @@ class _Wrappers:
         as_of: str | date | None = None,
         wallet_names: list[str] | None = None,
         currency: str = "ALL",
+        convert_to_thb: bool = False,
     ) -> list[dict]:
-        """Per-wallet balance as of `as_of` (defaults to today)."""
+        """Per-wallet balance as of `as_of` (defaults to today). With
+        convert_to_thb=True every wallet's balance is rendered in THB."""
         end = self._to_date(as_of) if as_of is not None else self._today
         return self._exec(
             self._spec(
@@ -278,6 +301,7 @@ class _Wrappers:
                 end=end,
                 wallet_names=wallet_names,
                 currency=currency,
+                convert_to_thb=convert_to_thb,
             )
         )
 
@@ -327,6 +351,51 @@ class _Wrappers:
             )
         )
 
+    def goal_list(self) -> list[dict]:
+        """All savings goals the user has set up (target, target_date, currency)."""
+        return self._exec(
+            self._spec(
+                metric="goal_list",
+                start=date(1900, 1, 1),
+                end=self._today,
+            )
+        )
+
+    def goal_progress(
+        self,
+        *,
+        goal_name_phrase: str | None = None,
+    ) -> list[dict]:
+        """Per-goal progress: target, current balance, remaining, pct_completed,
+        days_left, daily_required (NULL when expired/achieved)."""
+        return self._exec(
+            self._spec(
+                metric="goal_progress",
+                start=date(1900, 1, 1),
+                end=self._today,
+                goal_name_phrase=goal_name_phrase,
+            )
+        )
+
+    def goal_transactions(
+        self,
+        *,
+        goal_name_phrase: str,
+        order_by: str = "date_desc",
+        limit: int = 50,
+    ) -> list[dict]:
+        """Deposits/withdrawals to/from a specific goal wallet."""
+        return self._exec(
+            self._spec(
+                metric="goal_transactions",
+                start=date(1900, 1, 1),
+                end=self._today,
+                goal_name_phrase=goal_name_phrase,
+                order_by=order_by,
+                limit=limit,
+            )
+        )
+
 
 # ── Public entry point ───────────────────────────────────────────────────────
 
@@ -355,6 +424,9 @@ def build_namespace(
         "budget_remaining":    w.budget_remaining,
         "budget_transactions": w.budget_transactions,
         "budget_list":         w.budget_list,
+        "goal_list":           w.goal_list,
+        "goal_progress":       w.goal_progress,
+        "goal_transactions":   w.goal_transactions,
         # Decimal-safe primitives
         "Decimal":             Decimal,
         "date":                date,
