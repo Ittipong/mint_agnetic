@@ -15,9 +15,9 @@ from decimal import Decimal
 from typing import Any
 
 from src.entity_catalog import EntityCatalog
-from src.graph.analyze_subgraph.codeact.namespace import build_namespace
-from src.graph.analyze_subgraph.codeact.sandbox import execute
-from src.graph.analyze_subgraph.state import AnalyzeSubState
+from src.graph.compute_subgraph.codeact.namespace import build_namespace
+from src.graph.compute_subgraph.codeact.sandbox import execute
+from src.graph.compute_subgraph.state import ComputeSubState
 
 # Loop bound — picked to cover compose / diff / multi-step but reject runaway.
 MAX_STEPS = 5
@@ -165,7 +165,7 @@ def _json_default(o: Any):
 # ── Node ─────────────────────────────────────────────────────────────────────
 
 
-async def codeact_step_node(state: AnalyzeSubState) -> dict:
+async def codeact_step_node(state: ComputeSubState) -> dict:
     """Run one iteration. The graph loops until the LLM sets `result`
     or `MAX_STEPS` is hit."""
     from src.llm import llm  # imported lazily to avoid eager API client init

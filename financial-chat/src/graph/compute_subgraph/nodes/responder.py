@@ -13,19 +13,19 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from src.graph.analyze_subgraph.schemas import (
+from src.graph.compute_subgraph.schemas import (
     ClarificationPayload,
     ExecRow,
     QuerySpec,
     decimal_to_display,
 )
-from src.graph.analyze_subgraph.state import AnalyzeSubState
+from src.graph.compute_subgraph.state import ComputeSubState
 
 
 # ── Public node ──────────────────────────────────────────────────────────────
 
 
-async def respond_node(state: AnalyzeSubState) -> dict:
+async def respond_node(state: ComputeSubState) -> dict:
     if state.get("needs_clarification") and state.get("clarification") is not None:
         return {"answer": _format_clarification(state["clarification"])}
 
@@ -42,7 +42,7 @@ async def respond_node(state: AnalyzeSubState) -> dict:
     return {"answer": answer}
 
 
-def _format_codeact(state: AnalyzeSubState) -> str:
+def _format_codeact(state: ComputeSubState) -> str:
     """Render the codeact loop result as a tool-readable string.
 
     The header tags it as `metric=freeform_codeact` so the reasoner

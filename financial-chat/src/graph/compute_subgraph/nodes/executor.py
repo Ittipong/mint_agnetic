@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from src.graph.analyze_subgraph.db import get_pool
-from src.graph.analyze_subgraph.schemas import ExecRow, QuerySpec
-from src.graph.analyze_subgraph.sql_templates import build_query
-from src.graph.analyze_subgraph.state import AnalyzeSubState
+from src.graph.compute_subgraph.db import get_pool
+from src.graph.compute_subgraph.schemas import ExecRow, QuerySpec
+from src.graph.compute_subgraph.sql_templates import build_query
+from src.graph.compute_subgraph.state import ComputeSubState
 
 
-async def execute_node(state: AnalyzeSubState) -> dict:
+async def execute_node(state: ComputeSubState) -> dict:
     spec: QuerySpec = state["spec"]
     sql, params = build_query(spec, state["user_id"])
     pool = await get_pool()

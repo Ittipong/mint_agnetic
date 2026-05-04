@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import NotRequired
 from typing_extensions import TypedDict
 
-from src.graph.analyze_subgraph.schemas import (
+from src.graph.compute_subgraph.schemas import (
     ClarificationPayload,
     ExecRow,
     QueryPlan,
@@ -18,7 +18,7 @@ from src.graph.analyze_subgraph.schemas import (
 )
 
 
-class AnalyzeSubState(TypedDict):
+class ComputeSubState(TypedDict):
     # Input
     task: str
     user_id: str

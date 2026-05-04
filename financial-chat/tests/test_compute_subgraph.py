@@ -11,10 +11,10 @@ from datetime import date
 
 import pytest
 
-from src.graph.analyze_subgraph.nodes.gate import _aggregate_confidence, _first_low_confidence
-from src.graph.analyze_subgraph.nodes.responder import _format_result, _format_clarification
-from src.graph.analyze_subgraph.nodes.time_resolver import _quick_thai
-from src.graph.analyze_subgraph.schemas import (
+from src.graph.compute_subgraph.nodes.gate import _aggregate_confidence, _first_low_confidence
+from src.graph.compute_subgraph.nodes.responder import _format_result, _format_clarification
+from src.graph.compute_subgraph.nodes.time_resolver import _quick_thai
+from src.graph.compute_subgraph.schemas import (
     ClarificationPayload,
     ExecRow,
     QueryPlan,
@@ -23,7 +23,7 @@ from src.graph.analyze_subgraph.schemas import (
     TimeRange,
     decimal_to_display,
 )
-from src.graph.analyze_subgraph.sql_templates import build_query
+from src.graph.compute_subgraph.sql_templates import build_query
 
 
 # ── Time resolver ────────────────────────────────────────────────────────────

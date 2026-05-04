@@ -31,14 +31,14 @@ from langchain_core.messages import ToolMessage
 from langgraph.graph import END, START, StateGraph
 
 from src.entity_catalog import EntityCatalog, fetch_user_catalog
-from src.graph.analyze_subgraph.codeact.step import codeact_step_node
-from src.graph.analyze_subgraph.nodes.entity_resolver import entity_resolve_node
-from src.graph.analyze_subgraph.nodes.executor import execute_node
-from src.graph.analyze_subgraph.nodes.gate import gate_node
-from src.graph.analyze_subgraph.nodes.plan import plan_node
-from src.graph.analyze_subgraph.nodes.responder import respond_node
-from src.graph.analyze_subgraph.nodes.time_resolver import time_resolve_node
-from src.graph.analyze_subgraph.state import AnalyzeSubState
+from src.graph.compute_subgraph.codeact.step import codeact_step_node
+from src.graph.compute_subgraph.nodes.entity_resolver import entity_resolve_node
+from src.graph.compute_subgraph.nodes.executor import execute_node
+from src.graph.compute_subgraph.nodes.gate import gate_node
+from src.graph.compute_subgraph.nodes.plan import plan_node
+from src.graph.compute_subgraph.nodes.responder import respond_node
+from src.graph.compute_subgraph.nodes.time_resolver import time_resolve_node
+from src.graph.compute_subgraph.state import ComputeSubState
 from src.graph.state import AgentState
 
 ANALYZE_TOOL_NAME = "analyze_user_finances"
@@ -47,7 +47,7 @@ ANALYZE_TOOL_NAME = "analyze_user_finances"
 # ── Routing ──────────────────────────────────────────────────────────────────
 
 
-def _after_plan(state: AnalyzeSubState):
+def _after_plan(state: ComputeSubState):
     """Choose whitelisted pipeline (fan out to entity + time) vs Templates-CodeAct.
 
     Returning a list fans out in parallel; returning a string routes to one node.
@@ -58,11 +58,11 @@ def _after_plan(state: AnalyzeSubState):
     return ["entity_resolve", "time_resolve"]
 
 
-def _after_gate(state: AnalyzeSubState) -> str:
+def _after_gate(state: ComputeSubState) -> str:
     return "respond" if state.get("needs_clarification") else "execute"
 
 
-def _after_codeact_step(state: AnalyzeSubState) -> str:
+def _after_codeact_step(state: ComputeSubState) -> str:
     return "respond" if state.get("codeact_done") else "codeact_step"
 
 
@@ -70,7 +70,7 @@ def _after_codeact_step(state: AnalyzeSubState) -> str:
 
 
 def _build() -> StateGraph:
-    g = StateGraph(AnalyzeSubState)
+    g = StateGraph(ComputeSubState)
     g.add_node("plan", plan_node)
     g.add_node("entity_resolve", entity_resolve_node)
     g.add_node("time_resolve", time_resolve_node)
@@ -106,14 +106,14 @@ def _build() -> StateGraph:
     return g
 
 
-analyze_subgraph = _build().compile()
+compute_subgraph = _build().compile()
 
 
 # ── Bridge: parent ReAct's `act_node` ────────────────────────────────────────
 
 
 async def act_node(state: AgentState) -> dict:
-    """Bridge from parent AgentState → analyze_subgraph → ToolMessage.
+    """Bridge from parent AgentState → compute_subgraph → ToolMessage.
 
     Reads the tool call placed by reason_node, invokes the subgraph, and wraps
     the result in a ToolMessage that ReAct can keep reasoning over. Diagnostic
@@ -144,13 +144,13 @@ async def act_node(state: AgentState) -> dict:
     # keeps planner/resolver consistent with what the LLM was just told.
     catalog: EntityCatalog = await fetch_user_catalog(user_id)
 
-    sub_input: AnalyzeSubState = {
+    sub_input: ComputeSubState = {
         "task": task,
         "user_id": user_id,
         "today": today_iso,
         "catalog": catalog,
     }
-    sub_out: dict = await analyze_subgraph.ainvoke(sub_input)
+    sub_out: dict = await compute_subgraph.ainvoke(sub_input)
 
     answer: str = sub_out.get("answer", "(no result)")
     step_info = {

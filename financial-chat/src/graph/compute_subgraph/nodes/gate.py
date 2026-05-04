@@ -11,14 +11,14 @@ additive change once the mobile client supports the resume protocol.
 
 from __future__ import annotations
 
-from src.graph.analyze_subgraph.schemas import (
+from src.graph.compute_subgraph.schemas import (
     ClarificationPayload,
     QueryPlan,
     QuerySpec,
     ResolvedEntity,
     TimeRange,
 )
-from src.graph.analyze_subgraph.state import AnalyzeSubState
+from src.graph.compute_subgraph.state import ComputeSubState
 
 # Below this floor we ask the user instead of guessing.
 _CONFIDENCE_FLOOR = 0.6
@@ -79,7 +79,7 @@ def _first_low_confidence(
     return None
 
 
-async def gate_node(state: AnalyzeSubState) -> dict:
+async def gate_node(state: ComputeSubState) -> dict:
     plan: QueryPlan = state["plan"]
     time_range: TimeRange = state["time_range"]
     wallets = state.get("resolved_wallets") or []

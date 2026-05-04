@@ -22,7 +22,7 @@ from src.graph.nodes import (
     REGULAR_TOOLS,
     ANALYZE_TOOL_NAMES,
 )
-from src.graph.analyze_subgraph import act_node
+from src.graph.compute_subgraph import act_node
 
 
 def _should_route(state: AgentState) -> str:

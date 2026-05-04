@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 # `get_pool` is imported lazily inside the function to avoid a circular import:
-# src.entity_catalog ← imported by src.graph.analyze_subgraph.graph
+# src.entity_catalog ← imported by src.graph.compute_subgraph.graph
 # (the package's __init__ pulls graph.py, which would re-enter this module).
 
 
@@ -184,7 +184,7 @@ async def fetch_user_catalog(user_id: str) -> EntityCatalog:
     if not user_id:
         return EntityCatalog()
 
-    from src.graph.analyze_subgraph.db import get_pool  # local — see note above
+    from src.graph.compute_subgraph.db import get_pool  # local — see note above
 
     pool = await get_pool()
     async with pool.acquire() as conn:

@@ -5,7 +5,7 @@ from langchain_core.tools import tool
 from src.llm import llm
 from src.graph.state import AgentState
 from src.tools.financial_info import get_financial_advice
-from src.graph.analyze_subgraph import ANALYZE_TOOL_NAME
+from src.graph.compute_subgraph import ANALYZE_TOOL_NAME
 
 
 # ── Tool declarations ────────────────────────────────────────────────────────

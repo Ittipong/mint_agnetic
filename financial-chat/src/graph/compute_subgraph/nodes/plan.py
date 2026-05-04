@@ -9,8 +9,8 @@ The LLM never sees DB IDs or numbers here — only the user's task text.
 from __future__ import annotations
 
 from src.entity_catalog import EntityCatalog
-from src.graph.analyze_subgraph.schemas import QueryPlan
-from src.graph.analyze_subgraph.state import AnalyzeSubState
+from src.graph.compute_subgraph.schemas import QueryPlan
+from src.graph.compute_subgraph.state import ComputeSubState
 
 
 _SYSTEM_BASE = """You are a financial query planner. Given a user's question in Thai or English,
@@ -152,7 +152,7 @@ def _build_system(catalog: EntityCatalog | None) -> str:
     )
 
 
-async def plan_node(state: AnalyzeSubState) -> dict:
+async def plan_node(state: ComputeSubState) -> dict:
     from src.llm import llm
 
     catalog: EntityCatalog | None = state.get("catalog")  # type: ignore[assignment]

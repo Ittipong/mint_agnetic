@@ -18,13 +18,13 @@ from decimal import Decimal
 from typing import Any
 
 from src.entity_catalog import EntityCatalog
-from src.graph.analyze_subgraph.db import get_pool
-from src.graph.analyze_subgraph.schemas import (
+from src.graph.compute_subgraph.db import get_pool
+from src.graph.compute_subgraph.schemas import (
     QuerySpec,
     ResolvedEntity,
     TimeRange,
 )
-from src.graph.analyze_subgraph.sql_templates import build_query
+from src.graph.compute_subgraph.sql_templates import build_query
 
 
 # ── Async core (runs on the main loop) ───────────────────────────────────────

@@ -18,13 +18,13 @@ from dataclasses import dataclass
 from pydantic import BaseModel, Field
 
 from src.entity_catalog import EntityCatalog
-from src.graph.analyze_subgraph.schemas import (
+from src.graph.compute_subgraph.schemas import (
     EntityMention,
     QueryPlan,
     ResolvedEntity,
     SlotKind,
 )
-from src.graph.analyze_subgraph.state import AnalyzeSubState
+from src.graph.compute_subgraph.state import ComputeSubState
 
 
 # ── Candidate fetch ──────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ async def _resolve_mention(
 # ── Node ─────────────────────────────────────────────────────────────────────
 
 
-async def entity_resolve_node(state: AnalyzeSubState) -> dict:
+async def entity_resolve_node(state: ComputeSubState) -> dict:
     plan: QueryPlan | None = state.get("plan")
     if plan is None or not plan.entity_mentions:
         return {

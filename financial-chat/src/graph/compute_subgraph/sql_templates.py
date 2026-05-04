@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.graph.analyze_subgraph.schemas import QuerySpec
+from src.graph.compute_subgraph.schemas import QuerySpec
 
 
 # ── Filter fragments ─────────────────────────────────────────────────────────

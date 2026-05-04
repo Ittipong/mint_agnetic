@@ -17,8 +17,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from src.graph.analyze_subgraph.schemas import TimeRange
-from src.graph.analyze_subgraph.state import AnalyzeSubState
+from src.graph.compute_subgraph.schemas import TimeRange
+from src.graph.compute_subgraph.state import ComputeSubState
 
 
 # ── Regex shortcuts (Thai relative phrases) ──────────────────────────────────
@@ -204,7 +204,7 @@ async def _llm_resolve(phrase: str, today: date) -> tuple[date, date, str, float
 # ── Node ─────────────────────────────────────────────────────────────────────
 
 
-async def time_resolve_node(state: AnalyzeSubState) -> dict:
+async def time_resolve_node(state: ComputeSubState) -> dict:
     today = date.fromisoformat(state["today"])
     plan = state.get("plan")
     phrase = (plan.time_phrase if plan else None) or ""
