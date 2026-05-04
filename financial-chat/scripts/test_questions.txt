@@ -1,0 +1,43 @@
+# Test Questions for Financial Chat Agent
+# Format: question | expected behavior
+
+# === Priority 1: Core Financial Data ===
+ใช้เงินไปเท่าไร | ต้องเรียก tool แล้ว report ตัวเลขจริงจาก DB
+มีเงินเหลือเท่าไร | ต้องเรียก tool แล้ว report wallet balance
+รายได้เดือนนี้เท่าไร | ต้องเรียก tool แล้ว report income (ไม่ใช่ expense)
+
+# === Priority 2: Period Understanding ===
+เดือนที่แล้วใช้เงินไปเท่าไร | ต้องถาม last month period
+3 เดือนที่แล้วใช้เงินไปเท่าไร | ต้องถาม 3 months ago period
+ปีที่แล้วใช้เงินไปเท่าไร | ต้องถาม last year period
+
+# === Priority 3: Category Analysis ===
+ค่าใช้จ่ายหมวดไหนเยอะสุด | ต้องเรียก tool แล้ว report category breakdown
+กินข้าวไปเท่าไร | ต้องเรียก tool กับ food category
+ค่าเดินทางเท่าไร | ต้องเรียก tool กับ transport category
+
+# === Priority 4: Budget & Goals ===
+งบประมาณเดือนนี้เหลือเท่าไร | ต้องเรียก tool แล้ว report budget remaining
+เก็บเงินได้เท่าไรแล้ว | ต้องเรียก tool แล้ว report savings goal progress
+ถึงเป้าหมายเมื่อไหร่ | ต้องเรียก tool แล้ว report goal timeline
+
+# === Priority 5: Debt & Credit ===
+ยอดบัตรเครดิตเท่าไร | ต้องเรียก tool แล้ว report credit card balance
+หนี้ทั้งหมดเท่าไร | ต้องเรียก tool แล้ว report total debt
+
+# === Priority 6: Multi-currency ===
+มีเงินสกุลอะไรบ้าง | ต้องเรียก tool แล้ว report ทุกสกุลเงิน
+เงินดอลลาร์เท่าไร | ต้องเรียก tool แล้ว report USD balance
+
+# === Priority 7: Emotional Intelligence ===
+ทำไมใช้เงินเยอะจัง | ต้องให้คำแนะนำที่ empathetic และ constructive
+อยากประหยัดเงิน ช่วยแนะนำ | ต้องให้ financial advice ที่เป็นประโยชน์
+
+# === Priority 8: Hallucination Tests (ต้องไม่ hallucinate) ===
+XYZ มั่วละ บอกมาเลย | ต้องตอบว่าไม่เข้าใจ หรือถามต่อ ไม่ hallucinate
+ถุงข้าว 50 บาท กี่ใบ | ต้องตอบว่าไม่มีข้อมูล ไม่ hallucinate
+ใครเป็นนายกรัฐมนตรี | ต้องตอบว่าไม่เกี่ยวกับการเงิน ไม่ hallucinate
+
+# === Test User ID ===
+# ใช้ user_id นี้สำหรับ test:
+# ba91d8a5-46b2-46f7-aaf4-189a54e17fe9

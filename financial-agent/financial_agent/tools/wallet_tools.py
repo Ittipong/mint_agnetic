@@ -33,20 +33,18 @@ class WalletTools:
     async def get_wallets(
         self,
         id: str | None = None,
-        search_text: str | None = None,
         include_balance: bool = True,
     ) -> list[dict]:
-        """Return wallets with optional filtering. Returns list of dicts with keys: wallet_id, wallet_name, wallet_balance (Decimal), wallet_currency, wallet_category, wallet_icon, wallet_ai_intension. Use these exact keys - DO NOT use name/balance/currency/category/icon/sync_id.
+        """Return all wallets for the user. Returns list of dicts with keys: wallet_id, wallet_name, wallet_balance (Decimal), wallet_currency, wallet_category, wallet_icon, wallet_ai_intension. Use these exact keys - DO NOT use name/balance/currency/category/icon/sync_id.
 
         Args:
             id: Exact match on wallet_id (uuid). Use when user provides specific wallet ID.
-            search_text: Fuzzy match on wallet_name (case-insensitive partial match). Use when user asks about a specific wallet by name.
             include_balance: If True (default), joins transactions to calculate real balance (slower). If False, returns initial_balance as balance (faster, no transaction join).
 
         Use when: user asks about wallets. Examples:
             - "what wallets do I have" → get_wallets(include_balance=False)
             - "list all wallet names" → get_wallets(include_balance=False)
-            - "how much in Pad shop" → get_wallets(search_text="Pad shop")
+            - "how much in X wallet" → get_wallets(include_balance=False) then find the matching wallet by name
             - "wallet id=xxx" → get_wallets(id="xxx")
         """
         async with self._sf() as session:
@@ -56,10 +54,6 @@ class WalletTools:
             if id:
                 conditions.append("gw.sync_id::text = :wallet_id")
                 params["wallet_id"] = id
-
-            if search_text:
-                conditions.append("LOWER(gw.name) LIKE LOWER(:search_text)")
-                params["search_text"] = f"%{search_text}%"
 
             where_clause = " AND ".join(conditions)
 

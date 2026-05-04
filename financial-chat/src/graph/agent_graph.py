@@ -20,9 +20,9 @@ from src.graph.state import AgentState
 from src.graph.nodes import (
     reason_node,
     REGULAR_TOOLS,
-    CODEACT_TOOL_NAMES,
+    ANALYZE_TOOL_NAMES,
 )
-from src.graph.codeact_subgraph import act_node
+from src.graph.analyze_subgraph import act_node
 
 
 def _should_route(state: AgentState) -> str:
@@ -36,7 +36,7 @@ def _should_route(state: AgentState) -> str:
     tool_names = {tc["name"] for tc in last_msg.tool_calls}
 
     # CodeAct tool → run CodeAct subgraph
-    if tool_names & CODEACT_TOOL_NAMES:
+    if tool_names & ANALYZE_TOOL_NAMES:
         return "act"
 
     # Regular tools → run via ToolNode

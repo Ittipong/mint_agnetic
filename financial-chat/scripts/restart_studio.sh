@@ -42,9 +42,8 @@ mkdir -p "$PROJECT_DIR/logs"
 # Start server
 echo "Starting server on port $PORT..."
 cd "$PROJECT_DIR"
-source .venv/bin/activate
 
-nohup python -m uvicorn src.server:app \
+nohup "$PROJECT_DIR/.venv/bin/python3" -m uvicorn src.server:app \
     --host 0.0.0.0 \
     --port "$PORT" \
     > "$LOG_FILE" 2>&1 &

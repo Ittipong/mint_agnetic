@@ -15,3 +15,4 @@ class AgentState(TypedDict):
 
     messages: Annotated[list[AnyMessage], add_messages]
     user_id: NotRequired[str]  # optional so Studio chat can init with messages only
+    current_date: NotRequired[str]  # ISO date string for the CodeAct agent

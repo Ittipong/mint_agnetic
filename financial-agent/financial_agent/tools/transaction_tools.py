@@ -46,7 +46,7 @@ class TransactionTools:
     ) -> list[dict]:
         """All outgoing transactions: expense + transfer-out + goalDeposit + creditCardPay + ...
 
-        Use when: user asks "รายจ่าย", "ค่าใช้จ่าย", "expenses", "spending", "ใช้ไปเท่าไหร่", "spent"
+        Use when: user asks "expenses", "spending", "how much did I spend", "spent"
         """
         async with self._sf() as session:
             return await self._fetch_transactions(
@@ -65,7 +65,7 @@ class TransactionTools:
     ) -> list[dict]:
         """All incoming transactions: income + transfer-in + goalWithdraw + ...
 
-        Use when: user asks "รายรับ", "income", "เงินเข้า", "ได้รับ", "received"
+        Use when: user asks "income", "how much did I receive", "money in", "received"
         """
         async with self._sf() as session:
             return await self._fetch_transactions(
@@ -84,7 +84,7 @@ class TransactionTools:
     ) -> list[dict]:
         """Only transfer transactions (type=transfer).
 
-        Use when: user asks about money transfers between wallets, "โอนเงิน", "transfer"
+        Use when: user asks about money transfers between wallets, "transfer"
         """
         async with self._sf() as session:
             return await self._fetch_transactions(
@@ -100,7 +100,7 @@ class TransactionTools:
     ) -> list[dict]:
         """Last N transactions ordered by date desc. Use for "recent transactions" / "last N".
 
-        Use when: user asks "recent transactions", "last 5", "ล่าสุด", "รายการล่าสุด", "recent"
+        Use when: user asks "recent transactions", "last 5", "latest", "recent"
         """
         async with self._sf() as session:
             return await self._fetch_transactions(
@@ -118,7 +118,7 @@ class TransactionTools:
     ) -> list[dict]:
         """Transactions within a date range. dates as "YYYY-MM-DD".
 
-        Use when: user specifies a date range like "this month", "last week", "มกราคม", "ระหว่างวันที่"
+        Use when: user specifies a date range like "this month", "last week", "January", "between dates"
         """
         async with self._sf() as session:
             return await self._fetch_transactions(
@@ -134,7 +134,7 @@ class TransactionTools:
     ) -> list[dict]:
         """Scheduled/future transactions (status='scheduled' and date > today).
 
-        Use when: user asks about "upcoming", "scheduled", "future transactions", "ที่จะเกิดขึ้น", "กำหนดการ"
+        Use when: user asks about "upcoming", "scheduled", "future transactions"
 
         Args:
             wallet_sync_id: Filter by specific wallet
@@ -193,15 +193,35 @@ class TransactionTools:
 
             return [
                 {
-                    **dict(row),
-                    "id": str(row["id"]),
-                    "sync_id": str(row["sync_id"]),
-                    "amount": _to_decimal(row["amount"]),
-                    "converted_amount": _to_decimal(row["converted_amount"]) if row["converted_amount"] is not None else None,
-                    "destination_converted_amount": _to_decimal(row["destination_converted_amount"]) if row["destination_converted_amount"] is not None else None,
-                    "exchange_rate": _to_decimal(row["exchange_rate"]) if row["exchange_rate"] is not None else None,
-                    "tags": row["tags"] if isinstance(row["tags"], list) else [],
-                    "icon": row["icon"] if isinstance(row["icon"], dict) else None,
+                    "transaction_id": str(row["id"]),
+                    "transaction_sync_id": str(row["sync_id"]),
+                    "transaction_type": row["type"],
+                    "transaction_type_group": row["type_group"],
+                    "transaction_amount": _to_decimal(row["amount"]),
+                    "transaction_date": row["date"],
+                    "transaction_note": row["note"],
+                    "transaction_destination_note": row["destination_note"],
+                    "transaction_wallet_sync_id": row["wallet_sync_id"],
+                    "transaction_destination_wallet_sync_id": row["destination_wallet_sync_id"],
+                    "transaction_category_sync_id": row["category_sync_id"],
+                    "transaction_category_name": row["category_name"],
+                    "transaction_display_category": row["display_category"],
+                    "transaction_effect_on_wallet": _to_decimal(row["effect_on_wallet"]) if row["effect_on_wallet"] is not None else None,
+                    "transaction_effect_on_destination": _to_decimal(row["effect_on_destination"]) if row["effect_on_destination"] is not None else None,
+                    "transaction_currency_code": row["currency_code"],
+                    "transaction_currency_symbol": row["currency_symbol"],
+                    "transaction_converted_amount": _to_decimal(row["converted_amount"]) if row["converted_amount"] is not None else None,
+                    "transaction_destination_currency_code": row["destination_currency_code"],
+                    "transaction_destination_currency_symbol": row["destination_currency_symbol"],
+                    "transaction_destination_converted_amount": _to_decimal(row["destination_converted_amount"]) if row["destination_converted_amount"] is not None else None,
+                    "transaction_exchange_rate": _to_decimal(row["exchange_rate"]) if row["exchange_rate"] is not None else None,
+                    "transaction_is_recurring": row["is_recurring"],
+                    "transaction_recurring_frequency": row["recurring_frequency"],
+                    "transaction_recurring_transaction_sync_id": row["recurring_transaction_sync_id"],
+                    "transaction_include_in_report": row["include_in_report"],
+                    "transaction_status": row["status"],
+                    "transaction_icon": row["icon"] if isinstance(row["icon"], dict) else None,
+                    "transaction_tags": row["tags"] if isinstance(row["tags"], list) else [],
                 }
                 for row in rows
             ]
@@ -306,15 +326,35 @@ class TransactionTools:
 
         return [
             {
-                **dict(row),
-                "id": str(row["id"]),
-                "sync_id": str(row["sync_id"]),
-                "amount": _to_decimal(row["amount"]),
-                "converted_amount": _to_decimal(row["converted_amount"]) if row["converted_amount"] is not None else None,
-                "destination_converted_amount": _to_decimal(row["destination_converted_amount"]) if row["destination_converted_amount"] is not None else None,
-                "exchange_rate": _to_decimal(row["exchange_rate"]) if row["exchange_rate"] is not None else None,
-                "tags": row["tags"] if isinstance(row["tags"], list) else [],
-                "icon": row["icon"] if isinstance(row["icon"], dict) else None,
+                "transaction_id": str(row["id"]),
+                "transaction_sync_id": str(row["sync_id"]),
+                "transaction_type": row["type"],
+                "transaction_type_group": row["type_group"],
+                "transaction_amount": _to_decimal(row["amount"]),
+                "transaction_date": row["date"],
+                "transaction_note": row["note"],
+                "transaction_destination_note": row["destination_note"],
+                "transaction_wallet_sync_id": row["wallet_sync_id"],
+                "transaction_destination_wallet_sync_id": row["destination_wallet_sync_id"],
+                "transaction_category_sync_id": row["category_sync_id"],
+                "transaction_category_name": row["category_name"],
+                "transaction_display_category": row["display_category"],
+                "transaction_effect_on_wallet": _to_decimal(row["effect_on_wallet"]) if row["effect_on_wallet"] is not None else None,
+                "transaction_effect_on_destination": _to_decimal(row["effect_on_destination"]) if row["effect_on_destination"] is not None else None,
+                "transaction_currency_code": row["currency_code"],
+                "transaction_currency_symbol": row["currency_symbol"],
+                "transaction_converted_amount": _to_decimal(row["converted_amount"]) if row["converted_amount"] is not None else None,
+                "transaction_destination_currency_code": row["destination_currency_code"],
+                "transaction_destination_currency_symbol": row["destination_currency_symbol"],
+                "transaction_destination_converted_amount": _to_decimal(row["destination_converted_amount"]) if row["destination_converted_amount"] is not None else None,
+                "transaction_exchange_rate": _to_decimal(row["exchange_rate"]) if row["exchange_rate"] is not None else None,
+                "transaction_is_recurring": row["is_recurring"],
+                "transaction_recurring_frequency": row["recurring_frequency"],
+                "transaction_recurring_transaction_sync_id": row["recurring_transaction_sync_id"],
+                "transaction_include_in_report": row["include_in_report"],
+                "transaction_status": row["status"],
+                "transaction_icon": row["icon"] if isinstance(row["icon"], dict) else None,
+                "transaction_tags": row["tags"] if isinstance(row["tags"], list) else [],
             }
             for row in rows
         ]

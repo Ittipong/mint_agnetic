@@ -147,20 +147,18 @@ async def run_evaluation(
         last_msg = result["messages"][-1]
         latency_ms = (end_time - start_time) * 1000
 
-        # Extract step count
+        # Extract step count from ToolMessage.additional_kwargs.step_info.
+        # The analyze subgraph stamps planner/resolver diagnostics there;
+        # we count the resolved entities + 1 (plan) as a proxy for "steps".
         step_count = 0
         for msg in result.get("messages", []):
-            if hasattr(msg, "content") and isinstance(msg.content, str):
-                marker_start = "__CODEACT_INFO_START__"
-                marker_end = "__CODEACT_INFO_END__"
-                if marker_start in msg.content:
-                    try:
-                        start_idx = msg.content.index(marker_start) + len(marker_start)
-                        end_idx = msg.content.index(marker_end, start_idx)
-                        info = json.loads(msg.content[start_idx:end_idx])
-                        step_count = info.get("codeact_total_steps", 0)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
+            kw = getattr(msg, "additional_kwargs", None) or {}
+            info = kw.get("step_info")
+            if isinstance(info, dict):
+                step_count = max(
+                    step_count,
+                    1 + len(info.get("wallets") or []) + len(info.get("categories") or []) + len(info.get("tags") or []),
+                )
 
         return {
             "response": last_msg.content if hasattr(last_msg, "content") else str(last_msg),

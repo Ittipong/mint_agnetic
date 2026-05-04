@@ -1,6 +1,6 @@
-"""financial_data.py — removed.
+"""financial_data.py — placeholder.
 
-query_user_finances was the old @tool wrapper that executed FinancialCodeActAgent inline.
-It has been replaced by the dedicated act_node in src/graph/codeact_subgraph.py,
-which exposes CodeAct as a proper LangGraph node visible in Studio.
+The financial-data tool is now implemented as the analyze subgraph in
+src/graph/analyze_subgraph/, exposed via the `analyze_user_finances` tool
+declared in src/graph/nodes.py.
 """

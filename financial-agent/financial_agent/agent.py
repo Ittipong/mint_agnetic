@@ -57,7 +57,7 @@ class FinancialCodeActAgent:
         if self._engine:
             await dispose_engine(self._engine)
 
-    def _build_system_prompt(self, tool_schemas: str = "") -> str:
+    def _build_system_prompt(self, tool_schemas: str = "", current_date: str = "") -> str:
         from jinja2 import Environment, FileSystemLoader
         from pathlib import Path
         jinja = Environment(
@@ -66,13 +66,14 @@ class FinancialCodeActAgent:
             lstrip_blocks=True,
         )
         tmpl = jinja.get_template("system_prompt.j2")
+        today_str = current_date if current_date else date.today().isoformat()
         return tmpl.render(
             db_schema_summary=_DB_SCHEMA_SUMMARY,
-            today=date.today().isoformat(),
+            today=today_str,
             tool_schemas=tool_schemas,
         )
 
-    async def solve(self, task: str, user_id: str, complex: bool = False) -> LoopResult:
+    async def solve(self, task: str, user_id: str, complex: bool = False, current_date: str = "") -> LoopResult:
         if self._loop is None or self._reasoner is None:
             raise RuntimeError("Use agent as async context manager: async with FinancialCodeActAgent() as agent:")
 
@@ -80,7 +81,11 @@ class FinancialCodeActAgent:
         namespace = registry.get_namespace()
         tool_schemas = registry.get_schema_for_prompt()
 
-        self._reasoner.set_system_prompt(self._build_system_prompt(tool_schemas=tool_schemas))
+        # Add 'today' string to namespace so generated code can use it
+        today_str = current_date if current_date else date.today().isoformat()
+        namespace["today"] = today_str
+
+        self._reasoner.set_system_prompt(self._build_system_prompt(tool_schemas=tool_schemas, current_date=current_date))
         try:
             return await asyncio.wait_for(
                 self._loop.run(task, namespace, complex=complex),
@@ -93,9 +98,9 @@ class FinancialCodeActAgent:
                 metadata={"error": _SOLVE_TIMEOUT_EXCEEDED, "timeout_seconds": self._settings.solve_timeout},
             )
 
-    async def solve_as_tool(self, task: str, user_id: str, complex: bool = False) -> ToolResult:
+    async def solve_as_tool(self, task: str, user_id: str, complex: bool = False, current_date: str = "") -> ToolResult:
         """Run task and return a ToolResult ready for LangGraph ReAct tool_calls."""
-        loop_result = await self.solve(task, user_id=user_id, complex=complex)
+        loop_result = await self.solve(task, user_id=user_id, complex=complex, current_date=current_date)
         return loop_result.to_tool_result()
 
     def result_to_json(self, result: LoopResult) -> str:
