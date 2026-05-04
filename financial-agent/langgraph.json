@@ -1,7 +1,0 @@
-{
-  "source": {"kind": "uv", "root": "."},
-  "graphs": {
-    "financial_agent": "financial_agent.langgraph_simple:graph"
-  },
-  "env": {}
-}
