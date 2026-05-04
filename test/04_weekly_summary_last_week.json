@@ -1,0 +1,10 @@
+{
+  "assistant_id": "agent",
+  "graph_name": "agent",
+  "input": {
+    "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
+    "messages": [
+      {"role": "user", "content": "สัปดาห์ที่แล้วเท่าไร"}
+    ]
+  }
+}
