@@ -26,6 +26,8 @@ from src.graph.compute_subgraph.state import ComputeSubState
 
 
 async def respond_node(state: ComputeSubState) -> dict:
+    from datetime import datetime as dt
+    t0 = dt.now()
     if state.get("needs_clarification") and state.get("clarification") is not None:
         return {"answer": _format_clarification(state["clarification"])}
 
@@ -39,6 +41,9 @@ async def respond_node(state: ComputeSubState) -> dict:
     spec: QuerySpec = state["spec"]
     rows: list[ExecRow] = state.get("rows") or []
     answer = _format_result(spec, rows)
+    t1 = dt.now()
+    ms = (t1 - t0).total_seconds() * 1000
+    print(f"[PERF] respond_node: {ms:.0f}ms rows={len(rows)}")
     return {"answer": answer}
 
 

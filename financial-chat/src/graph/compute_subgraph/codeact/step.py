@@ -213,7 +213,7 @@ def _json_default(o: Any):
 async def codeact_step_node(state: ComputeSubState) -> dict:
     """Run one iteration. The graph loops until the LLM sets `result`
     or `MAX_STEPS` is hit."""
-    from src.llm import llm  # imported lazily to avoid eager API client init
+    from src.llm import codeact_llm as llm  # imported lazily to avoid eager API client init
 
     history: list[dict] = state.get("codeact_history") or []
     if len(history) >= MAX_STEPS:

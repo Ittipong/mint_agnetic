@@ -16,6 +16,8 @@ from src.graph.compute_subgraph.state import ComputeSubState
 
 
 async def execute_node(state: ComputeSubState) -> dict:
+    from datetime import datetime as dt
+    t0 = dt.now()
     spec: QuerySpec = state["spec"]
     sql, params = build_query(spec, state["user_id"])
     pool = await get_pool()
@@ -36,6 +38,9 @@ async def execute_node(state: ComputeSubState) -> dict:
         ],
         "currency": spec.currency,
     }
+    t1 = dt.now()
+    ms = (t1 - t0).total_seconds() * 1000
+    print(f"[PERF] execute_node: {ms:.0f}ms rows={len(rows)} metric={spec.metric}")
     return {
         "rows": rows,
         "sql_debug": _render_for_log(sql, params),

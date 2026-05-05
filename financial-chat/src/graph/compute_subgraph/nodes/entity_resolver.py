@@ -245,6 +245,8 @@ async def _resolve_mention(
 
 
 async def entity_resolve_node(state: ComputeSubState) -> dict:
+    from datetime import datetime as dt
+    t0 = dt.now()
     plan: QueryPlan | None = state.get("plan")
     if plan is None or not plan.entity_mentions:
         return {
@@ -269,6 +271,9 @@ async def entity_resolve_node(state: ComputeSubState) -> dict:
         elif mention.kind == "tag":
             tags.append(resolved)
 
+    t1 = dt.now()
+    ms = (t1 - t0).total_seconds() * 1000
+    print(f"[PERF] entity_resolve_node: {ms:.0f}ms wallets={len(wallets)} categories={len(categories)} tags={len(tags)}")
     return {
         "resolved_wallets": wallets,
         "resolved_categories": categories,

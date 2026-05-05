@@ -23,5 +23,23 @@ def create_writer_llm() -> ChatOpenAI:
     )
 
 
+def create_codeact_llm() -> ChatOpenAI:
+    """Create a dedicated LLM for the CodeAct loop (separate from ReAct)."""
+    if "openrouter" in settings.codeact_base_url:
+        api_key = settings.openrouter_api_key
+    else:
+        api_key = settings.typhoon_api_key
+
+    return ChatOpenAI(
+        model=settings.codeact_model,
+        api_key=api_key,
+        base_url=settings.codeact_base_url,
+        temperature=0.3,
+    )
+
+
 # Default LLM — used by reason_node in the ReAct loop
 llm = create_writer_llm()
+
+# CodeAct LLM — used by the codeact_step_node sandbox loop
+codeact_llm = create_codeact_llm()

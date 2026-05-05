@@ -68,11 +68,12 @@ def _tag_filter(spec: QuerySpec, params: list[Any]) -> str:
         return ""
     ids = [t.sync_id for t in spec.tags]
     params.append(ids)
+    # `transaction_tags` is a join table with no soft-delete column —
+    # rows are hard-deleted when a tag is removed from a transaction.
     return (
         f"AND EXISTS (SELECT 1 FROM transaction_tags tt "
         f"WHERE tt.transaction_sync_id = t.sync_id "
-        f"AND tt.tag_sync_id = ANY(${len(params)}::text[]) "
-        f"AND tt.is_deleted = false)"
+        f"AND tt.tag_sync_id = ANY(${len(params)}::text[]))"
     )
 
 

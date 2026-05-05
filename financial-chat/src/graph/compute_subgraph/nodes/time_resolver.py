@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import calendar
 import re
+import dateparser
 from datetime import date, timedelta
 from typing import Literal
 
@@ -205,6 +206,8 @@ async def _llm_resolve(phrase: str, today: date) -> tuple[date, date, str, float
 
 
 async def time_resolve_node(state: ComputeSubState) -> dict:
+    from datetime import datetime as dt
+    t0 = dt.now()
     today = date.fromisoformat(state["today"])
     plan = state.get("plan")
     phrase = (plan.time_phrase if plan else None) or ""
@@ -214,64 +217,37 @@ async def time_resolve_node(state: ComputeSubState) -> dict:
     #    to be in. Explicit windows (e.g. "เดือนนี้") still work via the
     #    quick_thai branch below.
     if not phrase.strip():
-        return {
-            "time_range": TimeRange(
-                start=_ALL_TIME_START,
-                end=today,
-                granularity="all",
-                confidence=0.9,
-                raw_phrase=None,
-            )
-        }
-
+        result = {"time_range": TimeRange(start=_ALL_TIME_START, end=today, granularity="all", confidence=0.9, raw_phrase=None)}
     # 2. Regex shortcut
-    quick = _quick_thai(phrase, today)
-    if quick:
+    elif quick := _quick_thai(phrase, today):
         s, e, g = quick
-        return {
-            "time_range": TimeRange(
-                start=s, end=e, granularity=g, confidence=0.95, raw_phrase=phrase
-            )
-        }
-
-    # 3. dateparser
-    try:
-        import dateparser
-
-        parsed = dateparser.parse(
-            phrase,
-            languages=["th", "en"],
-            settings={"RELATIVE_BASE": _to_dt(today), "PREFER_DATES_FROM": "past"},
-        )
-        if parsed is not None:
+        result = {"time_range": TimeRange(start=s, end=e, granularity=g, confidence=0.95, raw_phrase=phrase)}
+    else:
+        # 3. dateparser (import once at top of file for perf)
+        parsed = None
+        try:
+            parsed = dateparser.parse(phrase, languages=["th", "en"], settings={"RELATIVE_BASE": _to_dt(today), "PREFER_DATES_FROM": "past"})
+        except Exception:
+            pass
+        if parsed:
             d = parsed.date() if hasattr(parsed, "date") else parsed
-            # dateparser gives a single date — treat as the month containing it
             s, e = _month_range(d, 0)
-            return {
-                "time_range": TimeRange(
-                    start=s, end=e, granularity="month", confidence=0.8, raw_phrase=phrase
-                )
-            }
-    except Exception:
-        pass
+            result = {"time_range": TimeRange(start=s, end=e, granularity="month", confidence=0.8, raw_phrase=phrase)}
+        else:
+            # 4. LLM fallback
+            llm_out = await _llm_resolve(phrase, today)
+            if llm_out:
+                s, e, g, conf = llm_out
+                result = {"time_range": TimeRange(start=s, end=e, granularity=g, confidence=conf, raw_phrase=phrase)}
+            else:
+                # 5. Give up — default to this month with low confidence
+                s, e = _month_range(today, 0)
+                result = {"time_range": TimeRange(start=s, end=e, granularity="month", confidence=0.3, raw_phrase=phrase)}
 
-    # 4. LLM fallback
-    llm_out = await _llm_resolve(phrase, today)
-    if llm_out:
-        s, e, g, conf = llm_out
-        return {
-            "time_range": TimeRange(
-                start=s, end=e, granularity=g, confidence=conf, raw_phrase=phrase
-            )
-        }
-
-    # 5. Give up — default to this month with low confidence
-    s, e = _month_range(today, 0)
-    return {
-        "time_range": TimeRange(
-            start=s, end=e, granularity="month", confidence=0.3, raw_phrase=phrase
-        )
-    }
+    t1 = dt.now()
+    ms = (t1 - t0).total_seconds() * 1000
+    print(f"[PERF] time_resolve_node: {ms:.0f}ms phrase={phrase!r}")
+    return result
 
 
 def _to_dt(d: date):

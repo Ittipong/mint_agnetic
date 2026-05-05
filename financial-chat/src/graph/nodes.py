@@ -1,6 +1,7 @@
 """ReAct agent node functions."""
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from src.llm import llm
 from src.graph.state import AgentState
@@ -195,10 +196,22 @@ transaction lists. The insight + suggestions section can still be prose.
   Example: "ขออภัย ยังไม่มีข้อมูลยอดเงินสำหรับบัญชีนี้" — do NOT invent
   "19,001.00 USD" or any other figure.
 - Never make up numbers, dates, transaction notes, or category names
+- **Year format — keep AD as-is, or convert correctly to BE.** Transaction
+  dates from the tool are in AD (e.g. `2026-01-04`). When you mention a year
+  in your reply:
+    - Prefer using the AD year directly (e.g. "ต้นปี 2026", "เดือนมกราคม 2026").
+    - If you must use Buddhist Era (พ.ศ./BE), compute `BE = AD + 543`
+      (AD 2025 → BE 2568, AD 2026 → BE 2569, AD 2024 → BE 2567).
+    - NEVER off-by-one. The Jan/Dec year boundary does not change the +543
+      offset.
 - Never convert currencies (THB ↔ USD) unless the user explicitly asks
 - Never say "อาจจะ" or "น่าจะ" when referring to actual data
 - Never answer follow-up questions ("แล้ว...", "อะไรบ้าง", "ดูรายการ") from
   memory — call the tool again
+- **After receiving a tool result, DO NOT call the same tool again for the
+  same question.** If you just called analyze_user_finances and got a result,
+  answer from that result. Do NOT call analyze_user_finances twice in a row
+  with the same task.
 - **Never invent a breakdown the tool didn't return.** If the tool returned
   only `Total: 2,110 THB (5 รายการ)` without a `Breakdown:` or `breakdown:`
   section, you DO NOT know the per-category split — even if the user asked
@@ -299,16 +312,36 @@ def _debug_log(tag: str, msg: str, **kwargs):
 
 # ── Reason node ───────────────────────────────────────────────────────────────
 
-async def reason_node(state: AgentState) -> dict:
+async def reason_node(state: AgentState, config: RunnableConfig) -> dict:
     """LLM decides next action — respond directly or call a tool."""
-    _debug_log("REASON", "reason_node called", state_keys=list(state.keys()))
-    _debug_log("REASON", "user_id in state", user_id=state.get("user_id", "MISSING"))
+    # Pull thread_id + run_id from config so we can correlate duplicate
+    # invocations across the stream/server log and the reason_debug log.
+    cfg = (config or {}).get("configurable") or {}
+    thread_id = cfg.get("thread_id", "MISSING")
+    run_id = (config or {}).get("run_id") or cfg.get("run_id", "MISSING")
+    last_msg_preview = ""
+    msgs = state.get("messages") or []
+    if msgs:
+        last = msgs[-1]
+        content = getattr(last, "content", last) if not isinstance(last, str) else last
+        last_msg_preview = (str(content) or "")[:80].replace("\n", " ")
+
+    _debug_log(
+        "REASON",
+        "reason_node called",
+        thread_id=thread_id,
+        run_id=run_id,
+        msg_count=len(msgs),
+        last_msg=repr(last_msg_preview),
+        state_keys=list(state.keys()),
+    )
+    _debug_log("REASON", "user_id in state", thread_id=thread_id, user_id=state.get("user_id", "MISSING"))
 
     # Require user_id - raise error if not provided
     user_id = state.get("user_id")
     if not user_id:
         raise ValueError("user_id is required but not provided in state")
-    _debug_log("REASON", "user_id resolved", user_id=user_id)
+    _debug_log("REASON", "user_id resolved", thread_id=thread_id, user_id=user_id)
 
     # Handle multiple input formats:
     # 1. "messages" (list of strings) - server.py API
@@ -322,7 +355,7 @@ async def reason_node(state: AgentState) -> dict:
         # Convert list of strings to list of HumanMessages
         raw_messages = [HumanMessage(content=m) for m in raw_messages]
 
-    _debug_log("REASON", "Calling LLM with tools", user_id=user_id, msg_count=len(raw_messages))
+    _debug_log("REASON", "Calling LLM with tools", thread_id=thread_id, user_id=user_id, msg_count=len(raw_messages))
 
     current_date = date.today().isoformat()
 
@@ -334,6 +367,7 @@ async def reason_node(state: AgentState) -> dict:
     _debug_log(
         "REASON",
         "catalog fetched",
+        thread_id=thread_id,
         wallets=len(catalog.wallets),
         categories=len(catalog.categories),
         tags=len(catalog.tags),
@@ -345,13 +379,13 @@ async def reason_node(state: AgentState) -> dict:
     llm_with_tools = llm.bind_tools(ALL_TOOLS)
     response = await llm_with_tools.ainvoke([system_msg] + raw_messages)
 
-    _debug_log("REASON", "LLM response", has_tool_calls=bool(response.tool_calls), tool_calls=response.tool_calls if response.tool_calls else "NONE")
+    _debug_log("REASON", "LLM response", thread_id=thread_id, has_tool_calls=bool(response.tool_calls), tool_calls=response.tool_calls if response.tool_calls else "NONE")
 
     # Preserve user_id and current_date in return - critical for checkpointer state.
     # `catalog` is intentionally NOT persisted; it's re-fetched each turn so
     # adds/renames/deletes propagate immediately.
     result = {"messages": [response], "user_id": user_id, "current_date": current_date}
-    _debug_log("REASON", "reason_node returns", keys=list(result.keys()), user_id_in_result=result.get("user_id"))
+    _debug_log("REASON", "reason_node returns", thread_id=thread_id, keys=list(result.keys()), user_id_in_result=result.get("user_id"))
     return result
 
 

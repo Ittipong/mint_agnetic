@@ -163,8 +163,10 @@ def _build_system(catalog: EntityCatalog | None) -> str:
 
 
 async def plan_node(state: ComputeSubState) -> dict:
+    from datetime import datetime as dt
     from src.llm import llm
 
+    t0 = dt.now()
     catalog: EntityCatalog | None = state.get("catalog")  # type: ignore[assignment]
     structured = llm.with_structured_output(QueryPlan)
     plan: QueryPlan = await structured.ainvoke(
@@ -173,4 +175,7 @@ async def plan_node(state: ComputeSubState) -> dict:
             {"role": "user", "content": state["task"]},
         ]
     )
+    t1 = dt.now()
+    ms = (t1 - t0).total_seconds() * 1000
+    print(f"[PERF] plan_node: {ms:.0f}ms metric={plan.metric} mentions={len(plan.entity_mentions)}")
     return {"plan": plan}

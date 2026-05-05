@@ -86,6 +86,8 @@ def _first_low_confidence(
 
 
 async def gate_node(state: ComputeSubState) -> dict:
+    from datetime import datetime as dt
+    t0 = dt.now()
     plan: QueryPlan = state["plan"]
     time_range: TimeRange = state["time_range"]
     wallets = state.get("resolved_wallets") or []
@@ -112,6 +114,9 @@ async def gate_node(state: ComputeSubState) -> dict:
         transaction_type=plan.transaction_type,
     )
 
+    t1 = dt.now()
+    ms = (t1 - t0).total_seconds() * 1000
+    print(f"[PERF] gate_node: {ms:.0f}ms confidence={confidence:.2f} needs_clarification={clarification is not None}")
     return {
         "spec": spec,
         "confidence": confidence,

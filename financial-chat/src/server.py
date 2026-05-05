@@ -166,7 +166,7 @@ async def _stream_graph(
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @app.post("/studio/chat")
-async def studio_chat(req: StudioChatRequest):
+async def studio_chat(req: StudioChatRequest, request: Request):
     """LangGraph Studio calls this endpoint with the user's JSON payload.
 
     JSON format:
@@ -178,6 +178,16 @@ async def studio_chat(req: StudioChatRequest):
     """
     if _graph is None:
         raise HTTPException(status_code=503, detail="Graph not ready")
+
+    client = request.client
+    _debug_log(
+        "HTTP",
+        "POST /studio/chat",
+        client=f"{client.host}:{client.port}" if client else "unknown",
+        thread_id=req.thread_id,
+        user_id=req.user_id,
+        message=req.message[:80],
+    )
 
     return StreamingResponse(
         _stream_graph(req.user_id, req.thread_id, req.message),
@@ -195,6 +205,16 @@ async def chat_stream(req: ChatRequest, request: Request):
     """Stream chat response as Server-Sent Events."""
     if _graph is None:
         raise HTTPException(status_code=503, detail="Graph not ready")
+
+    client = request.client
+    _debug_log(
+        "HTTP",
+        "POST /chat/stream",
+        client=f"{client.host}:{client.port}" if client else "unknown",
+        thread_id=req.thread_id,
+        user_id=req.user_id,
+        message=req.message[:80],
+    )
 
     return StreamingResponse(
         _stream_graph(req.user_id, req.thread_id, req.message),

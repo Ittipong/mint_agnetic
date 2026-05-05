@@ -119,6 +119,7 @@ async def act_node(state: AgentState) -> dict:
     the result in a ToolMessage that ReAct can keep reasoning over. Diagnostic
     info goes into `additional_kwargs` so we don't pollute the message body.
     """
+    t0 = datetime_fn.now()
     user_id = state.get("user_id") or ""
     last_msg = state["messages"][-1]
     tool_call = next(
@@ -142,7 +143,10 @@ async def act_node(state: AgentState) -> dict:
     # Fetch the entity catalog once and thread it through the subgraph.
     # The parent reasoner already saw the same names; sharing the snapshot
     # keeps planner/resolver consistent with what the LLM was just told.
+    t1 = datetime_fn.now()
     catalog: EntityCatalog = await fetch_user_catalog(user_id)
+    t2 = datetime_fn.now()
+    catalog_ms = (t2 - t1).total_seconds() * 1000
 
     sub_input: ComputeSubState = {
         "task": task,
@@ -150,7 +154,12 @@ async def act_node(state: AgentState) -> dict:
         "today": today_iso,
         "catalog": catalog,
     }
+    t3 = datetime_fn.now()
     sub_out: dict = await compute_subgraph.ainvoke(sub_input)
+    t4 = datetime_fn.now()
+    compute_ms = (t4 - t3).total_seconds() * 1000
+    total_ms = (t4 - t0).total_seconds() * 1000
+    print(f"[PERF] act_node: catalog={catalog_ms:.0f}ms, compute={compute_ms:.0f}ms, total={total_ms:.0f}ms, task={task!r}")
 
     answer: str = sub_out.get("answer", "(no result)")
     step_info = {
