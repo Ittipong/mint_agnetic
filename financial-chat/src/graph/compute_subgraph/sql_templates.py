@@ -123,6 +123,28 @@ def _currency_join() -> str:
     )
 
 
+def _wallet_join() -> str:
+    """LEFT JOIN all 3 wallet types so transactions from any wallet are visible."""
+    return """
+        LEFT JOIN general_wallets gw ON gw.sync_id::text = t.wallet_sync_id
+        LEFT JOIN creditcard_wallets cc ON cc.sync_id::text = t.wallet_sync_id
+        LEFT JOIN goal_wallets gl ON gl.sync_id::text = t.wallet_sync_id"""
+
+
+def _wallet_name_expr() -> str:
+    """COALESCE wallet name from all 3 wallet types."""
+    return "COALESCE(gw.name, cc.name, gl.name) AS wallet_name"
+
+
+def _wallet_user_check() -> str:
+    """WHERE clause to filter by user_id from any wallet type (non-deleted).
+    Use as: WHERE 1=1 {_wallet_user_check()}"""
+    return """
+        AND (gw.user_id = $1 AND gw.deleted_at IS NULL
+             OR cc.user_id = $1 AND cc.deleted_at IS NULL
+             OR gl.user_id = $1 AND gl.deleted_at IS NULL)"""
+
+
 # ── Metric builders ──────────────────────────────────────────────────────────
 
 
@@ -138,10 +160,9 @@ def _sum_by_type(spec: QuerySpec, user_id: str, type_value: str) -> tuple[str, l
                 SUM({_AMOUNT_THB_EXPR}) AS amount,
                 COUNT(*)              AS cnt
             FROM transactions t
-            JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
+            {_wallet_join()}
             {_currency_join()}
-            WHERE w.user_id = $1
-              AND w.deleted_at IS NULL
+            WHERE 1=1 {_wallet_user_check()}
               AND t.date >= $2
               AND t.date <  ($3::date + INTERVAL '1 day')
               AND t.type = ${type_idx}
@@ -157,9 +178,8 @@ def _sum_by_type(spec: QuerySpec, user_id: str, type_value: str) -> tuple[str, l
                 SUM(t.amount::numeric)           AS amount,
                 COUNT(*)                          AS cnt
             FROM transactions t
-            JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
-            WHERE w.user_id = $1
-              AND w.deleted_at IS NULL
+            {_wallet_join()}
+            WHERE 1=1 {_wallet_user_check()}
               AND t.date >= $2
               AND t.date <  ($3::date + INTERVAL '1 day')
               AND t.type = ${type_idx}
@@ -189,9 +209,8 @@ def build_count(spec: QuerySpec, user_id: str) -> tuple[str, list]:
             COALESCE(t.currency_code, 'THB') AS currency,
             COUNT(*)                          AS cnt
         FROM transactions t
-        JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
-        WHERE w.user_id = $1
-          AND w.deleted_at IS NULL
+        {_wallet_join()}
+        WHERE 1=1 {_wallet_user_check()}
           AND t.date >= $2
           AND t.date <  ($3::date + INTERVAL '1 day')
           AND t.is_deleted = false
@@ -229,11 +248,10 @@ def build_list(spec: QuerySpec, user_id: str) -> tuple[str, list]:
             COALESCE(t.currency_code, 'THB') AS currency,
             t.note               AS note,
             t.category_name      AS category_name,
-            w.name               AS wallet_name
+            {_wallet_name_expr()}
         FROM transactions t
-        JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
-        WHERE w.user_id = $1
-          AND w.deleted_at IS NULL
+        {_wallet_join()}
+        WHERE 1=1 {_wallet_user_check()}
           AND t.date >= $2
           AND t.date <  ($3::date + INTERVAL '1 day')
           AND t.is_deleted = false
@@ -340,10 +358,9 @@ def build_sum_by_category(spec: QuerySpec, user_id: str) -> tuple[str, list]:
                 SUM({_AMOUNT_THB_EXPR})                        AS amount,
                 COUNT(*)                                       AS cnt
             FROM transactions t
-            JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
+            {_wallet_join()}
             {_currency_join()}
-            WHERE w.user_id = $1
-              AND w.deleted_at IS NULL
+            WHERE 1=1 {_wallet_user_check()}
               AND t.date >= $2
               AND t.date <  ($3::date + INTERVAL '1 day')
               AND t.type = ${type_idx}
@@ -363,9 +380,8 @@ def build_sum_by_category(spec: QuerySpec, user_id: str) -> tuple[str, list]:
                 SUM(t.amount::numeric)                        AS amount,
                 COUNT(*)                                      AS cnt
             FROM transactions t
-            JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
-            WHERE w.user_id = $1
-              AND w.deleted_at IS NULL
+            {_wallet_join()}
+            WHERE 1=1 {_wallet_user_check()}
               AND t.date >= $2
               AND t.date <  ($3::date + INTERVAL '1 day')
               AND t.type = ${type_idx}
@@ -389,15 +405,14 @@ def build_sum_by_wallet(spec: QuerySpec, user_id: str) -> tuple[str, list]:
     if spec.convert_to_thb:
         sql = f"""
             SELECT
-                w.name                  AS bucket,
+                {_wallet_name_expr().replace(' AS wallet_name', ' AS bucket')} AS bucket,
                 'THB'                    AS currency,
                 SUM({_AMOUNT_THB_EXPR}) AS amount,
                 COUNT(*)                 AS cnt
             FROM transactions t
-            JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
+            {_wallet_join()}
             {_currency_join()}
-            WHERE w.user_id = $1
-              AND w.deleted_at IS NULL
+            WHERE 1=1 {_wallet_user_check()}
               AND t.date >= $2
               AND t.date <  ($3::date + INTERVAL '1 day')
               AND t.type = ${type_idx}
@@ -405,20 +420,19 @@ def build_sum_by_wallet(spec: QuerySpec, user_id: str) -> tuple[str, list]:
               AND t.status = 'confirmed'
               AND t.include_in_report = true
               {extra}
-            GROUP BY w.name
+            GROUP BY bucket
             ORDER BY amount DESC
         """
     else:
         sql = f"""
             SELECT
-                w.name                            AS bucket,
+                {_wallet_name_expr().replace(' AS wallet_name', ' AS bucket')} AS bucket,
                 COALESCE(t.currency_code, 'THB') AS currency,
                 SUM(t.amount::numeric)            AS amount,
                 COUNT(*)                          AS cnt
             FROM transactions t
-            JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
-            WHERE w.user_id = $1
-              AND w.deleted_at IS NULL
+            {_wallet_join()}
+            WHERE 1=1 {_wallet_user_check()}
               AND t.date >= $2
               AND t.date <  ($3::date + INTERVAL '1 day')
               AND t.type = ${type_idx}
@@ -426,7 +440,7 @@ def build_sum_by_wallet(spec: QuerySpec, user_id: str) -> tuple[str, list]:
               AND t.status = 'confirmed'
               AND t.include_in_report = true
               {extra}
-            GROUP BY w.name, COALESCE(t.currency_code, 'THB')
+            GROUP BY bucket, COALESCE(t.currency_code, 'THB')
             ORDER BY amount DESC
         """
     return sql, params
@@ -645,7 +659,7 @@ def build_budget_transactions(spec: QuerySpec, user_id: str) -> tuple[str, list]
             COALESCE(t.currency_code, 'THB')  AS currency,
             t.note                             AS note,
             t.category_name                    AS category_name,
-            w.name                             AS wallet_name,
+            {_wallet_name_expr()},
             sb.budget_name                     AS budget_name
         FROM scoped_budgets sb
         JOIN budget_filters bf ON bf.budget_sync_id = sb.budget_sync_id
@@ -659,10 +673,44 @@ def build_budget_transactions(spec: QuerySpec, user_id: str) -> tuple[str, list]
              AND (cardinality(bf.wallet_ids)     = 0 OR t.wallet_sync_id = ANY(bf.wallet_ids))
              AND (cardinality(bf.category_names) = 0 OR t.category_name  = ANY(bf.category_names))
              AND COALESCE(t.currency_code, 'THB') = sb.currency
-        JOIN general_wallets w ON w.sync_id::text = t.wallet_sync_id
-        WHERE w.deleted_at IS NULL
+        {_wallet_join()}
+        WHERE (gw.sync_id IS NOT NULL OR cc.sync_id IS NOT NULL OR gl.sync_id IS NOT NULL)
+          AND (gw.deleted_at IS NULL OR cc.deleted_at IS NULL OR gl.deleted_at IS NULL)
         {order_clause}
         LIMIT {cap}
+    """
+    return sql, params
+
+
+# ── Credit card wallets ──────────────────────────────────────────────────────
+
+
+def build_creditcard_list(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """Every non-deleted credit-card wallet with limit, used, available.
+
+    `used` is the backend-maintained `cached_used_amount`. When the cache is
+    stale or has never been written, used / available come back as NULL on
+    purpose — we never fall back to `initial_used` because doing so hides a
+    stale cache from the user (a "0 used" reading on a card that has been
+    swiped is far worse than an explicit "unknown").
+    """
+    params: list = [user_id]
+    sql = """
+        SELECT
+            cc.sync_id::text                                AS sync_id,
+            cc.name                                          AS name,
+            cc.credit_limit::numeric                         AS credit_limit,
+            cc.cached_used_amount::numeric                   AS used,
+            CASE
+                WHEN cc.cached_used_amount IS NULL THEN NULL
+                ELSE cc.credit_limit::numeric - cc.cached_used_amount::numeric
+            END                                              AS available,
+            cc.currency                                      AS currency,
+            cc.cache_updated_at                              AS cache_updated_at
+        FROM creditcard_wallets cc
+        WHERE cc.deleted_at IS NULL
+          AND cc.user_id = $1
+        ORDER BY cc.name
     """
     return sql, params
 
@@ -853,6 +901,7 @@ _BUILDERS = {
     "budget_list": build_budget_list,
     "budget_remaining": build_budget_remaining,
     "budget_transactions": build_budget_transactions,
+    "creditcard_list": build_creditcard_list,
     "goal_list": build_goal_list,
     "goal_progress": build_goal_progress,
     "goal_transactions": build_goal_transactions,

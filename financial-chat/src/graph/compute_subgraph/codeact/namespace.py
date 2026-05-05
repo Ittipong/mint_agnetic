@@ -312,13 +312,39 @@ class _Wrappers:
         end: str | date | None = None,
         budget_name_phrase: str | None = None,
     ) -> list[dict]:
-        """Active budgets in [start, end] with amount/spent/remaining/pct/days."""
+        """Budgets covering the [start, end] window with amount/spent/remaining/pct/days.
+
+        Default (no args): **active-only** — returns only budgets whose period
+        covers TODAY (start_date <= today <= end_date). Showing already-ended
+        budgets in an overview misleads the user, so the LLM must explicitly
+        ask for them by passing a `start`/`end` that overlaps the older period
+        (e.g. last month).
+        """
+        resolved_start = self._to_date(start) if start else self._today
+        resolved_end = self._to_date(end) if end else self._today
         return self._exec(
             self._spec(
                 metric="budget_remaining",
-                start=self._to_date(start) if start else date(1900, 1, 1),
-                end=self._to_date(end) if end else self._today,
+                start=resolved_start,
+                end=resolved_end,
                 budget_name_phrase=budget_name_phrase,
+            )
+        )
+
+    def creditcard_list(self) -> list[dict]:
+        """Every non-deleted credit-card wallet — limit, used, available, currency.
+
+        Each row: {sync_id, name, credit_limit, used, available, currency,
+        cache_updated_at}. `used` mirrors the backend's cached_used_amount.
+        When the cache has never been written it stays NULL (and `available`
+        is NULL too) — never substitute a 0 or initial_used here, an unknown
+        usage must read as unknown so the user can see the cache is stale.
+        """
+        return self._exec(
+            self._spec(
+                metric="creditcard_list",
+                start=date(1900, 1, 1),
+                end=self._today,
             )
         )
 
@@ -424,6 +450,7 @@ def build_namespace(
         "budget_remaining":    w.budget_remaining,
         "budget_transactions": w.budget_transactions,
         "budget_list":         w.budget_list,
+        "creditcard_list":     w.creditcard_list,
         "goal_list":           w.goal_list,
         "goal_progress":       w.goal_progress,
         "goal_transactions":   w.goal_transactions,

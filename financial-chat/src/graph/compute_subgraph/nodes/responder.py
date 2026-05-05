@@ -210,6 +210,8 @@ def _body(spec: QuerySpec, rows: list[ExecRow]) -> str:
         return _format_goal_progress(rows)
     if spec.metric == "goal_transactions":
         return _format_list_summary(rows)
+    if spec.metric == "creditcard_list":
+        return _format_creditcard_list(rows)
     return ""
 
 
@@ -278,6 +280,42 @@ def _goal_status(extra: dict, pct) -> str:
     if target_date and (days_left == 0 or days_left is None):
         return "expired"
     return "on_track" if p >= 50 else "behind"
+
+
+def _format_creditcard_list(rows: list[ExecRow]) -> str:
+    """Format credit card list: name | credit_limit | used | available.
+
+    The used/available values come from the backend-maintained cache and may
+    be NULL if never written — we explicitly say "unknown" rather than 0
+    so the LLM never presents stale data as fresh.
+    """
+    lines = ["Credit cards:"]
+    for r in rows:
+        d = r.extra
+        name = d.get("name", "(unnamed)")
+        # credit_limit lives in extra (amount column is NULL for cc queries)
+        credit_limit = decimal_to_display(_to_decimal(d.get("credit_limit")))
+        used = _to_decimal(d.get("used"))
+        available = _to_decimal(d.get("available"))
+        ccy = r.currency or d.get("currency", "THB")
+        cache_updated = d.get("cache_updated_at") or ""
+
+        if used is None:
+            used_str = "unknown"
+        else:
+            used_str = decimal_to_display(used)
+
+        if available is None:
+            available_str = "unknown"
+        else:
+            available_str = decimal_to_display(available)
+
+        cache_note = f" (cache: {cache_updated})" if cache_updated else ""
+        lines.append(
+            f"  - {name}: credit_limit={credit_limit} {ccy} | "
+            f"used={used_str} | available={available_str} {ccy}{cache_note}".rstrip()
+        )
+    return "\n".join(lines)
 
 
 def _format_budget_list(rows: list[ExecRow]) -> str:

@@ -32,6 +32,8 @@ Metric = Literal[
     "goal_list",            # definitions: name, target_amount, target_date, currency
     "goal_progress",        # + current_balance, pct_completed, days_left, daily_required
     "goal_transactions",    # deposits/withdrawals on a specific goal wallet
+    # Credit card family — from the creditcard_wallets table.
+    "creditcard_list",     # all credit cards: name, credit_limit, used_amount, available
     # Templates-as-Tools escape hatch — used for compose / diff / anomaly /
     # multi-step queries that no single metric can answer. The LLM writes
     # Python that calls the templates above; the sandbox blocks anything else.

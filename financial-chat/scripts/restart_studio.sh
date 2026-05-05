@@ -39,6 +39,14 @@ fi
 # Create logs dir
 mkdir -p "$PROJECT_DIR/logs"
 
+# Load environment variables
+if [ -f "$PROJECT_DIR/.env" ]; then
+    echo "Loading .env file..."
+    set -a
+    source "$PROJECT_DIR/.env"
+    set +a
+fi
+
 # Start server
 echo "Starting server on port $PORT..."
 cd "$PROJECT_DIR"

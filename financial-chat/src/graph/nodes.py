@@ -108,6 +108,16 @@ the task without a time clause and let the tool default to all-time. Examples:
   - User: "หมวดไหนใช้เยอะ" → task: "Spending breakdown by category"
     (NOT "for this month")
 
+**CREDIT CARD queries — use "Credit card" in task:**
+ANY question about "บัตรเครดิต" / "credit card" / "หนี้บัตร" /
+"ยอดบัตร" must use a task that includes the words "credit card"
+so the backend routes it to the credit card metric, NOT the wallet balance metric.
+Examples:
+  - User: "ยอดบัตรเครดิตเท่าไร" → task: "Credit card debt across all wallets"
+  - User: "หนี้บัตรเครดิตมีเท่าไหร่" → task: "Total credit card debt"
+  - User: "credit card balance" → task: "Credit card available credit"
+DO NOT write "balance of wallet" or "current balance" for credit card questions.
+
 **ONE TOOL CALL PER QUESTION — let the tool compose:**
 If the user's question implies comparing, summing, diffing, or trending
 across multiple periods/groups, write ONE task that describes the

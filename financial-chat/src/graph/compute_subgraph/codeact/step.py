@@ -70,11 +70,24 @@ names verbatim.
       #         "pct_used": ..., "days_remaining": ..., "daily_allowance": ...,
       #         "currency": ..., "period": ..., "start_date": ...,
       #         "end_date": ...}, ...]
+      # DEFAULT (no args): active-only — only budgets whose period covers
+      # TODAY. Pass an explicit start/end overlapping an older period to
+      # include ended budgets (e.g. 'last month's budget'). For a generic
+      # overview, ALWAYS call it with no args — never expose ended budgets
+      # unless the user asked for them by name or period.
 
   budget_transactions(*, budget_name_phrase, order_by='amount_desc',
                       limit=20) -> list[dict]
 
   budget_list() -> list[dict]
+
+  creditcard_list() -> list[dict]
+      # rows: [{"name": ..., "credit_limit": Decimal, "used": Decimal | None,
+      #         "available": Decimal | None, "currency": ...,
+      #         "cache_updated_at": ...}, ...]
+      # `used` and `available` are NULL when the backend cache has not been
+      # written. NEVER substitute 0 or initial_used as a fallback — an
+      # unknown reading must be relayed verbatim to the user.
 
 Helpers:
   Decimal(s)        # safe number, never use float() for money
@@ -106,6 +119,19 @@ financial question by calling the provided tools and composing the results.
 
 Write ONLY a Python code block — no explanation, no markdown fences.
 
+Composition rules:
+  - For overview / dashboard / 'ภาพรวมการเงิน' / 'สรุป' questions, you MUST
+    call ALL of: sum_income, sum_expense, balance, creditcard_list,
+    budget_remaining (active-only — no args), goal_progress. Do NOT skip
+    any section. Use convert_to_thb=True on income/expense for a single
+    THB total.
+  - NEVER set a field to None just because you didn't query it. If you
+    chose not to compute a value, leave it out of the result dict
+    entirely. If a query returned an empty list, set the field to "0"
+    (string, for sums) or [] (list, for breakdowns) — never None.
+  - NEVER include ended budgets in an overview. budget_remaining() with
+    no args already returns active-only; do not pass a wide date range.
+
 Example — compare two months:
 
     march = sum_by_category(start='2026-03-01', end='2026-03-31')
@@ -122,6 +148,25 @@ Example — compare two months:
         diff.append({'category': cat, 'march': m, 'april': a, 'change': a - m})
     diff.sort(key=lambda x: abs(x['change']), reverse=True)
     result = diff[:10]
+
+Example — financial overview (always include every section):
+
+    today_date = today()
+    inc = sum_income(start=date(1900, 1, 1), end=today_date, convert_to_thb=True)
+    exp = sum_expense(start=date(1900, 1, 1), end=today_date, convert_to_thb=True)
+    bal = balance(as_of=today_date)
+    cc = creditcard_list()
+    bud = budget_remaining()                       # active-only by design
+    goals = goal_progress()
+    result = {
+        'date': today_date.isoformat(),
+        'total_income_thb': str(inc[0]['amount']) if inc else '0',
+        'total_expense_thb': str(exp[0]['amount']) if exp else '0',
+        'wallet_balances': bal,
+        'credit_cards': cc,
+        'active_budgets': bud,
+        'savings_goals': goals,
+    }
 """
 
 

@@ -53,6 +53,10 @@ Output rules:
     "ต้องเก็บวันละเท่าไหร่", "ใกล้ถึงเป้าหรือยัง", "savings progress".
   - `goal_transactions` — drill-down: deposits/withdrawals on a goal.
     Trigger phrases: "เคยใส่เงิน goal เท่าไหร่", "transactions in goal X".
+  - `creditcard_list` — all credit cards with credit limit, used amount, and
+    available credit. Trigger phrases: "ยอดบัตรเครดิต", "บัตรเครดิตเท่าไร",
+    "หนี้บัตรเครดิต", "credit card debt", "credit card balance",
+    "ค้างบัตรเครดิต", "วงเงินบัตรเครดิต", "available credit".
 
   Goal rule: ANY question that mentions "เป้าหมาย" / "goal" / "ออม" /
   "เก็บเงิน" / "saving plan" must use a goal_* metric, never sum_*.
@@ -81,6 +85,11 @@ Output rules:
 
   Budget rule: ANY question that mentions "งบ" / "งบประมาณ" / "budget" must
   use a budget_* metric, never sum_expense / balance.
+
+  Credit Card rule: ANY question that mentions "บัตรเครดิต" /
+  "credit card" / "หนี้บัตร" / "ยอดบัตร" must use creditcard_list
+  metric, NEVER balance or sum_expense. Credit cards are stored separately
+  from regular wallets — querying them with balance will return wrong results.
 
 **entity_mentions** — extract every wallet/category/tag the user named, even
 partially or via paraphrase ("wallet เกี่ยวกับสัตว์เลี้ยง" → kind=wallet,

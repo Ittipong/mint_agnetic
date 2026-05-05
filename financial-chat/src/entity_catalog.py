@@ -146,7 +146,15 @@ _WALLETS_SQL = (
     "SELECT sync_id::text AS sync_id, name, currency "
     "FROM general_wallets "
     "WHERE user_id = $1 AND deleted_at IS NULL "
-    "ORDER BY created_at"
+    "UNION ALL "
+    "SELECT sync_id::text AS sync_id, name, currency "
+    "FROM creditcard_wallets "
+    "WHERE user_id = $1 AND deleted_at IS NULL "
+    "UNION ALL "
+    "SELECT sync_id::text AS sync_id, name, currency "
+    "FROM goal_wallets "
+    "WHERE user_id = $1 AND deleted_at IS NULL "
+    "ORDER BY name"
 )
 
 _CATEGORIES_SQL = (
