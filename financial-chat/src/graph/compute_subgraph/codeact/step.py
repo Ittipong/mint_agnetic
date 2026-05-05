@@ -186,12 +186,37 @@ Write ONLY a Python code block — no explanation, no markdown fences.
 
 1. **Resolve names first** — pass user-supplied wallet/category/tag/budget/goal
    names through resolve_*() to canonicalize them. Never type them by hand.
-2. **Resolve time** — if the user mentioned a period, call parse_period().
-   If not, omit the time argument and let the wrapper default to all-time.
+2. **Resolve time** — if the task contains explicit ISO dates, use them
+   verbatim via date(YYYY, M, D). If the user mentioned a Thai/English period
+   phrase without ISO dates, call parse_period(). If NEITHER is present
+   (the task has no period at all), default to last-month-1st through today:
+       start = date(today.year, today.month - 1, 1) if today.month > 1 \
+               else date(today.year - 1, 12, 1)
+       end   = today
+   This default does NOT apply to point-in-time queries (balance,
+   creditcard_list, goal_list) or active-scope queries (budget_remaining
+   with no args). For sum / list / count / breakdown queries, ALWAYS pass
+   start and end so the answer can state the period back to the user.
 3. **Pick the right SQL wrapper** for the question's intent.
 4. **Compose** in Python only when you need to combine multiple queries
    (compare, trend, ratio).
 5. Set `result = <payload>`.
+
+## Date handling — CRITICAL
+
+  - **If the task contains explicit ISO dates** like "start = 2026-02-05,
+    end = 2026-05-05", USE THEM VERBATIM via `date(YYYY, M, D)`. Do NOT
+    re-derive from relative phrases. Do NOT shrink a window to a single
+    month. Do NOT call parse_period() when ISO dates are already given.
+
+  - **Window vs single-point** — read the task verb:
+      "summed over ... window" / "across the last N months window"
+        → WINDOW. start..end is a multi-month range. Pass to sum_expense as-is.
+      "for last month (single calendar month)" / "for yesterday only"
+        → SINGLE. start..end is one day or one month. Pass as-is.
+
+  - Only fall back to `parse_period(<phrase>)` when the task gives a Thai
+    phrase without ISO dates (e.g. "for เดือนที่แล้ว" with no start/end).
 
 ## Composition rules
 
@@ -221,10 +246,30 @@ Write ONLY a Python code block — no explanation, no markdown fences.
     )
     result = rows
 
-## Example — relative time
+## Example — relative time (Thai phrase, no ISO dates)
 
-    # User: "เดือนที่แล้วใช้เงินไปเท่าไร"
+    # Task: "Total expense for เดือนที่แล้ว"
     start, end = parse_period('เดือนที่แล้ว')
+    rows = sum_expense(start=start, end=end, convert_to_thb=True)
+    result = {'amount_thb': str(rows[0]['amount']) if rows else '0',
+              'period': f"{start} → {end}"}
+
+## Example — task with explicit ISO dates (ALWAYS use verbatim)
+
+    # Task: "Total expense summed over the last 3 months window,
+    #        start = 2026-02-05, end = 2026-05-05"
+    start = date(2026, 2, 5)
+    end = date(2026, 5, 5)
+    rows = sum_expense(start=start, end=end, convert_to_thb=True)
+    result = {'amount_thb': str(rows[0]['amount']) if rows else '0',
+              'period': f"{start} → {end}"}
+
+## Example — single day from ISO dates
+
+    # Task: "Total expense for yesterday only,
+    #        start = 2026-05-04, end = 2026-05-04"
+    start = date(2026, 5, 4)
+    end = date(2026, 5, 4)
     rows = sum_expense(start=start, end=end, convert_to_thb=True)
     result = {'amount_thb': str(rows[0]['amount']) if rows else '0',
               'period': f"{start} → {end}"}

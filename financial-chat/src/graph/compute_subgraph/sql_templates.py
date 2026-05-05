@@ -27,11 +27,25 @@ from src.graph.compute_subgraph.schemas import QuerySpec
 
 
 def _wallet_filter(spec: QuerySpec, params: list[Any]) -> str:
+    """Match the wallet on EITHER side of a transfer.
+
+    Why: a transfer's source row sits in `t.wallet_sync_id` and its destination
+    sits in `t.destination_wallet_sync_id`. Filtering only the source side
+    silently drops incoming transfers from `list_transactions` / `count` for
+    the receiving wallet — and the user sees a balance that does not match the
+    listed activity. Sum metrics are unaffected because they additionally
+    filter by `t.type = 'income'/'expense'`, neither of which uses
+    `destination_wallet_sync_id`.
+    """
     if not spec.wallets:
         return ""
     ids = [w.sync_id for w in spec.wallets]
     params.append(ids)
-    return f"AND t.wallet_sync_id = ANY(${len(params)}::text[])"
+    n = len(params)
+    return (
+        f"AND (t.wallet_sync_id = ANY(${n}::text[]) "
+        f"OR t.destination_wallet_sync_id = ANY(${n}::text[]))"
+    )
 
 
 def _category_filter(spec: QuerySpec, params: list[Any]) -> str:

@@ -1,23 +1,19 @@
 """Compile the analyze subgraph + provide the act_node bridge for the parent ReAct.
 
-Flow:
+Smart CodeAct flow (Phase 3 — legacy plan/resolve/gate/execute removed):
+
     START
       ↓
-    plan
-      ├──────────────┐
-      ↓              ↓
-    entity_resolve  time_resolve     (run in parallel)
-      └──────────────┘
-              ↓
-            gate
-              ↓
-       ┌──────┴──────┐
-       │             │
-       ↓             ↓
-     respond       sql_build → execute → respond
-   (clarify)
-              ↓
-             END
+    codeact_step ─┐  (loop until result is set or MAX_STEPS reached)
+      ↑           │
+      └───────────┘
+      ↓
+    respond
+      ↓
+     END
+
+The codeact loop composes resolve_*() / parse_period() / SQL wrappers in
+sandboxed Python — see codeact/namespace.py for the exposed surface.
 """
 
 from __future__ import annotations
@@ -30,15 +26,9 @@ from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.messages import ToolMessage
 from langgraph.graph import END, START, StateGraph
 
-from src.config import settings
 from src.entity_catalog import EntityCatalog, fetch_user_catalog
 from src.graph.compute_subgraph.codeact.step import codeact_step_node
-from src.graph.compute_subgraph.nodes.entity_resolver import entity_resolve_node
-from src.graph.compute_subgraph.nodes.executor import execute_node
-from src.graph.compute_subgraph.nodes.gate import gate_node
-from src.graph.compute_subgraph.nodes.plan import plan_node
 from src.graph.compute_subgraph.nodes.responder import respond_node
-from src.graph.compute_subgraph.nodes.time_resolver import time_resolve_node
 from src.graph.compute_subgraph.state import ComputeSubState
 from src.graph.state import AgentState
 
@@ -46,29 +36,6 @@ ANALYZE_TOOL_NAME = "analyze_user_finances"
 
 
 # ── Routing ──────────────────────────────────────────────────────────────────
-
-
-def _entry_router(state: ComputeSubState) -> str:
-    """Smart CodeAct flag — skip plan node and go straight to the codeact loop
-    when enabled. Falls back to the legacy plan-driven pipeline otherwise."""
-    if settings.smart_codeact_enabled:
-        return "codeact_step"
-    return "plan"
-
-
-def _after_plan(state: ComputeSubState):
-    """Choose whitelisted pipeline (fan out to entity + time) vs Templates-CodeAct.
-
-    Returning a list fans out in parallel; returning a string routes to one node.
-    """
-    plan = state.get("plan")
-    if plan is not None and plan.metric == "freeform_codeact":
-        return "codeact_step"
-    return ["entity_resolve", "time_resolve"]
-
-
-def _after_gate(state: ComputeSubState) -> str:
-    return "respond" if state.get("needs_clarification") else "execute"
 
 
 def _after_codeact_step(state: ComputeSubState) -> str:
@@ -80,38 +47,10 @@ def _after_codeact_step(state: ComputeSubState) -> str:
 
 def _build() -> StateGraph:
     g = StateGraph(ComputeSubState)
-    g.add_node("plan", plan_node)
-    g.add_node("entity_resolve", entity_resolve_node)
-    g.add_node("time_resolve", time_resolve_node)
-    g.add_node("gate", gate_node)
-    g.add_node("execute", execute_node)
     g.add_node("codeact_step", codeact_step_node)
     g.add_node("respond", respond_node)
 
-    # Entry routing — Smart CodeAct flag chooses between the legacy pipeline
-    # (plan → resolve → execute) and the unified codeact loop.
-    g.add_conditional_edges(
-        START,
-        _entry_router,
-        {"plan": "plan", "codeact_step": "codeact_step"},
-    )
-    # After plan: either fan out to (entity + time) for structured pipeline,
-    # or hop straight to codeact_step. Returning a list from _after_plan fans
-    # out in parallel; both branches converge later.
-    g.add_conditional_edges(
-        "plan",
-        _after_plan,
-        ["entity_resolve", "time_resolve", "codeact_step"],
-    )
-    g.add_edge("entity_resolve", "gate")
-    g.add_edge("time_resolve", "gate")
-    g.add_conditional_edges(
-        "gate",
-        _after_gate,
-        {"respond": "respond", "execute": "execute"},
-    )
-    g.add_edge("execute", "respond")
-    # Templates-CodeAct loop
+    g.add_edge(START, "codeact_step")
     g.add_conditional_edges(
         "codeact_step",
         _after_codeact_step,
@@ -157,7 +96,7 @@ async def act_node(state: AgentState) -> dict:
 
     # Fetch the entity catalog once and thread it through the subgraph.
     # The parent reasoner already saw the same names; sharing the snapshot
-    # keeps planner/resolver consistent with what the LLM was just told.
+    # keeps the resolvers consistent with what the LLM was just told.
     t1 = datetime_fn.now()
     catalog: EntityCatalog = await fetch_user_catalog(user_id)
     t2 = datetime_fn.now()
@@ -178,9 +117,8 @@ async def act_node(state: AgentState) -> dict:
 
     answer: str = sub_out.get("answer", "(no result)")
     step_info = {
-        "confidence": sub_out.get("confidence"),
         "needs_clarification": bool(sub_out.get("needs_clarification")),
-        **(sub_out.get("step_info") or {}),
+        "codeact_steps": len(sub_out.get("codeact_history") or []),
     }
 
     # Build a JSON-safe structured payload for the streaming UI. The
@@ -188,14 +126,8 @@ async def act_node(state: AgentState) -> dict:
     # this payload for cards/tables — same turn, different surfaces.
     structured_data = _build_structured_data(sub_out)
 
-    # Emit as a top-level custom event so it's visible in LangSmith
-    # timeline (not buried inside additional_kwargs of a ToolMessage).
-    # The server's astream_events listener catches `on_custom_event` and
-    # forwards it as an SSE `data` event.
     if structured_data is not None:
-        await adispatch_custom_event(
-            "structured_data", structured_data
-        )
+        await adispatch_custom_event("structured_data", structured_data)
 
     return {
         "messages": [
@@ -203,9 +135,6 @@ async def act_node(state: AgentState) -> dict:
                 content=answer,
                 tool_call_id=tool_call["id"],
                 name=ANALYZE_TOOL_NAME,
-                # `artifact` is the langchain-idiomatic place for non-text
-                # tool output. LangGraph and LangSmith both surface it
-                # alongside the message body.
                 artifact=structured_data,
                 additional_kwargs={
                     "step_info": step_info,
@@ -241,90 +170,20 @@ def _json_safe(value: Any) -> Any:
 
 
 def _build_structured_data(sub_out: dict) -> dict | None:
-    """Translate subgraph output into a UI-ready payload.
-
-    Shape is deliberately stable across paths so the frontend can render the
-    same component for any metric:
-      {
-        "kind": "result" | "clarification" | "no_data",
-        "metric": str,
-        "period": {"start": ISO, "end": ISO, "granularity": str},
-        "currency": "THB" | "USD" | "ALL" | "THB_CONVERTED",
-        "rows": [...],          # detail rows when applicable
-        "metadata": {...},      # resolved entities, planner diagnostics
-        "confidence": float,
-      }
-    """
-    if sub_out.get("needs_clarification"):
-        clarification = sub_out.get("clarification")
-        return {
-            "kind": "clarification",
-            "payload": _json_safe(clarification),
-        }
-
-    spec = sub_out.get("spec")
-    plan = sub_out.get("plan")
-
-    # Codeact branch — final result lives in `codeact_final`. Triggered by
-    # either the Smart CodeAct entry (no plan) or the legacy
-    # `metric == freeform_codeact` path.
-    is_codeact = (
-        sub_out.get("codeact_history") is not None
-        or (plan is not None and getattr(plan, "metric", None) == "freeform_codeact")
-    )
-    if is_codeact:
-        kind = "clarification" if sub_out.get("needs_clarification") else "result"
-        return {
-            "kind": kind,
-            "metric": "freeform_codeact",
-            "rows": _json_safe(sub_out.get("codeact_final")),
-            "metadata": {
-                "steps": len(sub_out.get("codeact_history") or []),
-                "clarification_question": sub_out.get("clarification_question"),
-                "clarification_options": sub_out.get("clarification_options"),
-            },
-            "confidence": sub_out.get("confidence"),
-        }
-
-    if spec is None:
+    """Codeact-only payload — the rows shape is whatever the LLM-composed
+    code returned, surfaced verbatim to the frontend."""
+    needs_clar = bool(sub_out.get("needs_clarification"))
+    history = sub_out.get("codeact_history") or []
+    if not history and not needs_clar:
         return None
 
-    rows = sub_out.get("rows") or []
-    period = {
-        "start": spec.time_range.start.isoformat(),
-        "end": spec.time_range.end.isoformat(),
-        "granularity": spec.time_range.granularity,
-    }
-    currency = "THB_CONVERTED" if spec.convert_to_thb else spec.currency
-    metadata = {
-        "wallets": [
-            {"sync_id": w.sync_id, "name": w.display_name, "score": w.score}
-            for w in spec.wallets
-        ],
-        "categories": [c.display_name for c in spec.categories],
-        "tags": [t.display_name for t in spec.tags],
-        "transaction_type": spec.transaction_type,
-        "budget_name_phrase": spec.budget_name_phrase,
-    }
     return {
-        "kind": "result" if rows else "no_data",
-        "metric": spec.metric,
-        "period": period,
-        "currency": currency,
-        "rows": _json_safe([_row_to_dict(r) for r in rows]),
-        "metadata": metadata,
-        "confidence": sub_out.get("confidence"),
+        "kind": "clarification" if needs_clar else "result",
+        "metric": "freeform_codeact",
+        "rows": _json_safe(sub_out.get("codeact_final")),
+        "metadata": {
+            "steps": len(history),
+            "clarification_question": sub_out.get("clarification_question"),
+            "clarification_options": sub_out.get("clarification_options"),
+        },
     }
-
-
-def _row_to_dict(row) -> dict:
-    """ExecRow → dict, lifting `extra` keys to the top so the UI doesn't have
-    to know about the internal split between named columns and extras."""
-    base = {
-        "bucket": row.bucket,
-        "currency": row.currency,
-        "amount": row.amount,  # already string-stringified Decimal
-        "count": row.count,
-    }
-    base.update(row.extra or {})
-    return base
