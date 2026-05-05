@@ -41,11 +41,25 @@ def _category_filter(spec: QuerySpec, params: list[Any]) -> str:
     system categories), so a single sync_id only covers transactions in one
     wallet. We filter on `transactions.category_name` (denormalized) instead
     so 'อาหาร' matches across every wallet.
+
+    For category hierarchy expansion (e.g., "เดินทาง" → "แท็กซี่", "BTS/MRT"),
+    expand_ids contains the sub-category names that should be included.
     """
     if not spec.categories:
         return ""
     names = [c.display_name for c in spec.categories]
-    params.append(names)
+    # Include expanded sub-category names for hierarchy matching
+    for c in spec.categories:
+        if c.expand_ids:
+            names.extend(c.expand_ids)
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_names = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            unique_names.append(n)
+    params.append(unique_names)
     return f"AND t.category_name = ANY(${len(params)}::text[])"
 
 
@@ -318,20 +332,30 @@ def build_balance(spec: QuerySpec, user_id: str) -> tuple[str, list]:
             ORDER BY w.name
         """
     else:
+        # Use converted_amount / destination_converted_amount directly (same as mobile trigger).
+        # These fields already contain THB-equivalent values as computed at tx creation time.
         sql = f"""
             SELECT
                 w.sync_id::text                                              AS wallet_sync_id,
                 w.name                                                        AS wallet_name,
                 w.currency                                                    AS currency,
                 (w.initial_balance + COALESCE(SUM(
-                    t.effect_on_wallet * t.amount::numeric
+                    CASE
+                        WHEN t.wallet_sync_id = w.sync_id::text THEN
+                            t.effect_on_wallet * COALESCE(t.converted_amount, t.amount)::numeric
+                        WHEN t.destination_wallet_sync_id = w.sync_id::text THEN
+                            COALESCE(t.effect_on_destination, 0) * COALESCE(t.destination_converted_amount, t.amount)::numeric
+                        ELSE 0
+                    END
                 ) FILTER (
                     WHERE t.is_deleted = false
                       AND t.status = 'confirmed'
                       AND t.date < ($2::date + INTERVAL '1 day')
+                      AND (t.wallet_sync_id = w.sync_id::text OR t.destination_wallet_sync_id = w.sync_id::text)
                 ), 0))                                                        AS amount
             FROM general_wallets w
             LEFT JOIN transactions t ON t.wallet_sync_id = w.sync_id::text
+                OR t.destination_wallet_sync_id = w.sync_id::text
             WHERE w.user_id = $1
               AND w.deleted_at IS NULL
               {wallet_clause}

@@ -142,6 +142,7 @@ on `metric=list`. Maps directly to the DB column. Trigger phrases:
   - "จ่ายบัตรเครดิต" / "credit card payments" → "creditCardPay"
 Leave null when the user asks for "all transactions" or doesn't specify.
 
+
 **order_by + limit** — control the sort and cap on metric=`list` results:
   - "top 5 ใหญ่สุด / เยอะที่สุด / สูงสุด" → order_by=`amount_desc`, limit=5
   - "top 10 ล่าสุด" → order_by=`date_desc`, limit=10

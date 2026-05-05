@@ -71,6 +71,10 @@ class ResolvedEntity(BaseModel):
     kind: SlotKind
     score: float = Field(ge=0.0, le=1.0)
     alternatives: list[dict] = Field(default_factory=list)
+    # For category expansion: additional category NAMES to include in SQL filter
+    # e.g., if user asks about "เดินทาง" (travel), expand_ids includes ["แท็กซี่", "BTS/MRT"]
+    # These are CATEGORY NAMES (not sync_ids) because the SQL filter matches category_name text
+    expand_ids: list[str] = Field(default_factory=list)
 
 
 class QueryPlan(BaseModel):

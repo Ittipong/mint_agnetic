@@ -21,7 +21,10 @@ from src.graph.compute_subgraph.schemas import (
 from src.graph.compute_subgraph.state import ComputeSubState
 
 # Below this floor we ask the user instead of guessing.
-_CONFIDENCE_FLOOR = 0.6
+# Wallets use a lower floor since semantic name/category matching (especially
+# Thai-English) often produces lower heuristic scores than exact matches.
+_WALLET_CONFIDENCE_FLOOR = 0.25
+_ENTITY_CONFIDENCE_FLOOR = 0.6
 
 
 def _aggregate_confidence(
@@ -42,7 +45,7 @@ def _first_low_confidence(
     time_range: TimeRange,
     entities: list[ResolvedEntity],
 ) -> ClarificationPayload | None:
-    if time_range.confidence < _CONFIDENCE_FLOOR:
+    if time_range.confidence < _ENTITY_CONFIDENCE_FLOOR:
         return ClarificationPayload(
             kind="time",
             question=(
@@ -58,7 +61,10 @@ def _first_low_confidence(
             ],
         )
 
-    weak = [e for e in entities if e.score < _CONFIDENCE_FLOOR]
+    weak = [
+        e for e in entities
+        if e.score < (_WALLET_CONFIDENCE_FLOOR if e.kind == "wallet" else _ENTITY_CONFIDENCE_FLOOR)
+    ]
     if weak:
         target = weak[0]
         return ClarificationPayload(

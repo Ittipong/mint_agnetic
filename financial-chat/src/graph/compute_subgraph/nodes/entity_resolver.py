@@ -34,15 +34,23 @@ from src.graph.compute_subgraph.state import ComputeSubState
 class _Candidate:
     sync_id: str
     name: str
+    wallet_type: str = "general"  # 'general' | 'creditcard' | 'goal'
+    wallet_category: str | None = None  # e.g. 'savings', 'cash', 'eWallet'
+    # Category-specific fields for semantic hierarchy matching
+    parent_id: str | None = None
+    keywords: list[str] | None = None
 
 
 def _candidates(kind: SlotKind, catalog: EntityCatalog) -> list[_Candidate]:
     """Pull candidates from the in-state catalog. The catalog is fetched
     once per turn at the bridge (`act_node`) so we never hit the DB here."""
     if kind == "wallet":
-        return [_Candidate(sync_id=w.sync_id, name=w.name) for w in catalog.wallets]
+        return [_Candidate(sync_id=w.sync_id, name=w.name, wallet_type=w.wallet_type,
+                          wallet_category=w.wallet_category)
+                for w in catalog.wallets]
     if kind == "category":
-        return [_Candidate(sync_id=c.sync_id, name=c.name) for c in catalog.categories]
+        return [_Candidate(sync_id=c.sync_id, name=c.name, parent_id=c.parent_id, keywords=c.keywords)
+                for c in catalog.categories]
     if kind == "tag":
         return [_Candidate(sync_id=t.sync_id, name=t.name) for t in catalog.tags]
     return []
@@ -81,6 +89,7 @@ def _score_pair(query: str, candidate: str) -> float:
 
 
 def _rank(query: str, candidates: list[_Candidate]) -> list[tuple[_Candidate, float]]:
+    """Score candidates by name. LLM rerank handles semantic matching including wallet_category."""
     scored = [(c, _score_pair(query, c.name)) for c in candidates]
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored
@@ -104,16 +113,51 @@ async def _llm_rerank(
         from src.llm import llm
     except Exception:
         return None
-    bullet = "\n".join(
-        f"- sync_id={c.sync_id} | name={c.name!r} | heuristic_score={s:.2f}"
-        for c, s in top
-    )
-    prompt = (
-        f"Pick the {kind} that the user most likely means by {query!r}.\n"
-        f"Candidates:\n{bullet}\n\n"
-        f"Consider Thai/English semantics and typos (e.g., 'pat show' ~ 'pet shop'). "
-        f"If none plausibly match, pick the closest but report low confidence."
-    )
+    # Build bullet with relevant fields per kind
+    if kind == "wallet":
+        bullet = "\n".join(
+            f"- sync_id={c.sync_id} | name={c.name!r} | type={c.wallet_type} | category={c.wallet_category!r} | heuristic_score={s:.2f}"
+            if c.wallet_category else
+            f"- sync_id={c.sync_id} | name={c.name!r} | type={c.wallet_type} | heuristic_score={s:.2f}"
+            for c, s in top
+        )
+        prompt = (
+            f"Pick the {kind} that the user most likely means by {query!r}.\n"
+            f"Candidates:\n{bullet}\n\n"
+            f"Consider Thai/English semantics and typos (e.g., 'pat show' ~ 'pet shop'). "
+            f"For wallets, also consider wallet_type (creditcard/general/goal) and wallet_category. "
+            f"If none plausibly match, pick the closest but report low confidence."
+        )
+    elif kind == "category":
+        # Include parent_id and keywords for hierarchy-aware matching
+        bullet = "\n".join(
+            f"- sync_id={c.sync_id} | name={c.name!r} | parent={c.parent_id!r} | keywords={c.keywords!r} | heuristic_score={s:.2f}"
+            for c, s in top
+        )
+        prompt = (
+            f"Pick the {kind}(s) that the user most likely means by {query!r}.\n"
+            f"Candidates:\n{bullet}\n\n"
+            f"IMPORTANT: Consider parent-child relationships for category expansion:\n"
+            f"- If user asks about 'เดินทาง' (travel), include 'แท็กซี่', 'BTS/MRT', 'น้ำมัน' "
+            f"because they are sub-categories of travel.\n"
+            f"- If user asks about 'อาหาร' (food), include 'ร้านอาหาร', 'กาแฟ', 'ของทานเล่น'.\n"
+            f"- A category 'เดินทาง' has parent=null; 'แท็กซี่' has parent pointing to 'เดินทาง'.\n"
+            f"- keywords field contains related terms (e.g., 'แท็กซี่' keywords=['เดินทาง','รถ','สัญจร']).\n"
+            f"If user says 'ดูรายการเดินทาง', return ALL categories whose name OR parent_id OR keywords match 'เดินทาง'.\n"
+            f"You may return MULTIPLE sync_ids - include the parent and all children.\n"
+            f"Return the sync_id of the PRIMARY match (user's exact target)."
+        )
+    else:
+        bullet = "\n".join(
+            f"- sync_id={c.sync_id} | name={c.name!r} | heuristic_score={s:.2f}"
+            for c, s in top
+        )
+        prompt = (
+            f"Pick the {kind} that the user most likely means by {query!r}.\n"
+            f"Candidates:\n{bullet}\n\n"
+            f"Consider Thai/English semantics and typos. "
+            f"If none plausibly match, pick the closest but report low confidence."
+        )
     try:
         structured = llm.with_structured_output(_LLMChoice)
         out: _LLMChoice = await structured.ainvoke(prompt)
@@ -128,6 +172,28 @@ async def _llm_rerank(
 # ── Resolve a single mention ─────────────────────────────────────────────────
 
 
+def _expand_subcategories(
+    primary: _Candidate, all_candidates: list[_Candidate]
+) -> list[str]:
+    """Find all sub-category names to expand when user queries a parent category.
+
+    Returns category NAMES (not sync_ids) because the SQL filter matches on
+    category_name text field.
+
+    Expansion logic:
+    - If primary has NO parent (is a root/parent like "เดินทาง"), expand to include
+      all its direct children (e.g., "แท็กซี่", "BTS/MRT", "น้ำมัน").
+    - If primary HAS a parent (is already a child like "น้ำมัน"), do NOT expand —
+      only return transactions for that specific category.
+    """
+    if primary.parent_id is None:
+        # Primary is a parent (root category), expand to include all children
+        return [c.name for c in all_candidates if c.parent_id == primary.sync_id]
+    else:
+        # Primary is a child category, don't expand — only show this specific category
+        return []
+
+
 async def _resolve_mention(
     mention: EntityMention,
     catalog: EntityCatalog,
@@ -139,25 +205,11 @@ async def _resolve_mention(
     ranked = _rank(mention.text, candidates)
     top = ranked[: min(5, len(ranked))]
     best, best_score = top[0]
-    runner = top[1][1] if len(top) > 1 else 0.0
 
-    # High confidence + clear gap → accept without LLM
-    if best_score >= 0.85 and (best_score - runner) >= 0.15:
-        return ResolvedEntity(
-            sync_id=best.sync_id,
-            display_name=best.name,
-            kind=mention.kind,
-            score=best_score,
-            alternatives=[
-                {"sync_id": c.sync_id, "name": c.name, "score": s}
-                for c, s in top[1:]
-            ],
-        )
-
-    # Otherwise let the LLM choose among the top-N
+    # Always let LLM choose among the top-N using semantic matching
     rerank = await _llm_rerank(mention.kind, mention.text, top)
     if rerank is None:
-        # fall back to heuristic best with degraded confidence
+        # fall back to heuristic best
         return ResolvedEntity(
             sync_id=best.sync_id,
             display_name=best.name,
@@ -169,6 +221,12 @@ async def _resolve_mention(
             ],
         )
     chosen, conf = rerank
+
+    # For categories, expand to include sub-categories (same parent)
+    expand_ids: list[str] = []
+    if mention.kind == "category":
+        expand_ids = _expand_subcategories(chosen, candidates)
+
     return ResolvedEntity(
         sync_id=chosen.sync_id,
         display_name=chosen.name,
@@ -179,6 +237,7 @@ async def _resolve_mention(
             for c, s in top
             if c.sync_id != chosen.sync_id
         ],
+        expand_ids=expand_ids,
     )
 
 

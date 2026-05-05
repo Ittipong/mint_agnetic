@@ -24,6 +24,12 @@ class WalletEntry:
     sync_id: str
     name: str
     currency: str
+    wallet_type: str = "general"  # 'general' | 'creditcard' | 'goal'
+    initial_balance: float | None = None
+    wallet_category: str | None = None  # e.g. 'savings', 'cash', 'eWallet', 'promptPay', 'salary', 'sales', 'other'
+    cached_balance: float | None = None
+    ai_message: str | None = None
+    icon: str | None = None
 
 
 @dataclass(frozen=True)
@@ -31,6 +37,8 @@ class CategoryEntry:
     sync_id: str
     name: str
     type: str  # 'income' | 'expense' | other
+    parent_id: str | None = None  # parent category sync_id for hierarchy
+    keywords: list[str] | None = None  # synonyms / related terms for semantic matching
 
 
 @dataclass(frozen=True)
@@ -68,11 +76,15 @@ class EntityCatalog:
     def to_dict(self) -> dict:
         return {
             "wallets": [
-                {"sync_id": w.sync_id, "name": w.name, "currency": w.currency}
+                {"sync_id": w.sync_id, "name": w.name, "currency": w.currency,
+                 "wallet_type": w.wallet_type, "initial_balance": w.initial_balance,
+                 "wallet_category": w.wallet_category, "cached_balance": w.cached_balance,
+                 "ai_message": w.ai_message, "icon": w.icon}
                 for w in self.wallets
             ],
             "categories": [
-                {"sync_id": c.sync_id, "name": c.name, "type": c.type}
+                {"sync_id": c.sync_id, "name": c.name, "type": c.type,
+                 "parent_id": c.parent_id, "keywords": c.keywords}
                 for c in self.categories
             ],
             "tags": [{"sync_id": t.sync_id, "name": t.name} for t in self.tags],
@@ -99,7 +111,16 @@ class EntityCatalog:
         if self.wallets:
             lines.append("### Wallets")
             for w in self.wallets:
-                lines.append(f"- `{w.name}` (currency: {w.currency})")
+                parts = [f"`{w.name}`"]
+                parts.append(f"type: {w.wallet_type}")
+                parts.append(f"currency: {w.currency}")
+                if w.wallet_category:
+                    parts.append(f"category: {w.wallet_category}")
+                if w.initial_balance is not None:
+                    parts.append(f"initial: {w.initial_balance}")
+                if w.ai_message:
+                    parts.append(f"note: {w.ai_message}")
+                lines.append("- " + ", ".join(parts))
         else:
             lines.append("### Wallets\n(no wallets)")
 
@@ -143,25 +164,51 @@ class EntityCatalog:
 
 
 _WALLETS_SQL = (
-    "SELECT sync_id::text AS sync_id, name, currency "
+    "SELECT "
+    "  sync_id::text AS sync_id, "
+    "  name, "
+    "  currency, "
+    "  'general' AS wallet_type, "
+    "  initial_balance::float, "
+    "  wallet_category, "
+    "  cached_balance::float, "
+    "  ai_message, "
+    "  icon "
     "FROM general_wallets "
     "WHERE user_id = $1 AND deleted_at IS NULL "
     "UNION ALL "
-    "SELECT sync_id::text AS sync_id, name, currency "
+    "SELECT "
+    "  sync_id::text AS sync_id, "
+    "  name, "
+    "  currency, "
+    "  'creditcard' AS wallet_type, "
+    "  NULL::float AS initial_balance, "
+    "  NULL::text AS wallet_category, "
+    "  cached_used_amount::float AS cached_balance, "
+    "  ai_message, "
+    "  icon "
     "FROM creditcard_wallets "
     "WHERE user_id = $1 AND deleted_at IS NULL "
     "UNION ALL "
-    "SELECT sync_id::text AS sync_id, name, currency "
+    "SELECT "
+    "  sync_id::text AS sync_id, "
+    "  name, "
+    "  currency, "
+    "  'goal' AS wallet_type, "
+    "  NULL::float AS initial_balance, "
+    "  NULL::text AS wallet_category, "
+    "  NULL::float AS cached_balance, "
+    "  NULL::text AS ai_message, "
+    "  NULL::text AS icon "
     "FROM goal_wallets "
     "WHERE user_id = $1 AND deleted_at IS NULL "
     "ORDER BY name"
 )
 
 _CATEGORIES_SQL = (
-    "SELECT sync_id, name, type "
+    "SELECT sync_id, name, type, parent_sync_id "
     "FROM categories "
     "WHERE (user_id = $1 OR user_id IS NULL) "
-    "  AND is_deleted = false AND is_active = true "
     "ORDER BY display_order"
 )
 
@@ -214,7 +261,13 @@ async def fetch_user_catalog(user_id: str) -> EntityCatalog:
             continue
         seen.add(key)
         deduped_categories.append(
-            CategoryEntry(sync_id=str(r["sync_id"]), name=r["name"], type=r["type"])
+            CategoryEntry(
+                sync_id=str(r["sync_id"]),
+                name=r["name"],
+                type=r["type"],
+                parent_id=str(r["parent_sync_id"]) if r["parent_sync_id"] else None,
+                keywords=None,  # not available in DB schema
+            )
         )
 
     # Dedup budgets by name too — a user can roll a "monthly" budget every
