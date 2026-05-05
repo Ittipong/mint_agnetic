@@ -16,6 +16,8 @@ import io
 import contextlib
 from typing import Any
 
+from src.graph.compute_subgraph.codeact.exceptions import ClarificationNeeded
+
 
 # ── AST validator ────────────────────────────────────────────────────────────
 
@@ -135,6 +137,10 @@ def execute(code: str, namespace: dict[str, Any]) -> tuple[Any, str, str | None]
         with contextlib.redirect_stdout(buf):
             compiled = compile(tree, "<codeact>", "exec")
             exec(compiled, namespace)  # noqa: S102 — sandboxed via AST validator above
+    except ClarificationNeeded:
+        # Propagate up — the codeact_step node turns this into a
+        # user-facing question and ends the loop.
+        raise
     except Exception as exc:  # pylint: disable=broad-except
         return None, buf.getvalue(), f"{type(exc).__name__}: {exc}"
 

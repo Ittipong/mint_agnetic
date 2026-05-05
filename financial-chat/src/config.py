@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     codeact_model: str = "openai/gpt-oss-safeguard-20b:nitro"
     codeact_base_url: str = "https://openrouter.ai/api/v1"
 
+    # Smart CodeAct — when True, every analyze_user_finances call is routed
+    # through the CodeAct loop (with resolve_*/parse_period helpers) instead
+    # of the legacy plan→entity_resolve→time_resolve→execute pipeline.
+    smart_codeact_enabled: bool = False
+
     server_host: str = "0.0.0.0"
     server_port: int = 8000
 

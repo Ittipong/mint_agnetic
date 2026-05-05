@@ -18,6 +18,15 @@ from decimal import Decimal
 from typing import Any
 
 from src.entity_catalog import EntityCatalog
+from src.graph.compute_subgraph.codeact.resolvers import (
+    clarify,
+    make_resolve_budget,
+    make_resolve_category,
+    make_resolve_goal,
+    make_resolve_tag,
+    make_resolve_wallet,
+    parse_period as _parse_period,
+)
 from src.graph.compute_subgraph.db import get_pool
 from src.graph.compute_subgraph.schemas import (
     QuerySpec,
@@ -454,6 +463,14 @@ def build_namespace(
         "goal_list":           w.goal_list,
         "goal_progress":       w.goal_progress,
         "goal_transactions":   w.goal_transactions,
+        # Smart CodeAct helpers — entity & time resolution + clarification
+        "resolve_wallet":      make_resolve_wallet(catalog, main_loop),
+        "resolve_category":    make_resolve_category(catalog, main_loop),
+        "resolve_tag":         make_resolve_tag(catalog, main_loop),
+        "resolve_budget":      make_resolve_budget(catalog, main_loop),
+        "resolve_goal":        make_resolve_goal(catalog, main_loop),
+        "parse_period":        lambda phrase=None: _parse_period(phrase, today),
+        "clarify":             clarify,
         # Decimal-safe primitives
         "Decimal":             Decimal,
         "date":                date,

@@ -28,14 +28,25 @@ from src.graph.compute_subgraph.state import ComputeSubState
 async def respond_node(state: ComputeSubState) -> dict:
     from datetime import datetime as dt
     t0 = dt.now()
+
+    # Smart CodeAct clarification — raised inside sandbox by clarify(...).
+    # Format as a question the parent ReAct can read and surface to the user.
+    if state.get("needs_clarification") and state.get("clarification_question"):
+        return {"answer": _format_codeact_clarification(
+            state["clarification_question"],
+            state.get("clarification_options") or [],
+        )}
+
+    # Legacy gate-based clarification (Hybrid path)
     if state.get("needs_clarification") and state.get("clarification") is not None:
         return {"answer": _format_clarification(state["clarification"])}
 
-    # Templates-CodeAct branch — final result lives in `codeact_final`,
-    # not `rows`. Render it as a structured tool result the parent ReAct
-    # can read.
+    # CodeAct branch — Smart CodeAct (no plan) OR legacy freeform_codeact.
+    # Final result lives in `codeact_final`. Render as structured tool result.
     plan = state.get("plan")
-    if plan is not None and plan.metric == "freeform_codeact":
+    if state.get("codeact_history") is not None or (
+        plan is not None and plan.metric == "freeform_codeact"
+    ):
         return {"answer": _format_codeact(state)}
 
     spec: QuerySpec = state["spec"]
@@ -45,6 +56,16 @@ async def respond_node(state: ComputeSubState) -> dict:
     ms = (t1 - t0).total_seconds() * 1000
     print(f"[PERF] respond_node: {ms:.0f}ms rows={len(rows)}")
     return {"answer": answer}
+
+
+def _format_codeact_clarification(question: str, options: list[str]) -> str:
+    """Render sandbox-raised clarification as a tool-readable string."""
+    lines = [f"NEEDS_CLARIFICATION (codeact): {question}"]
+    if options:
+        lines.append("Options:")
+        for opt in options[:8]:
+            lines.append(f"  - {opt}")
+    return "\n".join(lines)
 
 
 def _format_codeact(state: ComputeSubState) -> str:

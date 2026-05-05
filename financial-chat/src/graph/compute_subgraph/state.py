@@ -56,3 +56,8 @@ class ComputeSubState(TypedDict):
     codeact_history: NotRequired[list]   # list[{step, code, stdout, error, result}]
     codeact_done: NotRequired[bool]
     codeact_final: NotRequired[object]   # last non-null `result` from the loop
+
+    # Clarification raised inside the sandbox (Smart CodeAct) — independent
+    # of the legacy gate's `clarification` field so both paths can coexist.
+    clarification_question: NotRequired[str]
+    clarification_options: NotRequired[list]

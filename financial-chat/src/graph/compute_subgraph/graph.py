@@ -30,6 +30,7 @@ from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.messages import ToolMessage
 from langgraph.graph import END, START, StateGraph
 
+from src.config import settings
 from src.entity_catalog import EntityCatalog, fetch_user_catalog
 from src.graph.compute_subgraph.codeact.step import codeact_step_node
 from src.graph.compute_subgraph.nodes.entity_resolver import entity_resolve_node
@@ -45,6 +46,14 @@ ANALYZE_TOOL_NAME = "analyze_user_finances"
 
 
 # ── Routing ──────────────────────────────────────────────────────────────────
+
+
+def _entry_router(state: ComputeSubState) -> str:
+    """Smart CodeAct flag — skip plan node and go straight to the codeact loop
+    when enabled. Falls back to the legacy plan-driven pipeline otherwise."""
+    if settings.smart_codeact_enabled:
+        return "codeact_step"
+    return "plan"
 
 
 def _after_plan(state: ComputeSubState):
@@ -79,7 +88,13 @@ def _build() -> StateGraph:
     g.add_node("codeact_step", codeact_step_node)
     g.add_node("respond", respond_node)
 
-    g.add_edge(START, "plan")
+    # Entry routing — Smart CodeAct flag chooses between the legacy pipeline
+    # (plan → resolve → execute) and the unified codeact loop.
+    g.add_conditional_edges(
+        START,
+        _entry_router,
+        {"plan": "plan", "codeact_step": "codeact_step"},
+    )
     # After plan: either fan out to (entity + time) for structured pipeline,
     # or hop straight to codeact_step. Returning a list from _after_plan fans
     # out in parallel; both branches converge later.
@@ -250,16 +265,23 @@ def _build_structured_data(sub_out: dict) -> dict | None:
     spec = sub_out.get("spec")
     plan = sub_out.get("plan")
 
-    # Codeact branch — final result lives in `codeact_final`. The shape is
-    # whatever the LLM-composed code returned, so we surface it as-is and
-    # tag the metric so the frontend knows it's freeform.
-    if plan is not None and getattr(plan, "metric", None) == "freeform_codeact":
+    # Codeact branch — final result lives in `codeact_final`. Triggered by
+    # either the Smart CodeAct entry (no plan) or the legacy
+    # `metric == freeform_codeact` path.
+    is_codeact = (
+        sub_out.get("codeact_history") is not None
+        or (plan is not None and getattr(plan, "metric", None) == "freeform_codeact")
+    )
+    if is_codeact:
+        kind = "clarification" if sub_out.get("needs_clarification") else "result"
         return {
-            "kind": "result",
+            "kind": kind,
             "metric": "freeform_codeact",
             "rows": _json_safe(sub_out.get("codeact_final")),
             "metadata": {
                 "steps": len(sub_out.get("codeact_history") or []),
+                "clarification_question": sub_out.get("clarification_question"),
+                "clarification_options": sub_out.get("clarification_options"),
             },
             "confidence": sub_out.get("confidence"),
         }
