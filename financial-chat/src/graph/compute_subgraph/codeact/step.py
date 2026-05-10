@@ -93,14 +93,63 @@ resolvers do it deterministically against the catalog.
   sum_by_wallet(start, end, *, currency='ALL',
                 convert_to_thb=False) -> list[dict]
 
+  sum_by_tag(start, end, *, wallet_names=None, tag_names=None,
+             currency='ALL', convert_to_thb=False) -> list[dict]
+      # rows: [{"bucket": <tag_name>, "currency": ..., "amount": Decimal,
+      #         "cnt": int}, ...]
+      # Untagged transactions are excluded. Use this for "tag/แท็ก/ป้าย/
+      # หัวข้อ/แฮชแท็ก/กลุ่มไหนใช้เงินเยอะสุด" — never compose by looping.
+      # `bucket` is the tag name verbatim from the catalog (preserve `#`
+      # exactly as it appears — do not add or strip).
+
   list_transactions(start, end, *, wallet_names=None, category_names=None,
                     tag_names=None, currency='ALL',
                     order_by='date_desc' | 'amount_desc', limit=50,
-                    transaction_type=None) -> list[dict]
+                    transaction_type=None,
+                    note_query=None, match_destination_note=True,
+                    has_note=None) -> list[dict]
       # rows: [{"date": ..., "type": ..., "amount": Decimal, "currency": ...,
       #         "note": ..., "category_name": ..., "wallet_name": ...}, ...]
       # `transaction_type` ∈ {'income','expense','transfer','creditCardPay'}
       # narrows to one type. Use this for 'รายการรายรับ' / 'income only'.
+      # Note search: `note_query` accepts a single string or a list of
+      #   keywords (case-insensitive LIKE OR). With match_destination_note=True
+      #   (default) also searches `destination_note` — important for transfers
+      #   where the meaningful label lives on the receiving side.
+      # `has_note=True` keeps only transactions with a non-empty note;
+      #   `has_note=False` keeps only those without one.
+
+  # Note search semantics — applies to sum_income / sum_expense /
+  # sum_by_category / sum_by_wallet / sum_by_tag / count too via the same
+  # parameters (`note_query`, `match_destination_note`, `has_note`).
+  #
+  # WHEN to reach for note_query (NOT category_names / tag_names):
+  #   - User said "หมายเหตุ" / "บันทึก" / "โน้ต" / "note" / "description" /
+  #     "คำอธิบาย" / "รายละเอียด" / "จดว่า" / "เขียนว่า" → ALWAYS note_query.
+  #   - The user's keyword is a brand / vendor / venue name (Starbucks,
+  #     Cafe Amazon, Bolt, Makro, BTS, MRT, ผัดไทย, ลาเต้, ร้านหมูกระทะ,
+  #     สตาร์บัคส์, ฯลฯ) — these are stored in `note`, not in category. Use
+  #     note_query, NOT a fuzzy category match.
+  #   - "transfer เข้า X" / "โอนเข้า X" / "รับโอนจาก X" — use
+  #     list_transactions(transaction_type='transfer', wallet_names=['X'])
+  #     or note_query='X'. The wallet_filter automatically matches both
+  #     source and destination wallet, so any transfer involving X comes back.
+  #
+  # Multi-keyword examples:
+  #   "ค่ากาแฟทั้งหมด" → note_query=["Starbucks", "Cafe Amazon", "ลาเต้", "กาแฟ"]
+  #   "รายการ Central กับ Makro" → note_query=["Central", "Makro"]
+  # Single-keyword:
+  #   "รายการที่หมายเหตุมี Starbucks" → note_query="Starbucks"
+  #   "transfer เข้า kbank" → list_transactions(transaction_type='transfer',
+  #     wallet_names=['kbank'], start=..., end=...)
+  #
+  # Result-empty fallback — IMPORTANT:
+  #   If your first call returns count=0, sum=None, or an empty list AND
+  #   the user did NOT name an explicit period (so the default last-month-
+  #   to-today window kicked in), retry ONCE with the all-time window:
+  #     start = date(2020, 1, 1), end = today()
+  #   Then state BOTH periods in the answer so the user sees that the
+  #   default window was empty but the all-time view is not.
 
   balance(*, as_of=None, wallet_names=None, currency='ALL',
           convert_to_thb=False) -> list[dict]
@@ -134,6 +183,86 @@ resolvers do it deterministically against the catalog.
   goal_list() -> list[dict]
   goal_progress(*, goal_name_phrase=None) -> list[dict]
   goal_transactions(*, goal_name_phrase, order_by='date_desc', limit=50) -> list[dict]
+
+## Counts / discovery / analytics
+
+  count_transactions(start, end, *, wallet_names=None, category_names=None,
+                     tag_names=None, currency='ALL', transaction_type=None,
+                     note_query=None, has_note=None) -> list[dict]
+      # rows: [{"currency": ..., "cnt": int}, ...]
+      # Use for "กี่ครั้ง / how many" — never compose len(list_transactions).
+
+  wallet_list() -> list[dict]
+      # rows: [{"kind": 'general'|'creditcard'|'goal', "sync_id": ...,
+      #         "name": ..., "currency": ..., "initial_balance": Decimal,
+      #         "icon": ...}, ...]
+      # Use for "บัญชีฉันมีอะไรบ้าง" — quicker than balance() for discovery.
+
+  category_list(*, transaction_type=None) -> list[dict]
+      # rows: [{"sync_id": ..., "name": ..., "type": 'expense'|'income',
+      #         "parent_sync_id": ..., "icon": ..., "is_active": bool}, ...]
+      # Pass transaction_type to filter. Use for "หมวดหมู่ฉันมีอะไรบ้าง".
+
+  tag_list() -> list[dict]
+      # rows: [{"sync_id": ..., "name": ..., "usage_count": int}, ...]
+      # Sorted by usage DESC. Use for "tag/แท็กที่ใช้บ่อยสุด".
+
+  spending_trend(start, end, *, group_by='month'|'week'|'day'|'quarter'|'year',
+                 wallet_names=None, category_names=None, tag_names=None,
+                 currency='ALL', transaction_type='expense',
+                 convert_to_thb=False, note_query=None,
+                 has_note=None) -> list[dict]
+      # rows: [{"bucket": date, "currency": ..., "amount": Decimal,
+      #         "cnt": int}, ...]
+      # Use for "เทรนด์ / แต่ละเดือน / 6 เดือนล่าสุด" trend questions.
+
+  transaction_stats(start, end, *, wallet_names=None, category_names=None,
+                    tag_names=None, currency='ALL',
+                    transaction_type='expense', convert_to_thb=False,
+                    note_query=None, has_note=None) -> list[dict]
+      # rows: [{"currency": ..., "cnt": int, "min": Decimal, "max": Decimal,
+      #         "avg": Decimal, "median": Decimal, "sum": Decimal}, ...]
+      # Use for "เฉลี่ย / แพงสุด / ถูกสุด / median" questions.
+
+  top_transactions(start, end, *, limit=5, wallet_names=None,
+                   category_names=None, tag_names=None, currency='ALL',
+                   transaction_type='expense', note_query=None,
+                   has_note=None) -> list[dict]
+      # Convenience for "Top N / รายการแพงสุด N รายการ".
+
+  currency_rate(*, code=None) -> list[dict]
+      # rows: [{"code": "USD", "name": ..., "symbol": ..., "rate": Decimal,
+      #         "updated_at": ...}, ...]
+      # Conversion: <amount> THB = <amount in code> / rate. Use for
+      # "1 USD กี่บาท / FX rate".
+
+  active_period() -> list[dict]
+      # rows: [{"first_date": date, "last_date": date,
+      #         "active_days": int, "total_tx": int}]
+      # Use for "ใช้แอปมานานเท่าไร / รายการแรกเมื่อไหร่".
+
+## Composite analytics (Python compose, single function call)
+
+  compare_periods(*, period1_start, period1_end, period2_start, period2_end,
+                  by='category'|'wallet'|'tag'|'total',
+                  transaction_type='expense', currency='ALL',
+                  convert_to_thb=True) -> dict
+      # Returns {by, period1, period2, rows: [{bucket, period1_amount,
+      # period2_amount, diff, pct_change}, ...]}.
+      # Use for "เปรียบเทียบเดือนนี้กับเดือนที่แล้ว แยกหมวด" — single call.
+
+  spending_pace(*, as_of=None, wallet_names=None, category_names=None,
+                currency='ALL', convert_to_thb=True) -> dict
+      # Returns end-of-month projection from current pace.
+      # Keys: month_start, as_of, month_end, days_elapsed, days_in_month,
+      #       spent_so_far, daily_avg, projected_total, projected_remaining.
+      # Use for "เดือนนี้พอเหลือเงินอีกเท่าไร / projection".
+
+  anomaly(*, category_names=None, wallet_names=None, lookback_days=30,
+          as_of=None) -> dict
+      # Returns {today_spent, lookback_avg, ratio, anomaly_level}.
+      # anomaly_level ∈ {'normal','elevated','high','very_high'}.
+      # Use for "วันนี้ใช้เยอะกว่าปกติไหม".
 
 ## Primitives
 

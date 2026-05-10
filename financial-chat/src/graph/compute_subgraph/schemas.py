@@ -23,6 +23,16 @@ Metric = Literal[
     "count",
     "sum_by_category",
     "sum_by_wallet",
+    "sum_by_tag",
+    # Discovery (entity catalogs as data)
+    "wallet_list",
+    "category_list",
+    "tag_list",
+    # Analytics
+    "spending_trend",
+    "transaction_stats",
+    "currency_rate",
+    "active_period",
     # Budget family
     "budget_list",
     "budget_remaining",
@@ -80,3 +90,12 @@ class QuerySpec(BaseModel):
     goal_name_phrase: str | None = None
     convert_to_thb: bool = False
     transaction_type: TxType | None = None
+    # Note text search — case-insensitive LIKE OR across the keywords. When
+    # `match_destination_note` is true (default) the same keyword set is also
+    # matched against `destination_note`, so transfers/credit-card payments
+    # whose receiving side carries the note are caught.
+    note_query: list[str] | None = None
+    match_destination_note: bool = True
+    # Filter by presence of a note — True = note IS NOT NULL AND <> '',
+    # False = note IS NULL OR ''. None disables the filter.
+    has_note: bool | None = None

@@ -154,7 +154,14 @@ class _Wrappers:
         goal_name_phrase: str | None = None,
         convert_to_thb: bool = False,
         transaction_type: str | None = None,
+        note_query: str | list[str] | None = None,
+        match_destination_note: bool = True,
+        has_note: bool | None = None,
+        granularity: str = "day",
     ) -> QuerySpec:
+        # Allow `note_query="Starbucks"` for the common single-keyword case.
+        if isinstance(note_query, str):
+            note_query = [note_query]
         return QuerySpec(
             metric=metric,  # type: ignore[arg-type]
             wallets=self._resolve_wallets(wallet_names),
@@ -163,7 +170,7 @@ class _Wrappers:
             time_range=TimeRange(
                 start=self._to_date(start),
                 end=self._to_date(end),
-                granularity="day",
+                granularity=granularity,  # type: ignore[arg-type]
                 confidence=1.0,
             ),
             currency=currency,  # type: ignore[arg-type]
@@ -173,6 +180,9 @@ class _Wrappers:
             goal_name_phrase=goal_name_phrase,
             convert_to_thb=convert_to_thb,
             transaction_type=transaction_type,  # type: ignore[arg-type]
+            note_query=note_query,
+            match_destination_note=match_destination_note,
+            has_note=has_note,
         )
 
     def _exec(self, spec: QuerySpec) -> list[dict]:
@@ -194,6 +204,9 @@ class _Wrappers:
         tag_names: list[str] | None = None,
         currency: str = "ALL",
         convert_to_thb: bool = False,
+        note_query: str | list[str] | None = None,
+        match_destination_note: bool = True,
+        has_note: bool | None = None,
     ) -> list[dict]:
         """Total income per currency in [start, end].
 
@@ -211,6 +224,9 @@ class _Wrappers:
                 tag_names=tag_names,
                 currency=currency,
                 convert_to_thb=convert_to_thb,
+                note_query=note_query,
+                match_destination_note=match_destination_note,
+                has_note=has_note,
             )
         )
 
@@ -228,6 +244,9 @@ class _Wrappers:
         wallet_names: list[str] | None = None,
         currency: str = "ALL",
         convert_to_thb: bool = False,
+        note_query: str | list[str] | None = None,
+        match_destination_note: bool = True,
+        has_note: bool | None = None,
     ) -> list[dict]:
         """Spending breakdown by category (expense only)."""
         return self._exec(
@@ -238,6 +257,9 @@ class _Wrappers:
                 wallet_names=wallet_names,
                 currency=currency,
                 convert_to_thb=convert_to_thb,
+                note_query=note_query,
+                match_destination_note=match_destination_note,
+                has_note=has_note,
             )
         )
 
@@ -248,6 +270,9 @@ class _Wrappers:
         end: str | date,
         currency: str = "ALL",
         convert_to_thb: bool = False,
+        note_query: str | list[str] | None = None,
+        match_destination_note: bool = True,
+        has_note: bool | None = None,
     ) -> list[dict]:
         """Spending breakdown by wallet (expense only)."""
         return self._exec(
@@ -257,6 +282,43 @@ class _Wrappers:
                 end=end,
                 currency=currency,
                 convert_to_thb=convert_to_thb,
+                note_query=note_query,
+                match_destination_note=match_destination_note,
+                has_note=has_note,
+            )
+        )
+
+    def sum_by_tag(
+        self,
+        *,
+        start: str | date,
+        end: str | date,
+        wallet_names: list[str] | None = None,
+        tag_names: list[str] | None = None,
+        currency: str = "ALL",
+        convert_to_thb: bool = False,
+        note_query: str | list[str] | None = None,
+        match_destination_note: bool = True,
+        has_note: bool | None = None,
+    ) -> list[dict]:
+        """Spending breakdown by tag (expense only). Untagged transactions are
+        excluded — pass tag_names=[...] to restrict to a subset of tags.
+
+        Returns rows like sum_by_category: {bucket, currency, amount, cnt}
+        where bucket = tag name (verbatim from the catalog, with or without `#`).
+        """
+        return self._exec(
+            self._spec(
+                metric="sum_by_tag",
+                start=start,
+                end=end,
+                wallet_names=wallet_names,
+                tag_names=tag_names,
+                currency=currency,
+                convert_to_thb=convert_to_thb,
+                note_query=note_query,
+                match_destination_note=match_destination_note,
+                has_note=has_note,
             )
         )
 
@@ -272,11 +334,21 @@ class _Wrappers:
         order_by: str = "date_desc",
         limit: int | None = 50,
         transaction_type: str | None = None,
+        note_query: str | list[str] | None = None,
+        match_destination_note: bool = True,
+        has_note: bool | None = None,
     ) -> list[dict]:
         """Individual transactions matching filters.
 
         `transaction_type` narrows to one of: 'income', 'expense', 'transfer',
-        'creditCardPay'. Leave None for all types."""
+        'creditCardPay'. Leave None for all types.
+
+        Note search:
+          - `note_query` = single keyword or a list. Case-insensitive LIKE
+            OR across the keywords. With `match_destination_note=True` (default)
+            also searches `destination_note` so transfers are caught.
+          - `has_note=True/False` filters by note presence.
+        """
         return self._exec(
             self._spec(
                 metric="list",
@@ -289,6 +361,9 @@ class _Wrappers:
                 order_by=order_by,
                 limit=limit,
                 transaction_type=transaction_type,
+                note_query=note_query,
+                match_destination_note=match_destination_note,
+                has_note=has_note,
             )
         )
 
@@ -431,6 +506,400 @@ class _Wrappers:
             )
         )
 
+    # ── Counts / discovery / analytics ─────────────────────────────────────
+
+    def count_transactions(
+        self,
+        *,
+        start: str | date,
+        end: str | date,
+        wallet_names: list[str] | None = None,
+        category_names: list[str] | None = None,
+        tag_names: list[str] | None = None,
+        currency: str = "ALL",
+        transaction_type: str | None = None,
+        note_query: str | list[str] | None = None,
+        match_destination_note: bool = True,
+        has_note: bool | None = None,
+    ) -> list[dict]:
+        """Number of transactions matching filters, per currency. Use this for
+        'กี่ครั้ง / how many' questions instead of len(list_transactions(...))."""
+        return self._exec(
+            self._spec(
+                metric="count",
+                start=start,
+                end=end,
+                wallet_names=wallet_names,
+                category_names=category_names,
+                tag_names=tag_names,
+                currency=currency,
+                transaction_type=transaction_type,
+                note_query=note_query,
+                match_destination_note=match_destination_note,
+                has_note=has_note,
+            )
+        )
+
+    def wallet_list(self) -> list[dict]:
+        """Every non-deleted wallet the user owns (general / creditcard / goal).
+        Returns rows with `kind` so the LLM picks the right downstream metric.
+        Use this whenever the user asks 'บัญชีฉันมีอะไรบ้าง' before drilling in."""
+        return self._exec(
+            self._spec(
+                metric="wallet_list",
+                start=date(1900, 1, 1),
+                end=self._today,
+            )
+        )
+
+    def category_list(self, *, transaction_type: str | None = None) -> list[dict]:
+        """All non-deleted categories the user has. Pass transaction_type
+        ('expense' / 'income' / 'transfer') to filter."""
+        return self._exec(
+            self._spec(
+                metric="category_list",
+                start=date(1900, 1, 1),
+                end=self._today,
+                transaction_type=transaction_type,
+            )
+        )
+
+    def tag_list(self) -> list[dict]:
+        """All non-deleted tags + how often each was used (all-time confirmed
+        only). Sorted by usage_count DESC so the most-used tag is first."""
+        return self._exec(
+            self._spec(
+                metric="tag_list",
+                start=date(1900, 1, 1),
+                end=self._today,
+            )
+        )
+
+    def spending_trend(
+        self,
+        *,
+        start: str | date,
+        end: str | date,
+        group_by: str = "month",
+        wallet_names: list[str] | None = None,
+        category_names: list[str] | None = None,
+        tag_names: list[str] | None = None,
+        currency: str = "ALL",
+        transaction_type: str | None = "expense",
+        convert_to_thb: bool = False,
+        note_query: str | list[str] | None = None,
+        has_note: bool | None = None,
+    ) -> list[dict]:
+        """Time-series totals grouped by `day` / `week` / `month` / `quarter`
+        / `year`. Default = monthly expense. Use this for trend / 'เทรนด์' /
+        'แต่ละเดือน' questions.
+
+        Returns rows: {bucket (date), currency, amount, cnt}.
+        With convert_to_thb=True you get one THB-converted row per bucket.
+        """
+        return self._exec(
+            self._spec(
+                metric="spending_trend",
+                start=start,
+                end=end,
+                wallet_names=wallet_names,
+                category_names=category_names,
+                tag_names=tag_names,
+                currency=currency,
+                transaction_type=transaction_type,
+                convert_to_thb=convert_to_thb,
+                note_query=note_query,
+                has_note=has_note,
+                granularity=group_by,
+            )
+        )
+
+    def transaction_stats(
+        self,
+        *,
+        start: str | date,
+        end: str | date,
+        wallet_names: list[str] | None = None,
+        category_names: list[str] | None = None,
+        tag_names: list[str] | None = None,
+        currency: str = "ALL",
+        transaction_type: str | None = "expense",
+        convert_to_thb: bool = False,
+        note_query: str | list[str] | None = None,
+        has_note: bool | None = None,
+    ) -> list[dict]:
+        """Min / max / avg / median / sum / count for the period.
+
+        Use for 'เฉลี่ยใช้วันละเท่าไร' (avg), 'รายการแพงสุด' (max),
+        'ถูกสุด' (min). Per-currency rows unless convert_to_thb=True.
+        """
+        return self._exec(
+            self._spec(
+                metric="transaction_stats",
+                start=start,
+                end=end,
+                wallet_names=wallet_names,
+                category_names=category_names,
+                tag_names=tag_names,
+                currency=currency,
+                transaction_type=transaction_type,
+                convert_to_thb=convert_to_thb,
+                note_query=note_query,
+                has_note=has_note,
+            )
+        )
+
+    def top_transactions(
+        self,
+        *,
+        start: str | date,
+        end: str | date,
+        limit: int = 5,
+        wallet_names: list[str] | None = None,
+        category_names: list[str] | None = None,
+        tag_names: list[str] | None = None,
+        currency: str = "ALL",
+        transaction_type: str | None = "expense",
+        note_query: str | list[str] | None = None,
+        has_note: bool | None = None,
+    ) -> list[dict]:
+        """Top N transactions by absolute amount. Convenience wrapper around
+        list_transactions(order_by='amount_desc') — saves the LLM from
+        having to remember the sort flag."""
+        return self.list_transactions(
+            start=start,
+            end=end,
+            wallet_names=wallet_names,
+            category_names=category_names,
+            tag_names=tag_names,
+            currency=currency,
+            order_by="amount_desc",
+            limit=limit,
+            transaction_type=transaction_type,
+            note_query=note_query,
+            has_note=has_note,
+        )
+
+    def currency_rate(self, *, code: str | None = None) -> list[dict]:
+        """FX rates from the currencies table. Pass `code='USD'` for one row
+        or omit for every rated currency. Rate semantics: 1 unit of the code
+        ≈ (1 / rate) THB. Use for 'X กี่บาท / convert N currency to THB'."""
+        return self._exec(
+            self._spec(
+                metric="currency_rate",
+                start=date(1900, 1, 1),
+                end=self._today,
+                currency=(code or "ALL"),
+            )
+        )
+
+    def active_period(self) -> list[dict]:
+        """User's first / last confirmed transaction date + active-day count.
+        Use for 'ใช้แอปมานานเท่าไร / first transaction'."""
+        return self._exec(
+            self._spec(
+                metric="active_period",
+                start=date(1900, 1, 1),
+                end=self._today,
+            )
+        )
+
+    # ── Composite analytics (Python compose, not new SQL) ──────────────────
+
+    def compare_periods(
+        self,
+        *,
+        period1_start: str | date,
+        period1_end: str | date,
+        period2_start: str | date,
+        period2_end: str | date,
+        by: str = "category",
+        transaction_type: str | None = "expense",
+        currency: str = "ALL",
+        convert_to_thb: bool = True,
+    ) -> dict:
+        """Compare two periods side-by-side. `by` ∈ {'category','wallet',
+        'tag','total'}. Returns {period1, period2, diff, pct_change} per
+        bucket — one tool call instead of two + Python diff."""
+        bucket_metric = {
+            "category": "sum_by_category",
+            "wallet":   "sum_by_wallet",
+            "tag":      "sum_by_tag",
+            "total":    ("sum_expense" if transaction_type == "expense"
+                         else "sum_income"),
+        }.get(by)
+        if bucket_metric is None:
+            raise ValueError(f"compare_periods: unknown by={by!r}")
+
+        def _fetch(s: str | date, e: str | date) -> list[dict]:
+            return self._exec(
+                self._spec(
+                    metric=bucket_metric,
+                    start=s,
+                    end=e,
+                    currency=currency,
+                    convert_to_thb=convert_to_thb,
+                    transaction_type=transaction_type if by == "total" else None,
+                )
+            )
+
+        rows1 = _fetch(period1_start, period1_end)
+        rows2 = _fetch(period2_start, period2_end)
+        # Index by bucket for diff. For "total", both are single-row sums.
+        def _key(r: dict) -> str:
+            return str(r.get("bucket", "TOTAL"))
+
+        def _amt(r: dict) -> Decimal:
+            from decimal import Decimal as _D
+            v = r.get("amount") or r.get("amount_thb") or 0
+            try:
+                return _D(str(v))
+            except Exception:
+                return _D(0)
+
+        idx1 = {_key(r): _amt(r) for r in rows1}
+        idx2 = {_key(r): _amt(r) for r in rows2}
+        from decimal import Decimal as _D
+        out = []
+        for k in sorted(set(idx1) | set(idx2)):
+            a, b = idx1.get(k, _D(0)), idx2.get(k, _D(0))
+            diff = b - a
+            pct = (diff / a * 100) if a else None
+            out.append({
+                "bucket": k,
+                "period1_amount": str(a),
+                "period2_amount": str(b),
+                "diff": str(diff),
+                "pct_change": (str(pct) if pct is not None else None),
+            })
+        return {
+            "by": by,
+            "period1": f"{period1_start} → {period1_end}",
+            "period2": f"{period2_start} → {period2_end}",
+            "rows": out,
+        }
+
+    def spending_pace(
+        self,
+        *,
+        as_of: str | date | None = None,
+        wallet_names: list[str] | None = None,
+        category_names: list[str] | None = None,
+        currency: str = "ALL",
+        convert_to_thb: bool = True,
+    ) -> dict:
+        """Project end-of-month spend based on daily pace from the 1st →
+        as_of (default today). Returns {spent_so_far, days_elapsed,
+        days_in_month, daily_avg, projected_total, projected_remaining}.
+        """
+        from datetime import date as _date
+        from decimal import Decimal as _D
+        cur = self._to_date(as_of) if as_of else self._today
+        month_start = cur.replace(day=1)
+        # last day of month
+        if cur.month == 12:
+            next_month = _date(cur.year + 1, 1, 1)
+        else:
+            next_month = _date(cur.year, cur.month + 1, 1)
+        from datetime import timedelta as _td
+        month_end = next_month - _td(days=1)
+        days_elapsed = (cur - month_start).days + 1
+        days_in_month = (month_end - month_start).days + 1
+
+        rows = self._exec(
+            self._spec(
+                metric="sum_expense",
+                start=month_start,
+                end=cur,
+                wallet_names=wallet_names,
+                category_names=category_names,
+                currency=currency,
+                convert_to_thb=convert_to_thb,
+            )
+        )
+        spent = _D(0)
+        for r in rows:
+            v = r.get("amount") or r.get("amount_thb") or 0
+            try:
+                spent += _D(str(v))
+            except Exception:
+                pass
+        daily_avg = spent / days_elapsed if days_elapsed else _D(0)
+        projected = daily_avg * days_in_month
+        return {
+            "month_start": month_start.isoformat(),
+            "as_of": cur.isoformat(),
+            "month_end": month_end.isoformat(),
+            "days_elapsed": days_elapsed,
+            "days_in_month": days_in_month,
+            "spent_so_far": str(spent),
+            "daily_avg": str(daily_avg),
+            "projected_total": str(projected),
+            "projected_remaining": str(projected - spent),
+        }
+
+    def anomaly(
+        self,
+        *,
+        category_names: list[str] | None = None,
+        wallet_names: list[str] | None = None,
+        lookback_days: int = 30,
+        as_of: str | date | None = None,
+    ) -> dict:
+        """Flag whether today's spend (in optional category/wallet) is
+        unusually high vs the daily average over the last `lookback_days`.
+
+        Returns {today_spent, lookback_avg, ratio, anomaly_level} where
+        anomaly_level ∈ {'normal','elevated','high','very_high'}.
+        """
+        from datetime import date as _date, timedelta as _td
+        from decimal import Decimal as _D
+        cur = self._to_date(as_of) if as_of else self._today
+        win_start = cur - _td(days=lookback_days)
+
+        def _spend(s: _date, e: _date) -> _D:
+            rows = self._exec(
+                self._spec(
+                    metric="sum_expense",
+                    start=s,
+                    end=e,
+                    wallet_names=wallet_names,
+                    category_names=category_names,
+                    convert_to_thb=True,
+                )
+            )
+            total = _D(0)
+            for r in rows:
+                v = r.get("amount") or r.get("amount_thb") or 0
+                try:
+                    total += _D(str(v))
+                except Exception:
+                    pass
+            return total
+
+        today_spent = _spend(cur, cur)
+        window_total = _spend(win_start, cur - _td(days=1))
+        lookback_avg = window_total / lookback_days if lookback_days else _D(0)
+        ratio = (today_spent / lookback_avg) if lookback_avg else None
+        if ratio is None or today_spent == 0:
+            level = "normal"
+        elif ratio >= 3:
+            level = "very_high"
+        elif ratio >= 2:
+            level = "high"
+        elif ratio >= 1.5:
+            level = "elevated"
+        else:
+            level = "normal"
+        return {
+            "as_of": cur.isoformat(),
+            "lookback_days": lookback_days,
+            "today_spent": str(today_spent),
+            "lookback_avg": str(lookback_avg),
+            "ratio": (str(ratio) if ratio is not None else None),
+            "anomaly_level": level,
+        }
+
 
 # ── Public entry point ───────────────────────────────────────────────────────
 
@@ -454,6 +923,7 @@ def build_namespace(
         "sum_expense":         w.sum_expense,
         "sum_by_category":     w.sum_by_category,
         "sum_by_wallet":       w.sum_by_wallet,
+        "sum_by_tag":          w.sum_by_tag,
         "list_transactions":   w.list_transactions,
         "balance":             w.balance,
         "budget_remaining":    w.budget_remaining,
@@ -463,6 +933,19 @@ def build_namespace(
         "goal_list":           w.goal_list,
         "goal_progress":       w.goal_progress,
         "goal_transactions":   w.goal_transactions,
+        # Counts / discovery / analytics (Phase 4)
+        "count_transactions":  w.count_transactions,
+        "wallet_list":         w.wallet_list,
+        "category_list":       w.category_list,
+        "tag_list":            w.tag_list,
+        "spending_trend":      w.spending_trend,
+        "transaction_stats":   w.transaction_stats,
+        "top_transactions":    w.top_transactions,
+        "currency_rate":       w.currency_rate,
+        "active_period":       w.active_period,
+        "compare_periods":     w.compare_periods,
+        "spending_pace":       w.spending_pace,
+        "anomaly":             w.anomaly,
         # Smart CodeAct helpers — entity & time resolution + clarification
         "resolve_wallet":      make_resolve_wallet(catalog, main_loop),
         "resolve_category":    make_resolve_category(catalog, main_loop),

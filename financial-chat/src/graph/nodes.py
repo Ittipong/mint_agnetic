@@ -109,6 +109,31 @@ range to the task using:
 Compute the dates yourself from "Today's date" — never let the tool guess.
 Use the format `start = YYYY-MM-DD, end = YYYY-MM-DD`.
 
+EXCEPTIONS — these phrases mean ALL-TIME, NOT the default window:
+  - "ทั้งหมด" / "รวมทั้งหมด" / "ตั้งแต่เริ่ม" / "ตั้งแต่ใช้แอป" /
+    "ที่ผ่านมาทั้งหมด" / "all time" / "เคย...บ้าง" / "กี่ครั้งแล้ว"
+When ANY of these phrases appear ANYWHERE in the question (even at the end,
+e.g. "transfer เข้า kbank ทั้งหมดมีเท่าไหร่"), set start = 2020-01-01 (or any
+earlier sentinel date that predates the user's data) and end = today. Do NOT
+apply the last-month default.
+
+CRITICAL — "ทั้งหมด" is ambiguous: it can mean "total amount" (sum) OR
+"all time" (period). Default to ALL-TIME unless the question already names
+a period — e.g. "เดือนนี้ใช้ทั้งหมดเท่าไร" the period = this month, not
+all-time. But "X ทั้งหมดมีเท่าไหร่" / "เคยใช้ X ทั้งหมดเท่าไหร่" with no
+named period = ALL-TIME.
+
+Examples:
+  - User: "tag #ประชุมงาน ใช้ไปทั้งหมดเท่าไหร่"
+    task: "Total expense tagged '#ประชุมงาน', start = 2020-01-01,
+           end = 2026-05-05"
+  - User: "transfer เข้า kbank ทั้งหมดมีเท่าไหร่"
+    task: "List transfers into wallet 'kbank' (incoming),
+           start = 2020-01-01, end = 2026-05-05"
+  - User: "เคยใช้ Starbucks กี่ครั้งแล้ว"
+    task: "Count transactions whose note contains 'Starbucks',
+           start = 2020-01-01, end = 2026-05-05"
+
 Why this default: a single calendar month is too narrow when today is early in
 the month (the user usually wants to see recent activity that includes last
 month). All-time is too broad and confuses the user with stale data.
@@ -156,6 +181,12 @@ WINDOW indicators — when ANY of these keywords appear, translate as a window:
              start = 2026-02-05, end = 2026-05-05"
 
 SINGLE-POINT — exactly one day or one calendar month, ALWAYS use ISO dates:
+  - User: "เดือนนี้..." / "เดือนปัจจุบัน..." (today = 2026-05-05)
+    task: "Total expense for THIS calendar month (single calendar month),
+           start = 2026-05-01, end = 2026-05-31"
+    NOTE — `end` is the LAST DAY of the month, NOT today. The user wants
+    the full month even though it has not finished yet (queries are safe
+    because tx beyond today simply don't exist).
   - User: "เดือนที่แล้ว..." (today = 2026-05-05)
     task: "Total expense for last month (single calendar month),
            start = 2026-04-01, end = 2026-04-30"
@@ -181,6 +212,35 @@ the task: AD = BE - 543. Never let "2569" reach the task argument.
     (NOT "February 2569" — already converted)
   - User: "ปี 2568 รายจ่ายรวม"
     task: "Total expense for year 2025"
+
+**NOTE SEARCH — when user names a vendor/brand or says "note":**
+A transaction's `note` field stores free-form text the user wrote (vendors:
+Starbucks / Cafe Amazon / Bolt / Makro / Central / BTS / MRT / ผัดไทย /
+ลาเต้, contexts: ค่าน้ำประปา / ปรับปรุงร้าน, ฯลฯ). It is NOT the same as
+category or tag. When the user mentions a note explicitly OR names a
+vendor/brand/venue, build a NOTE SEARCH task — NOT a category or tag task:
+
+Triggers — ANY of these MUST produce a note-search task:
+  - User said "หมายเหตุ" / "บันทึก" / "โน้ต" / "note" / "description" /
+    "คำอธิบาย" / "รายละเอียด" / "จดว่า" / "เขียนว่า" / "ที่จด"
+  - The keyword is a brand / vendor / venue (Starbucks, Cafe Amazon, Bolt,
+    Central, Makro, BTS, MRT, สตาร์บัคส์, ฯลฯ) — even if a category with
+    the same name exists, ALWAYS prefer note search when the user phrases it
+    like a vendor lookup ("ใช้เงินกับ X", "เคยซื้อที่ X", "X กี่ครั้งแล้ว").
+
+Write the task using the literal phrase "note search" or
+"note contains '<keyword>'" so the codeact step routes to `note_query=`,
+not `category_names=`. Examples:
+
+  - User: "ใช้เงินกับ BTS ไปเท่าไร ดูจากบันทึก"
+    task: "Total expense whose note contains 'BTS' (note search),
+           start = 2026-04-01, end = 2026-05-05"
+  - User: "เคยใช้ Starbucks กี่ครั้งแล้ว"
+    task: "Count transactions whose note contains 'Starbucks' (note search),
+           start = 2020-01-01, end = 2026-05-05"
+  - User: "รายการที่จดว่า ปรับปรุงร้าน"
+    task: "List transactions where note OR destination_note contains
+           'ปรับปรุงร้าน', start = 2026-04-01, end = 2026-05-05"
 
 **CREDIT CARD queries — use "Credit card" in task:**
 ANY question about "บัตรเครดิต" / "credit card" / "หนี้บัตร" /
@@ -228,6 +288,11 @@ The user's wallets, categories and tags are listed below in the
    or in the most recent tool output.
 3. If the user types a near-match ("true money") refer back to the catalog
    and use the exact name from there.
+4. **Tag `#` prefix — preserve EXACTLY as the catalog has it.** Some tags
+   carry `#` (e.g. `#กินข้าวนอกบ้าน`), some do NOT (e.g. `ซื้อของเข้าบ้าน`).
+   Do NOT add `#` to a tag that doesn't have one. Do NOT strip `#` from a
+   tag that does. The user might write either way — always normalize to
+   what the catalog says.
 
 **How to respond:**
 1. ALWAYS open the answer by stating the time period the numbers cover —

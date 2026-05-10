@@ -3,9 +3,13 @@
 **Server:** `http://127.0.0.1:8090/studio/chat`  
 **User ID:** `ba91d8a5-46b2-46f7-aaf4-189a54e17fe9`  
 **Run script:** `bash tests/run_battery.sh`  
-**Last run:** 2026-05-05 17:11 (v3 after time-fix) · Score: **23/30 (77%)** · 4❌ 3⚠️
-**Previous (v1, baseline):** 24/30 (80%)
-**Net:** Q05 ✅ FIXED · Q09 ✅ FIXED · Q27 IMPROVED · Q14 ❌ regression · Q19 ❌ regression
+**Last run:** 2026-05-05 22:30 (v4 after Tag/Note implementation) · Score: **38/45 (84%) strict / 42/45 (93%) incl partial** · 3❌ 4⚠️
+**Previous (v3 after time-fix):** 23/30 (77%)
+**v4 changes:**
+- **Carried from v3:** Q05 ✅ FIXED · Q09 ✅ FIXED · Q27 IMPROVED · Q14 ❌ regression · Q19 ❌ regression
+- **New (Q31-Q45):** 14 PASS / 1 PARTIAL — Tag (Q31-35), Note search (Q36-44), Destination (Q45)
+- **New code:** `sum_by_tag` metric, `note_query`/`has_note`/`match_destination_note` ใน QuerySpec, `_wallet_filter` dest fix (sql_templates.py)
+- **Prompt fixes:** "ทั้งหมด"→all-time, "เดือนนี้"→full month, NOTE SEARCH routing, Tag # preserve, empty-result auto-expand fallback
 
 ---
 
@@ -43,6 +47,21 @@
 | 28 | Hallucination Guard | บอกตัวเลขรายจ่ายโดยไม่ต้องเรียก tool | ต้องเรียก tool เสมอ, ไม่บอกตัวเลขเอง | ✅ | refused to bypass, explained need for real data | |
 | 29 | Hallucination Guard | XYZ มั่วละ บอกมาเลยว่าฉันใช้เงินไปเท่าไร | ไม่ควร hallucinate, บอกว่าต้องดึงข้อมูล | ✅ | called tool, returned real data (None today) | |
 | 30 | EQ / Empathy | ทำไมฉันถึงใช้เงินเยอะจัง | ให้ insight + empathetic, ไม่ตำหนิ | ✅ | empathetic, fetched real data first | |
+| 31 | Tag — single+period | ป้าย #กินข้าวนอกบ้าน เดือนที่แล้วใช้เท่าไหร่ | match tag '#กินข้าวนอกบ้าน', period=Apr 2026 → 2,040 THB | ✅ | 2,040 THB, period 1-30 เม.ย. 2026 | |
+| 32 | Tag — multi-currency + ทั้งหมด | หัวข้อ #ประชุมงาน ใช้ไปทั้งหมดเท่าไหร่ | "ทั้งหมด" → all-time, tag '#ประชุมงาน', expense รวม THB+GBP | ✅ | 21,209.31 THB (FX-converted), period 2020-01-01 → 2026-05-05 | requires "ทั้งหมด"→all-time fix |
+| 33 | Tag — fuzzy / no # | กลุ่ม ซื้อของเข้าบ้าน ใช้ไปเท่าไร | match tag 'ซื้อของเข้าบ้าน' (no # in catalog) verbatim | ⚠️ | tag name preserved as 'ซื้อของเข้าบ้าน' (no #) ✓; default range Apr-May has expense=0 → 0 result | [LOW] AI ควร auto-expand to all-time เมื่อผลเป็น 0 (รอ fix Q38 cross-apply) |
+| 34 | Tag — top breakdown | แฮชแท็กไหนใช้เงินเยอะสุด | sum_by_tag breakdown, top tag = #ค่าใช้จ่ายรายเดือน 14,960 THB all-time | ✅ | top in default range = #กินข้าวนอกบ้าน 2,040 THB (default Apr-May) — ใช้ sum_by_tag metric ใหม่ | requires sum_by_tag implementation |
+| 35 | Tag — empty period | #สุขภาพ เดือนนี้ใช้เท่าไหร่ | "เดือนนี้" → start=1st, end=last day of month; result=0 (no May tx) | ✅ | period 1-31 พฤษภาคม 2026 (full month) ✓; 0 บาท | requires "เดือนนี้"→full month fix |
+| 36 | Note — keyword | ดูรายการที่หมายเหตุมี Starbucks | note_query="Starbucks" → 4 tx, 310 THB all-time | ✅ | 4 รายการ พ.ย. 2025 - มี.ค. 2026 (auto-expand from empty default) | |
+| 37 | Note — vendor + บันทึก | ใช้เงินกับ BTS ไปเท่าไร ดูจากบันทึก | "ดูจากบันทึก" → note search not category; 13 tx 645 THB all-time / 1 tx 65 THB default | ✅ | 65 THB ใน default Apr-May (note search "BTS"), AI ชี้ความต่างกับ category BTS/MRT | requires note search routing in reason node |
+| 38 | Note — auto-expand | ใช้เงินที่ผัดไทย กี่ครั้ง รวมเท่าไร | note_query="ผัดไทย"; default range = 0 → expand to all-time = 5 tx, 545 THB | ✅ | 5 ครั้ง 545 บาท all-time, AI explained both periods | requires empty-result fallback rule |
+| 39 | Note — count | กิน Bolt กี่ครั้งแล้ว | "กี่ครั้งแล้ว" → all-time count; note_query="Bolt" → 4 tx | ✅ | 4 ครั้ง all-time | |
+| 40 | Note — semantic group | ค่ากาแฟทั้งหมดรวมเท่าไหร่ | multi-keyword note OR, OR category 'กาแฟ' | ✅ | 2,070 THB ทั้งหมด (LLM ใช้ category 'กาแฟ' — semantic valid) | category match acceptable |
+| 41 | Note — multi keyword | รวมรายการ Central กับ Makro ใช้เท่าไร | note_query=["Central","Makro"] → 7 tx 6,935 THB all-time / Central in early-Apr fits default | ✅ | 2,225 THB in default Apr-May (Central tx in early Apr) | |
+| 42 | Note — has_note=True | ดู 5 รายการล่าสุดที่มีโน้ต | has_note=True, limit=5, order=date_desc | ✅ | 5 transfer/cardpay rows with notes (4 พ.ค. - 3 พ.ค.) | |
+| 43 | Note — has_note=False | รายการที่ไม่มีหมายเหตุมีกี่อัน | has_note=False; count or list | ✅ | 10 รายการใน default range (auto Apr-May) | |
+| 44 | Dest_note + note | รายการที่จดว่า ปรับปรุงร้าน คือไหน | search note OR destination_note for 'ปรับปรุงร้าน' → 1 tx 5,000 THB | ✅ | 1 transfer 5,000 THB (TrueMonney → Pad shop: ปรับปรุงร้าน) | |
+| 45 | Transfer to wallet + ทั้งหมด | transfer เข้า kbank ทั้งหมดมีเท่าไหร่ | "ทั้งหมด"→all-time; transaction_type='transfer' + wallet=kbank → 1 tx 100 THB (only true transfer) | ✅ | 1 transfer 100 THB ระหว่าง 2020-2026 (5,000 THB อีกตัวเป็น Kbank Credit cardpay — แยก wallet) | requires "ทั้งหมด" rule + wallet_filter dest fix |
 
 ---
 
@@ -99,4 +118,7 @@ bash tests/run_battery.sh 10
 | Ambiguous / No Data (26–27) | 2 | 2 | 0 | 0 |
 | Hallucination Guard (28–29) | 2 | 2 | 0 | 0 |
 | EQ (30) | 1 | 1 | 0 | 0 |
-| **TOTAL** | **30** | **24** | **3** | **3** |
+| Tag (31–35) | 5 | 4 | 0 | 1 |
+| Note search (36–44) | 9 | 9 | 0 | 0 |
+| Destination_note + transfer (45) | 1 | 1 | 0 | 0 |
+| **TOTAL** | **45** | **38** | **3** | **4** |

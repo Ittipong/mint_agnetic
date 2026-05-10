@@ -98,12 +98,40 @@ def _currency_filter(spec: QuerySpec, params: list[Any]) -> str:
     return f"AND t.currency_code = ${len(params)}"
 
 
+def _note_filter(spec: QuerySpec, params: list[Any]) -> str:
+    """Case-insensitive LIKE OR across the keyword list. When
+    `match_destination_note` is set, the same keyword is also matched against
+    `destination_note` — important for transfers / credit-card payments whose
+    semantic note lives on the receiving side."""
+    if not spec.note_query:
+        return ""
+    parts = []
+    for kw in spec.note_query:
+        params.append(f"%{kw}%")
+        n = len(params)
+        if spec.match_destination_note:
+            parts.append(f"(t.note ILIKE ${n} OR t.destination_note ILIKE ${n})")
+        else:
+            parts.append(f"t.note ILIKE ${n}")
+    return f"AND ({' OR '.join(parts)})"
+
+
+def _has_note_filter(spec: QuerySpec, params: list[Any]) -> str:
+    if spec.has_note is None:
+        return ""
+    if spec.has_note:
+        return "AND t.note IS NOT NULL AND t.note <> ''"
+    return "AND (t.note IS NULL OR t.note = '')"
+
+
 def _common_filters(spec: QuerySpec, params: list[Any]) -> str:
     parts = [
         _wallet_filter(spec, params),
         _category_filter(spec, params),
         _tag_filter(spec, params),
         _currency_filter(spec, params),
+        _note_filter(spec, params),
+        _has_note_filter(spec, params),
     ]
     return "\n        ".join(p for p in parts if p)
 
@@ -483,6 +511,262 @@ def build_sum_by_wallet(spec: QuerySpec, user_id: str) -> tuple[str, list]:
             ORDER BY amount DESC
         """
     return sql, params
+
+
+def build_sum_by_tag(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """Group total expense (default) by tag. Joins transaction_tags + tags.
+
+    A transaction can have multiple tags — the same tx will be counted under
+    every tag it carries. Untagged transactions never appear in the breakdown
+    (use sum_by_category for that perspective).
+    """
+    params = _base_params(spec, user_id)
+    params.append("expense")
+    type_idx = len(params)
+    extra = _common_filters(spec, params)
+    if spec.convert_to_thb:
+        sql = f"""
+            SELECT
+                tg.name                  AS bucket,
+                'THB'                    AS currency,
+                SUM({_AMOUNT_THB_EXPR}) AS amount,
+                COUNT(*)                 AS cnt
+            FROM transactions t
+            JOIN transaction_tags tt ON tt.transaction_sync_id = t.sync_id
+            JOIN tags tg            ON tg.sync_id = tt.tag_sync_id
+                                    AND tg.is_deleted = false
+            {_wallet_join()}
+            {_currency_join()}
+            WHERE 1=1 {_wallet_user_check()}
+              AND t.date >= $2
+              AND t.date <  ($3::date + INTERVAL '1 day')
+              AND t.type = ${type_idx}
+              AND t.is_deleted = false
+              AND t.status = 'confirmed'
+              AND t.include_in_report = true
+              {extra}
+            GROUP BY tg.name
+            ORDER BY amount DESC
+            LIMIT 30
+        """
+    else:
+        sql = f"""
+            SELECT
+                tg.name                          AS bucket,
+                COALESCE(t.currency_code, 'THB') AS currency,
+                SUM(t.amount::numeric)            AS amount,
+                COUNT(*)                          AS cnt
+            FROM transactions t
+            JOIN transaction_tags tt ON tt.transaction_sync_id = t.sync_id
+            JOIN tags tg            ON tg.sync_id = tt.tag_sync_id
+                                    AND tg.is_deleted = false
+            {_wallet_join()}
+            WHERE 1=1 {_wallet_user_check()}
+              AND t.date >= $2
+              AND t.date <  ($3::date + INTERVAL '1 day')
+              AND t.type = ${type_idx}
+              AND t.is_deleted = false
+              AND t.status = 'confirmed'
+              AND t.include_in_report = true
+              {extra}
+            GROUP BY tg.name, COALESCE(t.currency_code, 'THB')
+            ORDER BY amount DESC
+            LIMIT 30
+        """
+    return sql, params
+
+
+def build_wallet_list(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """All non-deleted wallets the user owns. Returns kind ∈
+    {'general','creditcard','goal'} so the LLM picks the right downstream
+    metric (balance for general/goal, creditcard_list for credit cards)."""
+    sql = """
+        SELECT 'general' AS kind, sync_id::text AS sync_id, name, currency,
+               initial_balance::numeric AS initial_balance, icon
+        FROM general_wallets
+        WHERE user_id = $1 AND deleted_at IS NULL
+        UNION ALL
+        SELECT 'creditcard', sync_id::text, name, currency, 0::numeric, icon
+        FROM creditcard_wallets
+        WHERE user_id = $1 AND deleted_at IS NULL
+        UNION ALL
+        SELECT 'goal', sync_id::text, name, currency, 0::numeric, icon
+        FROM goal_wallets
+        WHERE user_id = $1 AND deleted_at IS NULL
+        ORDER BY kind, name
+    """
+    return sql, [user_id]
+
+
+def build_category_list(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """User's categories. `transaction_type` (in spec) optionally filters
+    expense / income / transfer."""
+    params: list[Any] = [user_id]
+    type_clause = ""
+    if spec.transaction_type is not None:
+        params.append(spec.transaction_type)
+        type_clause = f"AND c.type = ${len(params)}"
+    sql = f"""
+        SELECT c.sync_id, c.name, c.type, c.parent_sync_id, c.icon,
+               c.display_order, c.is_active
+        FROM categories c
+        WHERE c.user_id = $1 AND c.is_deleted = false
+          {type_clause}
+        ORDER BY c.type, c.display_order, c.name
+    """
+    return sql, params
+
+
+def build_tag_list(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """User's tags + how often each was used (all-time, confirmed only)."""
+    sql = """
+        SELECT tg.sync_id, tg.name,
+               COUNT(tx.sync_id) FILTER (
+                   WHERE tx.is_deleted = false AND tx.status = 'confirmed'
+               ) AS usage_count
+        FROM tags tg
+        LEFT JOIN transaction_tags tt ON tt.tag_sync_id = tg.sync_id
+        LEFT JOIN transactions tx     ON tx.sync_id = tt.transaction_sync_id
+        WHERE tg.created_by_user_id = $1 AND tg.is_deleted = false
+        GROUP BY tg.sync_id, tg.name
+        ORDER BY usage_count DESC, tg.name
+    """
+    return sql, [user_id]
+
+
+def build_spending_trend(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """Time-series spending grouped by day / week / month / year. The bucket
+    column is a DATE so the LLM can format Thai labels (e.g. 'เม.ย. 2026').
+
+    Defaults to monthly granularity. Honors `transaction_type` (default:
+    expense). Supports convert_to_thb for cross-currency totals.
+    """
+    granularity = (spec.time_range.granularity or "month").lower()
+    if granularity not in ("day", "week", "month", "year", "quarter"):
+        granularity = "month"
+    params = _base_params(spec, user_id)
+    txtype = spec.transaction_type or "expense"
+    params.append(txtype)
+    type_idx = len(params)
+    extra = _common_filters(spec, params)
+    if spec.convert_to_thb:
+        amount_expr = f"SUM({_AMOUNT_THB_EXPR})"
+        currency_expr = "'THB'"
+        join_currency = _currency_join()
+        group_by = "GROUP BY bucket"
+    else:
+        amount_expr = "SUM(t.amount::numeric)"
+        currency_expr = "COALESCE(t.currency_code, 'THB')"
+        join_currency = ""
+        group_by = f"GROUP BY bucket, {currency_expr}"
+    sql = f"""
+        SELECT
+            DATE_TRUNC('{granularity}', t.date)::date AS bucket,
+            {currency_expr}                            AS currency,
+            {amount_expr}                              AS amount,
+            COUNT(*)                                   AS cnt
+        FROM transactions t
+        {_wallet_join()}
+        {join_currency}
+        WHERE 1=1 {_wallet_user_check()}
+          AND t.date >= $2
+          AND t.date <  ($3::date + INTERVAL '1 day')
+          AND t.type = ${type_idx}
+          AND t.is_deleted = false
+          AND t.status = 'confirmed'
+          AND t.include_in_report = true
+          {extra}
+        {group_by}
+        ORDER BY bucket, currency
+    """
+    return sql, params
+
+
+def build_transaction_stats(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """Min / max / avg / median / sum / count for the configured type
+    (default expense). Per-currency rows when convert_to_thb=False, otherwise
+    one THB-converted row.
+    """
+    params = _base_params(spec, user_id)
+    txtype = spec.transaction_type or "expense"
+    params.append(txtype)
+    type_idx = len(params)
+    extra = _common_filters(spec, params)
+    if spec.convert_to_thb:
+        amt = _AMOUNT_THB_EXPR
+        currency_expr = "'THB'"
+        join_currency = _currency_join()
+        group = "GROUP BY 1"
+    else:
+        amt = "t.amount::numeric"
+        currency_expr = "COALESCE(t.currency_code, 'THB')"
+        join_currency = ""
+        group = f"GROUP BY {currency_expr}"
+    sql = f"""
+        SELECT
+            {currency_expr} AS currency,
+            COUNT(*)         AS cnt,
+            MIN({amt})       AS min,
+            MAX({amt})       AS max,
+            AVG({amt})       AS avg,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {amt}) AS median,
+            SUM({amt})       AS sum
+        FROM transactions t
+        {_wallet_join()}
+        {join_currency}
+        WHERE 1=1 {_wallet_user_check()}
+          AND t.date >= $2
+          AND t.date <  ($3::date + INTERVAL '1 day')
+          AND t.type = ${type_idx}
+          AND t.is_deleted = false
+          AND t.status = 'confirmed'
+          AND t.include_in_report = true
+          {extra}
+        {group}
+        ORDER BY currency
+    """
+    return sql, params
+
+
+def build_currency_rate(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """Current FX rate for one currency (or all when spec.currency='ALL').
+
+    `rate` is units of the currency per 1 THB (i.e. THB = amount / rate).
+    """
+    params: list[Any] = []
+    where = "WHERE rate IS NOT NULL"
+    if spec.currency != "ALL":
+        params.append(spec.currency)
+        where += f" AND code = ${len(params)}"
+    sql = f"""
+        SELECT code, name_en AS name, name_th, symbol,
+               rate::numeric AS rate, updated_at
+        FROM currencies
+        {where}
+        ORDER BY code
+    """
+    return sql, params
+
+
+def build_active_period(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """First / last transaction date + active-day count. Useful for
+    'ใช้แอปมานานเท่าไร'."""
+    sql = """
+        SELECT MIN(t.date::date) AS first_date,
+               MAX(t.date::date) AS last_date,
+               COUNT(DISTINCT t.date::date) AS active_days,
+               COUNT(*) AS total_tx
+        FROM transactions t
+        LEFT JOIN general_wallets gw ON gw.sync_id::text = t.wallet_sync_id
+        LEFT JOIN creditcard_wallets cc ON cc.sync_id::text = t.wallet_sync_id
+        LEFT JOIN goal_wallets gl ON gl.sync_id::text = t.wallet_sync_id
+        WHERE (gw.user_id = $1 AND gw.deleted_at IS NULL
+               OR cc.user_id = $1 AND cc.deleted_at IS NULL
+               OR gl.user_id = $1 AND gl.deleted_at IS NULL)
+          AND t.is_deleted = false
+          AND t.status = 'confirmed'
+    """
+    return sql, [user_id]
 
 
 # ── Dispatcher ───────────────────────────────────────────────────────────────
@@ -937,6 +1221,14 @@ _BUILDERS = {
     "count": build_count,
     "sum_by_category": build_sum_by_category,
     "sum_by_wallet": build_sum_by_wallet,
+    "sum_by_tag": build_sum_by_tag,
+    "wallet_list": build_wallet_list,
+    "category_list": build_category_list,
+    "tag_list": build_tag_list,
+    "spending_trend": build_spending_trend,
+    "transaction_stats": build_transaction_stats,
+    "currency_rate": build_currency_rate,
+    "active_period": build_active_period,
     "budget_list": build_budget_list,
     "budget_remaining": build_budget_remaining,
     "budget_transactions": build_budget_transactions,
