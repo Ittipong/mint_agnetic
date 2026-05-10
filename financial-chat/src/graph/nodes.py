@@ -242,6 +242,77 @@ not `category_names=`. Examples:
     task: "List transactions where note OR destination_note contains
            'ปรับปรุงร้าน', start = 2026-04-01, end = 2026-05-05"
 
+**FUNCTION ROUTING — pick the right tool by question shape:**
+
+The codeact step has dedicated wrappers for common analytics. Steer it to
+the right one by phrasing the task with the matching verb. Compose only
+when no single wrapper fits.
+
+Wallet discovery (NO balance asked) — `wallet_list()`, NOT balance():
+  - User: "บัญชีฉันมีอะไรบ้าง" / "wallet ฉันมีอะไร" / "list ทุก wallet"
+    task: "List all wallets the user owns (wallet_list)"
+
+Category catalog — `category_list(transaction_type=...)`:
+  - User: "หมวดหมู่ฉันมีอะไรบ้าง" / "list categories"
+    task: "List all expense categories the user has (category_list)"
+
+Tag catalog with usage — `tag_list()`:
+  - User: "tag ที่ใช้บ่อยสุด" / "ฉันใช้ tag อะไรบ้าง"
+    task: "List all tags with usage_count (tag_list)"
+
+Counts (no sum needed) — `count_transactions(...)`:
+  - User: "กี่ครั้ง" / "how many transactions" / "ใช้ X กี่หน"
+    task: "Count transactions whose note contains 'X' (count_transactions),
+           start = ..., end = ..."
+
+Top N — `top_transactions(limit=N)`:
+  - User: "5 รายการแพงสุด" / "top 5 transactions"
+    task: "Top 5 transactions by amount (top_transactions),
+           start = ..., end = ..."
+
+Statistics — `transaction_stats()`:
+  - User: "เฉลี่ยใช้วันละเท่าไหร่" / "รายการแพงสุด" / "ถูกสุด" / "median"
+    task: "Min / max / average / median expense for ...
+           (transaction_stats), start = ..., end = ..."
+
+Trend / time-series — `spending_trend(group_by='month'|'week'|'day')`:
+  - User: "เทรนด์รายจ่าย 6 เดือน" / "แต่ละเดือนใช้เท่าไหร่" /
+    "เปรียบเทียบรายเดือน N เดือน"
+    task: "Spending trend across the last 6 months grouped by month
+           (spending_trend, group_by='month'), start = ..., end = ..."
+
+Compare two periods — `compare_periods(by='category'|'wallet'|'tag'|'total')`:
+  - User: "เปรียบเทียบเดือนนี้กับเดือนที่แล้ว" / "ต่างกันเท่าไหร่" /
+    "เดือน X เทียบ Y แยกหมวด"
+    task: "Compare spending in <period1> vs <period2> by category
+           (compare_periods), period1_start=..., period1_end=...,
+           period2_start=..., period2_end=..."
+  - PREFER compare_periods over manual two-call diff — single tool call,
+    returns diff & pct_change per bucket.
+
+Pace projection — `spending_pace(as_of=today)`:
+  - User: "เดือนนี้พอเหลือเงินใช้อีกเท่าไหร่" / "คาดว่าเดือนนี้จะใช้รวม" /
+    "ใช้เร็วเกินไปไหม"
+    task: "Project end-of-month spending pace (spending_pace)"
+
+Anomaly check — `anomaly(category_names=..., lookback_days=N)`:
+  - User: "วันนี้ใช้เงินเยอะกว่าปกติไหม" / "ผิดปกติไหม" / "spike"
+    task: "Detect spending anomaly today vs N-day average (anomaly,
+           lookback_days=30)"
+
+FX / currency conversion — `currency_rate(code='USD')`:
+  - User: "1 USD กี่บาท" / "เรท USD" / "อัตราแลกเปลี่ยน USD"
+    task: "Get current FX rate for USD (currency_rate, code='USD')"
+
+App-life metadata — `active_period()`:
+  - User: "ใช้แอปมานานเท่าไหร่" / "รายการแรกเมื่อไหร่" / "บันทึกมากี่วัน"
+    task: "First / last transaction date and active-day count
+           (active_period)"
+
+Mention the wrapper name in parentheses inside the task itself — the
+codeact step uses that as a hint to call the right function instead of
+defaulting to balance() / sum_expense() / list_transactions().
+
 **CREDIT CARD queries — use "Credit card" in task:**
 ANY question about "บัตรเครดิต" / "credit card" / "หนี้บัตร" /
 "ยอดบัตร" must use a task that includes the words "credit card"
