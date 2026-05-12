@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from src.config import settings
 from src.graph.agent_graph import build_async_graph
+from src import threads_repo
 
 # ── Debug Logger Setup ─────────────────────────────────────────────────────────
 _LOG_DIR = Path(__file__).parent.parent.parent / "logs"
@@ -94,10 +95,30 @@ class StudioChatRequest(BaseModel):
     message: str
 
 
+class CreateThreadRequest(BaseModel):
+    user_id: str
+    title: str | None = None
+
+
+class RenameThreadRequest(BaseModel):
+    title: str
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+_STATUS_LABELS = {
+    "thinking": "🧠 AI กำลังคิด...",
+    "calculating": "🧮 AI คำนวณข้อมูล...",
+    "writing": "✍️ AI เรียบเรียงคำตอบ...",
+}
+
+# Nodes that mean the agent is doing heavy compute (CodeAct / analyze
+# subgraph). Entering any of these emits the `calculating` status.
+_CALCULATING_NODES = {"act", "analyze"}
 
 
 async def _stream_graph(
@@ -106,28 +127,71 @@ async def _stream_graph(
     message: str,
 ) -> AsyncGenerator[str, None]:
     _debug_log("STREAM", "Starting", user_id=user_id, thread_id=thread_id, message=message[:50])
+
+    # Upsert thread metadata before the run — first message becomes the title.
+    if _pool is not None:
+        try:
+            inserted = await threads_repo.upsert_on_first_message(
+                _pool, thread_id, user_id, message,
+            )
+            if inserted:
+                _debug_log("THREAD", "Created", thread_id=thread_id)
+        except Exception as exc:
+            _debug_log("THREAD", "Upsert failed", error=str(exc), thread_id=thread_id)
+
     config = {"configurable": {"thread_id": thread_id}}
     input_data = {
         "messages": [HumanMessage(content=message)],
         "user_id": user_id,
     }
-    _debug_log("STREAM", "Input data prepared", user_id=input_data["user_id"])
+
+    # Track status emission so we never repeat a phase inside one run.
+    emitted_phases: set[str] = set()
+    assistant_reply_chunks: list[str] = []
+
+    def _status_event(phase: str) -> str:
+        return _sse({
+            "type": "status",
+            "phase": phase,
+            "label": _STATUS_LABELS.get(phase, phase),
+        })
 
     try:
         async for event in _graph.astream_events(input_data, config, version="v2"):
             kind = event["event"]
+            node = (event.get("metadata") or {}).get("langgraph_node")
 
-            if kind == "on_chat_model_stream":
-                # Only stream tokens from the user-facing reasoner. The
-                # planner / codeact-step / time-resolver fallback also call
-                # LLMs (with structured output) — their tokens are internal
-                # plumbing and should NOT bleed into the user's chat bubble.
-                node = (event.get("metadata") or {}).get("langgraph_node")
+            # === Status: thinking (on first reason entry) ===
+            # === Status: calculating (on first act/analyze entry) ===
+            if kind == "on_chain_start":
+                if node == "reason" and "thinking" not in emitted_phases:
+                    emitted_phases.add("thinking")
+                    yield _status_event("thinking")
+                elif node in _CALCULATING_NODES and "calculating" not in emitted_phases:
+                    emitted_phases.add("calculating")
+                    yield _status_event("calculating")
+
+            # === Status: writing (when calculating finishes — clean handoff) ===
+            elif kind == "on_chain_end" and node in _CALCULATING_NODES:
+                if "writing" not in emitted_phases:
+                    emitted_phases.add("writing")
+                    yield _status_event("writing")
+
+            elif kind == "on_chat_model_stream":
+                # Only stream tokens from the user-facing reasoner.
                 if node != "reason":
                     continue
                 chunk = event["data"]["chunk"]
-                if chunk.content:
-                    yield _sse({"type": "token", "content": chunk.content})
+                if not chunk.content:
+                    continue
+                # Note: `writing` is emitted via on_chain_end for the
+                # calculating nodes (clean handoff). We deliberately
+                # don't fire writing here — if no calculation happens
+                # (pure conversational), `thinking` stays visible until
+                # `done`, which is acceptable UX given tokens are
+                # streaming visibly.
+                assistant_reply_chunks.append(chunk.content)
+                yield _sse({"type": "token", "content": chunk.content})
 
             elif kind == "on_tool_start":
                 _debug_log("STREAM", "Tool started", tool=event["name"])
@@ -138,10 +202,6 @@ async def _stream_graph(
                 yield _sse({"type": "tool_end", "tool": event["name"]})
 
             elif kind == "on_custom_event" and event.get("name") == "structured_data":
-                # The analyze subgraph dispatched its UI payload via
-                # `adispatch_custom_event` — this surfaces in LangSmith as
-                # a first-class event AND lets us forward it to the SSE
-                # stream without parsing message internals.
                 payload = event.get("data")
                 if payload is not None:
                     _debug_log(
@@ -154,6 +214,16 @@ async def _stream_graph(
                     yield _sse({"type": "data", "payload": payload})
 
         _debug_log("STREAM", "Done", user_id=user_id)
+
+        # Persist preview + counters after the AI turn finished cleanly.
+        if _pool is not None and assistant_reply_chunks:
+            try:
+                await threads_repo.update_after_message(
+                    _pool, thread_id, "".join(assistant_reply_chunks),
+                )
+            except Exception as exc:
+                _debug_log("THREAD", "Update preview failed", error=str(exc), thread_id=thread_id)
+
         yield _sse({"type": "done"})
 
     except Exception as exc:
@@ -250,14 +320,61 @@ async def get_chat_history(thread_id: str):
 
 @app.delete("/chat/{thread_id}")
 async def delete_chat(thread_id: str):
-    """Clear conversation — client should use a new thread_id to start fresh."""
-    return {
-        "status": "ok",
-        "thread_id": thread_id,
-        "message": "Create a new thread_id to start a fresh conversation",
-    }
+    """Legacy alias — forwards to hard-delete cascade."""
+    return await delete_thread(thread_id)
+
+
+# ── Thread management ─────────────────────────────────────────────────────────
+
+@app.post("/threads", status_code=201)
+async def create_thread(req: CreateThreadRequest):
+    """Create a new chat thread. Optional `title` overrides the default."""
+    if _pool is None:
+        raise HTTPException(status_code=503, detail="Database not ready")
+    row = await threads_repo.create_thread(_pool, req.user_id, req.title)
+    _debug_log("THREAD", "Created", thread_id=row["thread_id"], user_id=req.user_id)
+    return row
+
+
+@app.get("/threads")
+async def list_threads(
+    user_id: str = Query(..., description="Owner user_id"),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """List a user's chat threads, newest activity first."""
+    if _pool is None:
+        raise HTTPException(status_code=503, detail="Database not ready")
+    rows = await threads_repo.list_threads(_pool, user_id, limit)
+    return {"threads": rows, "next_cursor": None}
+
+
+@app.patch("/threads/{thread_id}")
+async def rename_thread(thread_id: str, req: RenameThreadRequest):
+    """Rename a thread's display title."""
+    if _pool is None:
+        raise HTTPException(status_code=503, detail="Database not ready")
+    if not req.title.strip():
+        raise HTTPException(status_code=400, detail="title cannot be empty")
+    row = await threads_repo.rename_thread(_pool, thread_id, req.title)
+    if row is None:
+        raise HTTPException(status_code=404, detail="thread not found")
+    return row
+
+
+@app.delete("/threads/{thread_id}")
+async def delete_thread(thread_id: str):
+    """Hard-delete a thread and all its LangGraph checkpoints."""
+    if _pool is None:
+        raise HTTPException(status_code=503, detail="Database not ready")
+    deleted = await threads_repo.delete_thread_cascade(_pool, thread_id)
+    _debug_log("THREAD", "Deleted", thread_id=thread_id, found=deleted)
+    return {"status": "deleted", "thread_id": thread_id, "found": deleted}
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": settings.model}
+    return {
+        "status": "ok",
+        "react_model": settings.react_model,
+        "codeact_model": settings.codeact_model,
+    }
