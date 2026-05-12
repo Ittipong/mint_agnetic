@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import settings
 from src.graph.agent_graph import build_async_graph
@@ -70,7 +70,66 @@ async def lifespan(app: FastAPI):
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Mint Money Chat Agent", version="1.0.0", lifespan=lifespan)
+API_DESCRIPTION = """
+**Mint Money Chat Agent** — LangGraph ReAct agent for Thai financial Q&A.
+
+Combines a reasoning LLM (Typhoon) with a CodeAct compute subgraph that
+runs deterministic SQL templates over the user's transaction data.
+
+---
+
+### Streaming chat (SSE)
+
+`POST /chat/stream` returns **`text/event-stream`** (Server-Sent Events).
+Each event is a single JSON object on a `data:` line. Possible event types:
+
+| `type`        | Payload fields                | When |
+|---------------|-------------------------------|------|
+| `status`      | `phase`, `label`              | Agent lifecycle: `thinking` → `calculating` → `writing` |
+| `tool_start`  | `tool`                        | A regular tool started |
+| `tool_end`    | `tool`                        | A regular tool finished |
+| `data`        | `payload`                     | Structured tool result (rows, metric, metadata) |
+| `token`       | `content`                     | LLM streaming token — concatenate into a Markdown reply |
+| `done`        | —                             | Stream finished cleanly |
+| `error`       | `message`                     | An exception was raised mid-stream |
+
+For a **text-only** mobile UI, you only need to handle `token` (concat into
+a Markdown buffer) and `done` (close the stream). `status` events power the
+typing/thinking indicator.
+
+### Thread lifecycle
+
+The first call to `/chat/stream` with a new `thread_id` auto-creates a
+row in `chat_threads` (title = first 40 chars of the user message).
+List, rename, and delete threads via the `/threads` endpoints.
+`DELETE /threads/{id}` hard-deletes the thread plus all LangGraph
+checkpoints in one transaction.
+"""
+
+TAGS_METADATA = [
+    {
+        "name": "Chat",
+        "description": "Streaming conversational endpoints (SSE) and conversation history.",
+    },
+    {
+        "name": "Threads",
+        "description": "Sidebar metadata: create / list / rename / delete chat sessions.",
+    },
+    {
+        "name": "System",
+        "description": "Health and diagnostic endpoints.",
+    },
+]
+
+app = FastAPI(
+    title="Mint Money Chat Agent",
+    version="1.0.0",
+    description=API_DESCRIPTION,
+    openapi_tags=TAGS_METADATA,
+    lifespan=lifespan,
+    contact={"name": "Mint Money", "email": "ittipong.it@gmail.com"},
+    license_info={"name": "Proprietary"},
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -80,28 +139,125 @@ app.add_middleware(
 )
 
 
-# ── Schemas ───────────────────────────────────────────────────────────────────
+# ── Request schemas ───────────────────────────────────────────────────────────
+
+_EXAMPLE_USER_ID = "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9"
+_EXAMPLE_THREAD_ID = "thread-2026-05-12-001"
+
 
 class ChatRequest(BaseModel):
-    user_id: str
-    thread_id: str
-    message: str
+    """Payload for `POST /chat/stream`."""
+    user_id: str = Field(..., description="Owner user UUID")
+    thread_id: str = Field(..., description="Client-generated thread id (UUID). Used for both routing and checkpoint key.")
+    message: str = Field(..., description="User's natural-language input (Thai)", min_length=1)
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "user_id": _EXAMPLE_USER_ID,
+                "thread_id": _EXAMPLE_THREAD_ID,
+                "message": "ใช้เงินไปเท่าไรเดือนนี้",
+            }
+        }
+    )
 
 
 class StudioChatRequest(BaseModel):
-    """LangGraph Studio JSON format — mirrors the user chat payload."""
-    user_id: str
-    thread_id: str
-    message: str
+    """LangGraph Studio JSON format — mirrors `ChatRequest`."""
+    user_id: str = Field(..., description="Owner user UUID")
+    thread_id: str = Field(..., description="Thread id")
+    message: str = Field(..., min_length=1, description="User message")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "user_id": _EXAMPLE_USER_ID,
+                "thread_id": _EXAMPLE_THREAD_ID,
+                "message": "งบเดือนนี้เหลือเท่าไหร่",
+            }
+        }
+    )
 
 
 class CreateThreadRequest(BaseModel):
-    user_id: str
-    title: str | None = None
+    user_id: str = Field(..., description="Owner user UUID")
+    title: str | None = Field(None, description="Optional initial title. If omitted, defaults to 'แชตใหม่' until the first user message overrides it.")
+
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"user_id": _EXAMPLE_USER_ID, "title": None}}
+    )
 
 
 class RenameThreadRequest(BaseModel):
+    title: str = Field(..., min_length=1, description="New display title")
+
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"title": "งบประมาณเดือน พ.ค. 2026"}}
+    )
+
+
+# ── Response schemas ──────────────────────────────────────────────────────────
+
+class ThreadOut(BaseModel):
+    """A single chat thread row."""
+    thread_id: str
+    user_id: str
     title: str
+    last_message_preview: str | None
+    message_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "thread_id": _EXAMPLE_THREAD_ID,
+                "user_id": _EXAMPLE_USER_ID,
+                "title": "ใช้เงินไปเท่าไรเดือนนี้",
+                "last_message_preview": "ระหว่างวันที่ 1 เม.ย. - 12 พ.ค. 2026 คุณใช้เงินไปทั้งหมด 51,762.80 บาท...",
+                "message_count": 2,
+                "created_at": "2026-05-12T14:55:35.678552Z",
+                "updated_at": "2026-05-12T14:55:55.304049Z",
+            }
+        }
+    )
+
+
+class ListThreadsOut(BaseModel):
+    threads: list[ThreadOut]
+    next_cursor: str | None = Field(None, description="Reserved for future pagination — currently always null.")
+
+
+class RenameThreadOut(BaseModel):
+    thread_id: str
+    title: str
+    updated_at: datetime
+
+
+class DeleteThreadOut(BaseModel):
+    status: str = Field(..., examples=["deleted"])
+    thread_id: str
+    found: bool = Field(..., description="True if a row was deleted, False if the thread_id did not exist.")
+
+
+class HistoryMessage(BaseModel):
+    role: str = Field(..., examples=["user", "assistant"])
+    content: str
+
+
+class HistoryOut(BaseModel):
+    thread_id: str
+    messages: list[HistoryMessage]
+
+
+class HealthOut(BaseModel):
+    status: str = Field(..., examples=["ok"])
+    react_model: str
+    codeact_model: str
+
+
+class ErrorOut(BaseModel):
+    detail: str
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -235,44 +391,41 @@ async def _stream_graph(
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@app.post("/studio/chat")
-async def studio_chat(req: StudioChatRequest, request: Request):
-    """LangGraph Studio calls this endpoint with the user's JSON payload.
-
-    JSON format:
-    {
-        "user_id": "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9",
-        "thread_id": "test-thread",
-        "message": "ใช้เงินไปเท่าไร"
-    }
-    """
-    if _graph is None:
-        raise HTTPException(status_code=503, detail="Graph not ready")
-
-    client = request.client
-    _debug_log(
-        "HTTP",
-        "POST /studio/chat",
-        client=f"{client.host}:{client.port}" if client else "unknown",
-        thread_id=req.thread_id,
-        user_id=req.user_id,
-        message=req.message[:80],
-    )
-
-    return StreamingResponse(
-        _stream_graph(req.user_id, req.thread_id, req.message),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
+# Shared OpenAPI definition for the streaming SSE response.
+_SSE_RESPONSES: dict[int | str, dict] = {
+    200: {
+        "description": "Server-Sent Event stream. Each line is `data: <json>` with `type` in {status, tool_start, tool_end, data, token, done, error}.",
+        "content": {
+            "text/event-stream": {
+                "example": (
+                    'data: {"type":"status","phase":"thinking","label":"🧠 AI กำลังคิด..."}\n\n'
+                    'data: {"type":"status","phase":"calculating","label":"🧮 AI คำนวณข้อมูล..."}\n\n'
+                    'data: {"type":"status","phase":"writing","label":"✍️ AI เรียบเรียงคำตอบ..."}\n\n'
+                    'data: {"type":"token","content":"สวั"}\n\n'
+                    'data: {"type":"token","content":"สดี"}\n\n'
+                    'data: {"type":"done"}\n\n'
+                )
+            }
         },
-    )
+    },
+    503: {"model": ErrorOut, "description": "Graph or database not yet initialized."},
+}
 
 
-@app.post("/chat/stream")
+@app.post(
+    "/chat/stream",
+    tags=["Chat"],
+    summary="Stream a chat reply (SSE)",
+    description=(
+        "Send a user message and receive a `text/event-stream` reply. "
+        "The first call with a previously-unseen `thread_id` auto-creates "
+        "the thread row (title = first 40 chars of the message). After the "
+        "`done` event, the thread's `last_message_preview` and "
+        "`message_count` are updated."
+    ),
+    responses=_SSE_RESPONSES,
+)
 async def chat_stream(req: ChatRequest, request: Request):
-    """Stream chat response as Server-Sent Events."""
     if _graph is None:
         raise HTTPException(status_code=503, detail="Graph not ready")
 
@@ -297,9 +450,56 @@ async def chat_stream(req: ChatRequest, request: Request):
     )
 
 
-@app.get("/chat/{thread_id}")
+@app.post(
+    "/studio/chat",
+    tags=["Chat"],
+    summary="Stream a chat reply (LangGraph Studio compatible)",
+    description=(
+        "Identical behavior to `POST /chat/stream` — only the route differs. "
+        "Provided so LangGraph Studio's default Send-Message JSON shape works "
+        "without rewriting client code."
+    ),
+    responses=_SSE_RESPONSES,
+)
+async def studio_chat(req: StudioChatRequest, request: Request):
+    if _graph is None:
+        raise HTTPException(status_code=503, detail="Graph not ready")
+
+    client = request.client
+    _debug_log(
+        "HTTP",
+        "POST /studio/chat",
+        client=f"{client.host}:{client.port}" if client else "unknown",
+        thread_id=req.thread_id,
+        user_id=req.user_id,
+        message=req.message[:80],
+    )
+
+    return StreamingResponse(
+        _stream_graph(req.user_id, req.thread_id, req.message),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.get(
+    "/chat/{thread_id}",
+    tags=["Chat"],
+    summary="Get conversation history",
+    description=(
+        "Reads the LangGraph checkpoint state and returns the ordered list "
+        "of user/assistant messages for the given thread. Returns an empty "
+        "`messages` list if the thread has no checkpoints yet (e.g., the "
+        "user created it but never sent a message)."
+    ),
+    response_model=HistoryOut,
+    responses={503: {"model": ErrorOut, "description": "Graph not ready."}},
+)
 async def get_chat_history(thread_id: str):
-    """Get conversation history for a thread."""
     if _graph is None:
         raise HTTPException(status_code=503, detail="Graph not ready")
 
@@ -318,17 +518,37 @@ async def get_chat_history(thread_id: str):
     return {"thread_id": thread_id, "messages": messages}
 
 
-@app.delete("/chat/{thread_id}")
+@app.delete(
+    "/chat/{thread_id}",
+    tags=["Chat"],
+    summary="Delete a thread (legacy alias)",
+    description="Deprecated alias of `DELETE /threads/{thread_id}`. Kept for old clients.",
+    response_model=DeleteThreadOut,
+    responses={503: {"model": ErrorOut, "description": "Database not ready."}},
+    deprecated=True,
+)
 async def delete_chat(thread_id: str):
-    """Legacy alias — forwards to hard-delete cascade."""
     return await delete_thread(thread_id)
 
 
 # ── Thread management ─────────────────────────────────────────────────────────
 
-@app.post("/threads", status_code=201)
+@app.post(
+    "/threads",
+    tags=["Threads"],
+    status_code=201,
+    summary="Create a new chat thread",
+    description=(
+        "Allocates a new thread_id (UUIDv4) and inserts a metadata row with "
+        "the default title (`แชตใหม่`). The title is replaced automatically "
+        "on the first `/chat/stream` call. You can also call `/chat/stream` "
+        "directly with a fresh `thread_id` — this endpoint is only needed "
+        "when the UI wants to open an empty session before the user types."
+    ),
+    response_model=ThreadOut,
+    responses={503: {"model": ErrorOut, "description": "Database not ready."}},
+)
 async def create_thread(req: CreateThreadRequest):
-    """Create a new chat thread. Optional `title` overrides the default."""
     if _pool is None:
         raise HTTPException(status_code=503, detail="Database not ready")
     row = await threads_repo.create_thread(_pool, req.user_id, req.title)
@@ -336,21 +556,41 @@ async def create_thread(req: CreateThreadRequest):
     return row
 
 
-@app.get("/threads")
+@app.get(
+    "/threads",
+    tags=["Threads"],
+    summary="List a user's chat threads",
+    description=(
+        "Returns the user's threads sorted by `updated_at DESC` (most recent "
+        "activity first). `next_cursor` is reserved for future pagination "
+        "and is currently always `null`."
+    ),
+    response_model=ListThreadsOut,
+    responses={503: {"model": ErrorOut, "description": "Database not ready."}},
+)
 async def list_threads(
-    user_id: str = Query(..., description="Owner user_id"),
-    limit: int = Query(50, ge=1, le=200),
+    user_id: str = Query(..., description="Owner user UUID", examples=[_EXAMPLE_USER_ID]),
+    limit: int = Query(50, ge=1, le=200, description="Max rows to return"),
 ):
-    """List a user's chat threads, newest activity first."""
     if _pool is None:
         raise HTTPException(status_code=503, detail="Database not ready")
     rows = await threads_repo.list_threads(_pool, user_id, limit)
     return {"threads": rows, "next_cursor": None}
 
 
-@app.patch("/threads/{thread_id}")
+@app.patch(
+    "/threads/{thread_id}",
+    tags=["Threads"],
+    summary="Rename a thread",
+    description="Updates the thread's display title shown in the sidebar.",
+    response_model=RenameThreadOut,
+    responses={
+        400: {"model": ErrorOut, "description": "Empty title."},
+        404: {"model": ErrorOut, "description": "Thread not found."},
+        503: {"model": ErrorOut, "description": "Database not ready."},
+    },
+)
 async def rename_thread(thread_id: str, req: RenameThreadRequest):
-    """Rename a thread's display title."""
     if _pool is None:
         raise HTTPException(status_code=503, detail="Database not ready")
     if not req.title.strip():
@@ -361,9 +601,20 @@ async def rename_thread(thread_id: str, req: RenameThreadRequest):
     return row
 
 
-@app.delete("/threads/{thread_id}")
+@app.delete(
+    "/threads/{thread_id}",
+    tags=["Threads"],
+    summary="Delete a thread (hard, cascade)",
+    description=(
+        "Hard-deletes the thread metadata row **and** all LangGraph "
+        "checkpoint rows for this thread (`checkpoints`, `checkpoint_blobs`, "
+        "`checkpoint_writes`) in a single transaction. Idempotent — calling "
+        "twice returns `found: false` on the second call."
+    ),
+    response_model=DeleteThreadOut,
+    responses={503: {"model": ErrorOut, "description": "Database not ready."}},
+)
 async def delete_thread(thread_id: str):
-    """Hard-delete a thread and all its LangGraph checkpoints."""
     if _pool is None:
         raise HTTPException(status_code=503, detail="Database not ready")
     deleted = await threads_repo.delete_thread_cascade(_pool, thread_id)
@@ -371,7 +622,13 @@ async def delete_thread(thread_id: str):
     return {"status": "deleted", "thread_id": thread_id, "found": deleted}
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["System"],
+    summary="Liveness probe",
+    description="Reports the currently configured ReAct and CodeAct model identifiers.",
+    response_model=HealthOut,
+)
 async def health():
     return {
         "status": "ok",
