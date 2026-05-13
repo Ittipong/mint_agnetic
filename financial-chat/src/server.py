@@ -152,6 +152,16 @@ class ChatRequest(BaseModel):
     user_id: str = Field(..., description="Owner user UUID")
     thread_id: str = Field(..., description="Client-generated thread id (UUID). Used for both routing and checkpoint key.")
     message: str = Field(..., description="User's natural-language input (Thai)", min_length=1)
+    image_b64s: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional data URLs (e.g. 'data:image/jpeg;base64,...') for "
+            "slip-to-transaction turns. When present, the graph routes "
+            "to the vision subgraph instead of the regular ReAct loop. "
+            "Images are forwarded to the vision LLM verbatim and never "
+            "persisted server-side."
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -169,6 +179,10 @@ class StudioChatRequest(BaseModel):
     user_id: str = Field(..., description="Owner user UUID")
     thread_id: str = Field(..., description="Thread id")
     message: str = Field(..., min_length=1, description="User message")
+    image_b64s: list[str] = Field(
+        default_factory=list,
+        description="Optional data URLs for slip-to-transaction turns.",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -398,8 +412,17 @@ async def _stream_graph(
     user_id: str,
     thread_id: str,
     message: str,
+    image_b64s: list[str] | None = None,
 ) -> AsyncGenerator[str, None]:
-    _debug_log("STREAM", "Starting", user_id=user_id, thread_id=thread_id, message=message[:50])
+    image_b64s = image_b64s or []
+    _debug_log(
+        "STREAM",
+        "Starting",
+        user_id=user_id,
+        thread_id=thread_id,
+        message=message[:50],
+        image_count=len(image_b64s),
+    )
 
     # Upsert thread metadata before the run — first message becomes the title.
     if _pool is not None:
@@ -413,10 +436,14 @@ async def _stream_graph(
             _debug_log("THREAD", "Upsert failed", error=str(exc), thread_id=thread_id)
 
     config = {"configurable": {"thread_id": thread_id}}
-    input_data = {
+    input_data: dict[str, Any] = {
         "messages": [HumanMessage(content=message)],
         "user_id": user_id,
     }
+    if image_b64s:
+        # Only set when present so text-only turns don't trip the
+        # slip router (checks truthiness, not presence).
+        input_data["images"] = image_b64s
 
     # Track status emission so we never repeat a phase inside one run.
     emitted_phases: set[str] = set()
@@ -574,7 +601,7 @@ async def chat_stream(req: ChatRequest, request: Request):
     )
 
     return StreamingResponse(
-        _stream_graph(req.user_id, req.thread_id, req.message),
+        _stream_graph(req.user_id, req.thread_id, req.message, req.image_b64s),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -610,7 +637,7 @@ async def studio_chat(req: StudioChatRequest, request: Request):
     )
 
     return StreamingResponse(
-        _stream_graph(req.user_id, req.thread_id, req.message),
+        _stream_graph(req.user_id, req.thread_id, req.message, req.image_b64s),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -1,7 +1,10 @@
-"""ReAct LangGraph with dedicated Reasoner and Actor.
+"""ReAct LangGraph with dedicated Reasoner and Actor — plus a parallel
+slip-to-transaction vision subgraph for image-attached turns.
 
-Architecture (Standard ReAct):
-  START → reason → [act|tool|respond] → reason (loop) → END
+Architecture:
+  START
+    ├─ images?  → slip → [slip_tool] → END         (vision flow)
+    └─ otherwise → reason → [act|tool|respond] → ↶ (ReAct loop)
 
 ReAct Loop:
   1. Reason: LLM decides action (call tool or respond)
@@ -9,8 +12,9 @@ ReAct Loop:
   3. Loop: LLM sees ToolMessage in state → decides next step
   4. Repeat until final response → END
 
-Key concept: After tool execution, state contains ToolMessage.
-The next reason_node call automatically sees it — no separate "observe" needed.
+Slip flow is intentionally NOT a loop — vision LLM runs once, optionally
+fires the propose_transaction tool, then we terminate. Failures throw
+to the FastAPI stream layer (no silent fallback to text reply).
 """
 
 from langgraph.graph import StateGraph, START, END
@@ -23,6 +27,14 @@ from src.graph.nodes import (
     ANALYZE_TOOL_NAMES,
 )
 from src.graph.compute_subgraph import act_node
+from src.graph.slip_node import slip_node, propose_validation_node
+
+
+def _route_by_input(state: AgentState) -> str:
+    """Entry router: slip subgraph for image turns, ReAct for text-only."""
+    if state.get("images"):
+        return "slip"
+    return "reason"
 
 
 def _should_route(state: AgentState) -> str:
@@ -43,18 +55,42 @@ def _should_route(state: AgentState) -> str:
     return "tool"
 
 
+def _route_after_slip(state: AgentState) -> str:
+    """After slip_node: execute tool if the LLM called one, else END."""
+    last_msg = state["messages"][-1]
+    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+        return "slip_tool"
+    return "end"
+
+
 def _build_builder() -> StateGraph:
     builder = StateGraph(AgentState)
 
-    # Nodes - ReAct loop
-    builder.add_node("reason", reason_node)      # Think: LLM decides action
-    builder.add_node("act", act_node)            # Act: CodeAct execution
-    builder.add_node("tool", ToolNode(REGULAR_TOOLS))  # Act: regular tools
+    # Slip subgraph (vision LLM → optional propose_transaction tool)
+    builder.add_node("slip", slip_node)
+    builder.add_node("slip_tool", ToolNode([propose_transaction]))
 
-    # Edges
-    builder.add_edge(START, "reason")
+    # ReAct loop nodes
+    builder.add_node("reason", reason_node)
+    builder.add_node("act", act_node)
+    builder.add_node("tool", ToolNode(REGULAR_TOOLS))
 
-    # After reasoning: decide route
+    # Entry: pick lane based on whether images are attached
+    builder.add_conditional_edges(
+        START,
+        _route_by_input,
+        {"slip": "slip", "reason": "reason"},
+    )
+
+    # Slip lane is straight-line — no loop back to reason
+    builder.add_conditional_edges(
+        "slip",
+        _route_after_slip,
+        {"slip_tool": "slip_tool", "end": END},
+    )
+    builder.add_edge("slip_tool", END)
+
+    # ReAct lane (unchanged)
     builder.add_conditional_edges(
         "reason",
         _should_route,
@@ -64,8 +100,6 @@ def _build_builder() -> StateGraph:
             "respond": END,        # Direct answer → END
         },
     )
-
-    # ReAct loop: Act/Tool → Reason (LLM sees ToolMessage automatically)
     builder.add_edge("act", "reason")
     builder.add_edge("tool", "reason")
 

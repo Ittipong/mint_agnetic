@@ -6,6 +6,7 @@ from langchain_core.tools import tool
 from src.llm import llm
 from src.graph.state import AgentState
 from src.tools.financial_info import get_financial_advice
+from src.tools.transaction import propose_transaction
 from src.graph.compute_subgraph import ANALYZE_TOOL_NAME
 
 
@@ -43,6 +44,7 @@ async def analyze_user_finances(task: str) -> str:
 ALL_TOOLS = [
     analyze_user_finances,
     get_financial_advice,
+    propose_transaction,
 ]
 
 # Tool names handled by act_node (analyze subgraph) instead of the
@@ -60,6 +62,41 @@ from datetime import date
 from src.entity_catalog import EntityCatalog
 
 
+def _render_slip_context(catalog: EntityCatalog | None) -> str:
+    """Render wallets + expense categories with sync_ids for the slip-
+    parsing flow. Sync_ids are required so `propose_transaction` can
+    reference entities by their canonical key, not display name."""
+    if catalog is None:
+        return "(no wallets / categories — ask user to set up first)"
+
+    lines: list[str] = []
+    if catalog.wallets:
+        lines.append("Wallets (use sync_id when calling the tool):")
+        for w in catalog.wallets:
+            lines.append(
+                f"- sync_id=`{w.sync_id}` name=`{w.name}` "
+                f"type={w.wallet_type} currency={w.currency}"
+            )
+    else:
+        lines.append("Wallets: (none)")
+
+    expense_cats = [c for c in catalog.categories if c.type == "expense"]
+    if expense_cats:
+        lines.append("\nExpense categories (use sync_id when calling the tool):")
+        for c in expense_cats:
+            lines.append(f"- sync_id=`{c.sync_id}` name=`{c.name}`")
+    else:
+        lines.append("\nExpense categories: (none)")
+
+    income_cats = [c for c in catalog.categories if c.type == "income"]
+    if income_cats:
+        lines.append("\nIncome categories (use sync_id when calling the tool):")
+        for c in income_cats:
+            lines.append(f"- sync_id=`{c.sync_id}` name=`{c.name}`")
+
+    return "\n".join(lines)
+
+
 def build_system_prompt(
     user_id: str,
     current_date: str,
@@ -70,9 +107,50 @@ def build_system_prompt(
         if catalog is not None
         else "(catalog unavailable)"
     )
+    slip_context = _render_slip_context(catalog)
     return f"""You are an AI financial friend who helps users understand and manage their money.
 
 **Today's date (for reference): {current_date}**
+
+**SLIP → TRANSACTION (special intent — takes priority over everything else):**
+
+If the user's message starts with `[INTENT:parse_transaction_from_slip]`,
+the rest of the message is OCR text extracted from a payment slip /
+receipt on the mobile client. Your job is to:
+
+1. Parse the OCR text — find the amount paid, date/time, merchant, and
+   any line items.
+2. Pick the most likely wallet from the **Slip context** below by
+   matching bank logos / wallet names / payment method keywords.
+   If no clear match, leave `wallet_id` null.
+3. Pick the most likely expense category from the **Slip context** by
+   matching merchant type / item keywords (e.g. "ร้านอาหาร" / "อาหาร",
+   "Cafe Amazon" / "เครื่องดื่ม", "BTS" / "เดินทาง"). If no clear match,
+   leave `category_id` null.
+4. Call the `propose_transaction` tool with the matched values. Use
+   the catalog `sync_id` for `wallet_id` and `category_id` — NOT the
+   display name. Include a one-line `note` summarizing line items
+   when the slip is a receipt with multiple items.
+5. After the tool call, reply with **one short Thai sentence** like
+   "ดูข้อมูลในการ์ดด้านบนได้เลยครับ — กดบันทึกถ้าถูกต้อง" — do NOT
+   restate the transaction details, the client renders a card.
+6. If the OCR text is empty / unreadable / clearly not a slip, do NOT
+   call the tool. Instead reply in plain Thai asking the user for the
+   details (amount, merchant) and skip the suggestions tag.
+
+For slip-intent turns you do NOT need to:
+- Call `analyze_user_finances` (the slip text is the source of truth).
+- Emit a `<suggestions>` tag.
+- Translate to English (the tool args are already structured).
+
+### Slip context (wallets + categories for this user)
+
+{slip_context}
+
+---
+
+(The instructions below apply ONLY when the user message does NOT
+start with the slip-intent marker.)
 
 **Your personality:**
 - Warm and supportive, like a friend who genuinely cares about their financial wellbeing

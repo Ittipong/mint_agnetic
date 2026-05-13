@@ -234,6 +234,99 @@ _GOALS_SQL = (
 )
 
 
+# Slip flow needs categories grouped by wallet_sync_id (so the LLM
+# can match "wallet first → category from that wallet's list"). We
+# query separately rather than touching the cached EntityCatalog so
+# regular chat flow stays cheap and deduped.
+_CATEGORIES_BY_WALLET_SQL = (
+    "SELECT wallet_sync_id, sync_id::text AS sync_id, name, type "
+    "FROM categories "
+    "WHERE user_id = $1 "
+    "  AND is_deleted = false "
+    "  AND is_active = true "
+    "ORDER BY wallet_sync_id, type, display_order, name"
+)
+
+
+async def fetch_categories_by_wallet(user_id: str) -> dict[str, list[dict]]:
+    """Return {wallet_sync_id: [{sync_id, name, type}, ...]}.
+
+    Used by slip_node only. The DB stores one categories row per
+    wallet (a user with 5 wallets has 5 copies of every system
+    category) — preserve that shape so the LLM picks ids that match
+    the wallet it just matched.
+    """
+    from src.graph.compute_subgraph.db import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(_CATEGORIES_BY_WALLET_SQL, user_id)
+
+    grouped: dict[str, list[dict]] = {}
+    for r in rows:
+        bucket = grouped.setdefault(str(r["wallet_sync_id"]), [])
+        bucket.append(
+            {"sync_id": r["sync_id"], "name": r["name"], "type": r["type"]}
+        )
+    return grouped
+
+
+def render_for_slip(
+    catalog: "EntityCatalog",
+    categories_by_wallet: dict[str, list[dict]],
+) -> str:
+    """Render wallets + their nested category lists for the slip prompt.
+
+    **Only `wallet_type=general` wallets are surfaced** — slip parsing
+    is scoped to cash/bank accounts. Credit-card and goal wallets are
+    intentionally hidden so the LLM cannot pick them for income/expense
+    proposals (a credit-card wallet ≠ a savings account; a goal wallet
+    is a sinking-fund construct, not a real account that receives a
+    payslip).
+
+    Output shape (sync_ids surfaced so the LLM can copy them into
+    `propose_transaction` arguments verbatim):
+
+        ### Wallet: `TrueMonney` (sync_id=w1, currency=THB)
+          Expense categories:
+          - sync_id=`c1` name=`อาหาร`
+          - ...
+          Income categories:
+          - sync_id=`c2` name=`เงินเดือน`
+
+    Wallets with zero categories still appear — the LLM may still
+    pick the wallet and leave `category_id` null.
+    """
+    general_wallets = [w for w in catalog.wallets if w.wallet_type == "general"]
+    if not general_wallets:
+        return (
+            "(no general wallets — slip flow requires at least one "
+            "cash/bank account; ask user to add one first)"
+        )
+
+    lines: list[str] = []
+    for w in general_wallets:
+        lines.append(
+            f"### Wallet: `{w.name}` (sync_id=`{w.sync_id}`, "
+            f"currency={w.currency})"
+        )
+        cats = categories_by_wallet.get(w.sync_id, [])
+        if not cats:
+            lines.append("  (no categories)")
+            continue
+        expense = [c for c in cats if c["type"] == "expense"]
+        income = [c for c in cats if c["type"] == "income"]
+        if expense:
+            lines.append("  Expense categories:")
+            for c in expense:
+                lines.append(f"  - sync_id=`{c['sync_id']}` name=`{c['name']}`")
+        if income:
+            lines.append("  Income categories:")
+            for c in income:
+                lines.append(f"  - sync_id=`{c['sync_id']}` name=`{c['name']}`")
+    return "\n".join(lines)
+
+
 async def fetch_user_catalog(user_id: str) -> EntityCatalog:
     """Single call that pulls everything the LLM may need to name."""
     if not user_id:
