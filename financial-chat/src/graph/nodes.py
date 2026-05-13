@@ -6,7 +6,6 @@ from langchain_core.tools import tool
 from src.llm import llm
 from src.graph.state import AgentState
 from src.tools.financial_info import get_financial_advice
-from src.tools.transaction import propose_transaction
 from src.graph.compute_subgraph import ANALYZE_TOOL_NAME
 
 
@@ -40,11 +39,15 @@ async def analyze_user_finances(task: str) -> str:
     raise NotImplementedError("Routed to act_node by the graph")
 
 
-# All tools ReAct knows about (bound to LLM for schema)
+# All tools ReAct knows about (bound to LLM for schema).
+# NOTE: propose_transaction is intentionally NOT here — it's only
+# available in the slip subgraph (slip_node), which has the vision
+# context required to populate its args correctly. Exposing it to
+# the text ReAct loop lets the chat LLM fire it on plain-text
+# intent markers with no image, producing empty/hallucinated cards.
 ALL_TOOLS = [
     analyze_user_finances,
     get_financial_advice,
-    propose_transaction,
 ]
 
 # Tool names handled by act_node (analyze subgraph) instead of the

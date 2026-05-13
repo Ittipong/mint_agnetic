@@ -383,7 +383,12 @@ async def fetch_user_catalog(user_id: str) -> EntityCatalog:
 
     return EntityCatalog(
         wallets=[
-            WalletEntry(sync_id=str(r["sync_id"]), name=r["name"], currency=r["currency"])
+            WalletEntry(
+                sync_id=str(r["sync_id"]),
+                name=r["name"],
+                currency=r["currency"],
+                wallet_type=r["wallet_type"],
+            )
             for r in wallets_rows
         ],
         categories=deduped_categories,

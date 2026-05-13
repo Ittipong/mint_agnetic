@@ -66,9 +66,9 @@ def _route_after_slip(state: AgentState) -> str:
 def _build_builder() -> StateGraph:
     builder = StateGraph(AgentState)
 
-    # Slip subgraph (vision LLM → optional propose_transaction tool)
+    # Slip subgraph (vision LLM → validate + dispatch propose_transaction)
     builder.add_node("slip", slip_node)
-    builder.add_node("slip_tool", ToolNode([propose_transaction]))
+    builder.add_node("slip_tool", propose_validation_node)
 
     # ReAct loop nodes
     builder.add_node("reason", reason_node)

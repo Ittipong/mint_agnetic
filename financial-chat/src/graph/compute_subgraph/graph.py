@@ -118,21 +118,12 @@ async def act_node(state: AgentState) -> dict:
         "codeact_steps": len(sub_out.get("codeact_history") or []),
     }
 
-    # Build a JSON-safe structured payload for the streaming UI. The
-    # frontend reads `content` for the human-readable streaming text and
-    # this payload for cards/tables — same turn, different surfaces.
-    structured_data = _build_structured_data(sub_out)
-
-    if structured_data is not None:
-        await adispatch_custom_event("structured_data", structured_data)
-
     return {
         "messages": [
             ToolMessage(
                 content=answer,
                 tool_call_id=tool_call["id"],
                 name=ANALYZE_TOOL_NAME,
-                artifact=structured_data,
                 additional_kwargs={
                     "step_info": step_info,
                     # Ground truth catalog — the reasoner reads this to keep
@@ -141,46 +132,4 @@ async def act_node(state: AgentState) -> dict:
                 },
             )
         ]
-    }
-
-
-# ── Structured payload for the UI ────────────────────────────────────────────
-
-
-def _json_safe(value: Any) -> Any:
-    """Recursively convert Decimal / date / datetime to JSON-serializable types."""
-    if value is None:
-        return None
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, (date_fn, datetime_fn)):
-        return value.isoformat()
-    if isinstance(value, list):
-        return [_json_safe(v) for v in value]
-    if isinstance(value, tuple):
-        return [_json_safe(v) for v in value]
-    if isinstance(value, dict):
-        return {k: _json_safe(v) for k, v in value.items()}
-    if hasattr(value, "model_dump"):  # pydantic
-        return _json_safe(value.model_dump())
-    return value
-
-
-def _build_structured_data(sub_out: dict) -> dict | None:
-    """Codeact-only payload — the rows shape is whatever the LLM-composed
-    code returned, surfaced verbatim to the frontend."""
-    needs_clar = bool(sub_out.get("needs_clarification"))
-    history = sub_out.get("codeact_history") or []
-    if not history and not needs_clar:
-        return None
-
-    return {
-        "kind": "clarification" if needs_clar else "result",
-        "metric": "freeform_codeact",
-        "rows": _json_safe(sub_out.get("codeact_final")),
-        "metadata": {
-            "steps": len(history),
-            "clarification_question": sub_out.get("clarification_question"),
-            "clarification_options": sub_out.get("clarification_options"),
-        },
     }

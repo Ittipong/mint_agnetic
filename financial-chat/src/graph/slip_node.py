@@ -171,7 +171,28 @@ async def slip_node(state: AgentState, config: RunnableConfig) -> dict:
     # FastAPI stream wraps it in an SSE `error` event and the mobile
     # client shows a snackbar (matches the "throw error to frontend"
     # requirement — no silent fallback).
+    #
+    # The vision model occasionally produces an empty response on the
+    # first call (no tool_calls AND no text). Retry once before
+    # giving up — single retry is cheap and recovers most flakes
+    # without leaving the mobile UI hanging.
     response = await llm_with_tools.ainvoke([system_msg, human_msg])
+    if _is_empty(response):
+        _logger.warning(
+            "slip_node: empty response on first call, retrying once"
+        )
+        response = await llm_with_tools.ainvoke([system_msg, human_msg])
+
+    # Debug trace — surfaces whether the vision LLM produced a tool
+    # call or text refusal so failing rounds can be diagnosed without
+    # re-running.
+    tool_calls = getattr(response, "tool_calls", None) or []
+    _logger.warning(
+        "slip_node response — image_count=%d tool_calls=%d text=%r",
+        len(images),
+        len(tool_calls),
+        _text_preview(response),
+    )
 
     # If the LLM returned tool calls, propose_validation_node will
     # execute them on the next hop. We just return the message.
@@ -180,6 +201,37 @@ async def slip_node(state: AgentState, config: RunnableConfig) -> dict:
         "user_id": user_id,
         "current_date": current_date,
     }
+
+
+def _is_empty(response: Any) -> bool:
+    """An AIMessage is "empty" when it carries neither a tool call
+    nor any text. The vision model occasionally returns this when it
+    fails to process the image — usually transient."""
+    tool_calls = getattr(response, "tool_calls", None) or []
+    if tool_calls:
+        return False
+    content = getattr(response, "content", "")
+    if isinstance(content, str):
+        return not content.strip()
+    if isinstance(content, list):
+        for blk in content:
+            if isinstance(blk, dict):
+                text = blk.get("text", "")
+                if isinstance(text, str) and text.strip():
+                    return False
+        return True
+    return True
+
+
+def _text_preview(response: Any) -> str:
+    content = getattr(response, "content", "")
+    if isinstance(content, str):
+        return content[:120].replace("\n", " ")
+    if isinstance(content, list):
+        for blk in content:
+            if isinstance(blk, dict) and blk.get("type") == "text":
+                return str(blk.get("text", ""))[:120].replace("\n", " ")
+    return ""
 
 
 # ──────────────────────── validation node ────────────────────────
@@ -233,7 +285,14 @@ async def propose_validation_node(
     valid_wallet_ids = {
         w.sync_id for w in catalog.wallets if w.wallet_type == "general"
     }
-    valid_category_ids = {c.sync_id for c in catalog.categories}
+
+    # Build the wallet → categories map BEFORE iterating tool_calls so
+    # we can validate `category_id` against the matched wallet's
+    # categories only. Using the deduped catalog.categories here would
+    # false-negative: the same category name exists once per wallet,
+    # and dedup keeps only one sync_id, dropping the others as invalid
+    # even though they belong to a real wallet.
+    by_wallet = await fetch_categories_by_wallet(user_id)
 
     tool_messages: list[ToolMessage] = []
     for tc in tool_calls:
@@ -247,19 +306,50 @@ async def propose_validation_node(
         wallet_id_in = args.get("wallet_id")
         category_id_in = args.get("category_id")
         wallet_id = wallet_id_in if wallet_id_in in valid_wallet_ids else None
-        category_id = (
-            category_id_in if category_id_in in valid_category_ids else None
-        )
         if wallet_id_in and not wallet_id:
             _logger.warning(
                 "propose_validation_node: dropped hallucinated wallet_id=%s",
                 wallet_id_in,
             )
-        if category_id_in and not category_id:
-            _logger.warning(
-                "propose_validation_node: dropped hallucinated category_id=%s",
-                category_id_in,
-            )
+
+        # Category must belong to the matched wallet's category list.
+        # If wallet didn't match, no category context — drop the
+        # category id rather than guessing. Match by sync_id directly
+        # OR by (name, type) when sync_id is a stale duplicate of a
+        # categorically equivalent row in the same wallet.
+        category_id: str | None = None
+        if wallet_id and category_id_in:
+            wallet_cats = by_wallet.get(wallet_id, [])
+            wallet_cat_ids = {c["sync_id"] for c in wallet_cats}
+            if category_id_in in wallet_cat_ids:
+                category_id = category_id_in
+            else:
+                # Stale-duplicate rescue: the LLM may have picked a
+                # different sync_id of a category with the same name
+                # under a different wallet (catalog dedups by name).
+                # Find a same-name row under the matched wallet.
+                stale_name = None
+                for c in catalog.categories:
+                    if c.sync_id == category_id_in:
+                        stale_name = c.name
+                        break
+                if stale_name:
+                    for c in wallet_cats:
+                        if c["name"] == stale_name:
+                            category_id = c["sync_id"]
+                            _logger.info(
+                                "propose_validation_node: remapped "
+                                "category_id %s → %s (same name '%s' "
+                                "in matched wallet)",
+                                category_id_in, category_id, stale_name,
+                            )
+                            break
+            if not category_id:
+                _logger.warning(
+                    "propose_validation_node: dropped category_id=%s "
+                    "(not in wallet %s)",
+                    category_id_in, wallet_id,
+                )
 
         # ── note merge ──────────────────────────────────────────
         final_note = _combine_note(args.get("note"), args.get("merchant_name"))
