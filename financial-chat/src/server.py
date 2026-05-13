@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -90,6 +91,7 @@ Each event is a single JSON object on a `data:` line. Possible event types:
 | `tool_end`    | `tool`                        | A regular tool finished |
 | `data`        | `payload`                     | Structured tool result (rows, metric, metadata) |
 | `token`       | `content`                     | LLM streaming token — concatenate into a Markdown reply |
+| `suggestions` | `items` (array of strings)    | Follow-up question chips, emitted once just before `done` |
 | `done`        | —                             | Stream finished cleanly |
 | `error`       | `message`                     | An exception was raised mid-stream |
 
@@ -243,6 +245,10 @@ class DeleteThreadOut(BaseModel):
 class HistoryMessage(BaseModel):
     role: str = Field(..., examples=["user", "assistant"])
     content: str
+    suggestions: list[str] = Field(
+        default_factory=list,
+        description="Follow-up suggestion chips extracted from the assistant reply.",
+    )
 
 
 class HistoryOut(BaseModel):
@@ -277,6 +283,117 @@ _STATUS_LABELS = {
 _CALCULATING_NODES = {"act", "analyze"}
 
 
+# ── <suggestions> tag streaming filter ────────────────────────────────────────
+
+_SUGGEST_OPEN = "<suggestions>"
+_SUGGEST_CLOSE = "</suggestions>"
+# Extracts and strips <suggestions>…</suggestions> from stored message content.
+_HISTORY_SUGGEST_RE = re.compile(
+    r"<suggestions>(.*?)</suggestions>", re.DOTALL
+)
+# Holdback enough chars so a tag split across token chunks isn't leaked.
+_SUGGEST_HOLD = max(len(_SUGGEST_OPEN), len(_SUGGEST_CLOSE))
+
+
+class _SuggestionsFilter:
+    """Streaming filter that strips <suggestions>...</suggestions> blocks
+    from the visible token stream and accumulates their JSON payload.
+
+    Tokens arrive split arbitrarily — a single tag may straddle multiple
+    chunks. The filter holds back up to len(close_tag) chars on the trailing
+    edge to prevent leaking a partial `<suggest` to the client. On `flush`
+    (stream end) it drains the holdback and returns any parsed payloads.
+    """
+
+    def __init__(self) -> None:
+        self._in_tag = False
+        self._hold = ""           # trailing buffer (potential tag prefix)
+        self._payload_buf = ""    # accumulated content between open and close
+        self._payloads: list[list[str]] = []
+
+    @staticmethod
+    def _trailing_partial(text: str, target: str) -> int:
+        """Length of the suffix of `text` that is a prefix of `target`."""
+        max_len = min(len(text), len(target) - 1)
+        for n in range(max_len, 0, -1):
+            if target.startswith(text[-n:]):
+                return n
+        return 0
+
+    def feed(self, token: str) -> str:
+        """Process a streaming token. Returns the (possibly empty) substring
+        that is safe to emit to the client right now."""
+        buf = self._hold + token
+        self._hold = ""
+        out = ""
+
+        while buf:
+            if not self._in_tag:
+                idx = buf.find(_SUGGEST_OPEN)
+                if idx != -1:
+                    out += buf[:idx]
+                    buf = buf[idx + len(_SUGGEST_OPEN):]
+                    self._in_tag = True
+                    continue
+                # No open tag found. Hold back any suffix that could be a
+                # partial open tag so the client never sees "<suggest".
+                hold_len = self._trailing_partial(buf, _SUGGEST_OPEN)
+                if hold_len:
+                    out += buf[:-hold_len]
+                    self._hold = buf[-hold_len:]
+                else:
+                    out += buf
+                buf = ""
+            else:
+                idx = buf.find(_SUGGEST_CLOSE)
+                if idx != -1:
+                    self._payload_buf += buf[:idx]
+                    self._commit_payload()
+                    buf = buf[idx + len(_SUGGEST_CLOSE):]
+                    self._in_tag = False
+                    continue
+                hold_len = self._trailing_partial(buf, _SUGGEST_CLOSE)
+                if hold_len:
+                    self._payload_buf += buf[:-hold_len]
+                    self._hold = buf[-hold_len:]
+                else:
+                    self._payload_buf += buf
+                buf = ""
+
+        return out
+
+    def flush(self) -> str:
+        """Stream finished — drain remaining holdback as visible text.
+        If we're still mid-tag (malformed output) the payload is discarded."""
+        if self._in_tag:
+            # The LLM never closed the tag — drop the partial payload.
+            self._payload_buf = ""
+            self._hold = ""
+            return ""
+        tail = self._hold
+        self._hold = ""
+        return tail
+
+    def _commit_payload(self) -> None:
+        raw = self._payload_buf.strip()
+        self._payload_buf = ""
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            _debug_log("SUGGEST", "Invalid JSON payload", raw=raw[:120])
+            return
+        if not isinstance(data, list):
+            _debug_log("SUGGEST", "Payload is not a list", raw=raw[:120])
+            return
+        items = [str(x).strip() for x in data if isinstance(x, (str, int, float)) and str(x).strip()]
+        if items:
+            self._payloads.append(items)
+
+    @property
+    def payloads(self) -> list[list[str]]:
+        return self._payloads
+
+
 async def _stream_graph(
     user_id: str,
     thread_id: str,
@@ -304,6 +421,7 @@ async def _stream_graph(
     # Track status emission so we never repeat a phase inside one run.
     emitted_phases: set[str] = set()
     assistant_reply_chunks: list[str] = []
+    suggestions_filter = _SuggestionsFilter()
 
     def _status_event(phase: str) -> str:
         return _sse({
@@ -346,8 +464,12 @@ async def _stream_graph(
                 # (pure conversational), `thinking` stays visible until
                 # `done`, which is acceptable UX given tokens are
                 # streaming visibly.
-                assistant_reply_chunks.append(chunk.content)
-                yield _sse({"type": "token", "content": chunk.content})
+                # Strip <suggestions> tag from visible stream — surfaces as
+                # a separate `suggestions` SSE event after the run finishes.
+                visible = suggestions_filter.feed(chunk.content)
+                if visible:
+                    assistant_reply_chunks.append(visible)
+                    yield _sse({"type": "token", "content": visible})
 
             elif kind == "on_tool_start":
                 _debug_log("STREAM", "Tool started", tool=event["name"])
@@ -370,6 +492,17 @@ async def _stream_graph(
                     yield _sse({"type": "data", "payload": payload})
 
         _debug_log("STREAM", "Done", user_id=user_id)
+
+        # Drain any holdback that didn't form a tag.
+        tail = suggestions_filter.flush()
+        if tail:
+            assistant_reply_chunks.append(tail)
+            yield _sse({"type": "token", "content": tail})
+
+        # Emit follow-up suggestion chips (if the LLM included a tag).
+        for items in suggestions_filter.payloads:
+            _debug_log("SUGGEST", "Emit", count=len(items))
+            yield _sse({"type": "suggestions", "items": items})
 
         # Persist preview + counters after the AI turn finished cleanly.
         if _pool is not None and assistant_reply_chunks:
@@ -403,6 +536,7 @@ _SSE_RESPONSES: dict[int | str, dict] = {
                     'data: {"type":"status","phase":"writing","label":"✍️ AI เรียบเรียงคำตอบ..."}\n\n'
                     'data: {"type":"token","content":"สวั"}\n\n'
                     'data: {"type":"token","content":"สดี"}\n\n'
+                    'data: {"type":"suggestions","items":["ค่าใช้จ่ายหมวดไหนเยอะสุด","งบประมาณเดือนนี้เหลือเท่าไร","เปรียบเทียบกับเดือนที่แล้ว"]}\n\n'
                     'data: {"type":"done"}\n\n'
                 )
             }
@@ -512,8 +646,31 @@ async def get_chat_history(thread_id: str):
     messages = []
     for msg in snapshot.values.get("messages", []):
         role = "user" if msg.type == "human" else "assistant"
-        if msg.content:
-            messages.append({"role": role, "content": msg.content})
+        content = msg.content
+        if not content:
+            continue
+        suggestions: list[str] = []
+        if role == "assistant":
+            # LangGraph stores the raw LLM output including <suggestions> tags.
+            # Strip the tag from visible content and surface its payload as
+            # structured suggestion chips, mirroring the streaming SSE event.
+            match = _HISTORY_SUGGEST_RE.search(content)
+            if match:
+                try:
+                    data = json.loads(match.group(1).strip())
+                    if isinstance(data, list):
+                        suggestions = [
+                            str(x).strip()
+                            for x in data
+                            if isinstance(x, (str, int, float)) and str(x).strip()
+                        ]
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                content = _HISTORY_SUGGEST_RE.sub("", content).strip()
+        if content:
+            messages.append(
+                {"role": role, "content": content, "suggestions": suggestions}
+            )
 
     return {"thread_id": thread_id, "messages": messages}
 

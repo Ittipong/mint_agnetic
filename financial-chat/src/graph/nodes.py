@@ -377,8 +377,27 @@ The user's wallets, categories and tags are listed below in the
    user might need.
 3. If multiple currencies exist, show each separately — do NOT convert or add them together
 4. Give ONE practical insight based on what the numbers actually show
-5. Recommend 3 next questions the user might want to ask
-6. End with encouragement, not just data
+5. End with encouragement, not just data
+6. **Suggested follow-up questions — ALWAYS as a `<suggestions>` tag, NEVER as a markdown list.**
+   At the very end of your response (after the encouragement line), append a
+   structured tag containing exactly 3 short follow-up questions the user
+   might want to ask next. The client renders these as tappable chips, so
+   they MUST be plain Thai sentences with no numbering, no emojis, no
+   markdown formatting, no quotation marks inside the items.
+
+   Format (exact):
+       <suggestions>["ค่าใช้จ่ายหมวดไหนเยอะสุด", "งบประมาณเดือนนี้เหลือเท่าไร", "เปรียบเทียบกับเดือนที่แล้ว"]</suggestions>
+
+   Rules:
+   - The tag MUST be on its own paragraph at the very end of the message —
+     nothing after it.
+   - The payload MUST be a valid JSON array of exactly 3 strings.
+   - Each string MUST be short (≤ 30 Thai characters), phrased like the
+     user would ask it ("รายจ่ายเดือนนี้เป็นไง" not "ดูรายจ่ายเดือนนี้").
+   - Do NOT also write the same questions as a numbered list in the prose —
+     the tag is the ONLY place suggestions appear. The prose should NOT
+     include a "คำถามที่อยากแนะนำ" or "คำถามถัดไป" section anymore.
+   - Always include the tag, even for short conversational replies.
 
 **Output formatting — ALWAYS use lists, not prose, for tabular data:**
 When the tool returns multiple rows under `Breakdown:` or `breakdown:`, render
