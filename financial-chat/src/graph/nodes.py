@@ -1,6 +1,13 @@
 """ReAct agent node functions."""
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    trim_messages,
+)
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from src.llm import llm
@@ -627,6 +634,79 @@ def _debug_log(tag: str, msg: str, **kwargs):
     logging.info(log_line.strip())
 
 
+# ── History compression ──────────────────────────────────────────────────────
+
+# Approximate input-token budget per turn after compression. Each Claude
+# Sonnet input token costs ~$3 / 1M, so this caps a single turn around
+# $0.018 of input regardless of how long the thread has been running.
+_HISTORY_TOKEN_BUDGET = 6000
+
+
+def _approx_token_count(messages: list[AnyMessage]) -> int:
+    """Cheap token estimator: ~4 chars per token, summed over text content.
+
+    Used as `token_counter` for `trim_messages` so we don't have to spin up
+    a model-specific tokenizer at runtime. Good enough for budgeting since
+    we already leave headroom below the real context window.
+    """
+    total = 0
+    for m in messages:
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        total += max(1, len(content) // 4)
+    return total
+
+
+def _compress_and_trim_history(messages: list[AnyMessage]) -> list[AnyMessage]:
+    """Compress past turns then trim to the input-token budget.
+
+    Past turns (everything before the last HumanMessage) are reduced to
+    user prompts + the LLM's final text replies — intermediate
+    `AIMessage(tool_calls=...)` + `ToolMessage` pairs are dropped because
+    the final reply already paraphrased them. The current turn (from the
+    last HumanMessage onward) is kept verbatim so any in-flight tool-call
+    chain stays valid.
+
+    The compressed list is then passed through `trim_messages` with a
+    token budget so very long threads still fit in the LLM input.
+    """
+    if not messages:
+        return messages
+
+    # Locate the current-turn boundary: index of the last HumanMessage.
+    last_human_idx = -1
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            last_human_idx = i
+            break
+
+    if last_human_idx <= 0:
+        # No past turns to compress (or only the current turn exists).
+        compressed = list(messages)
+    else:
+        past = messages[:last_human_idx]
+        current = messages[last_human_idx:]
+        kept_past: list[AnyMessage] = []
+        for m in past:
+            if isinstance(m, HumanMessage):
+                kept_past.append(m)
+            elif isinstance(m, AIMessage) and not getattr(m, "tool_calls", None):
+                # Final natural-language reply — keep as the turn's summary.
+                kept_past.append(m)
+            # else: AIMessage(tool_calls=...) or ToolMessage — drop.
+        compressed = kept_past + current
+
+    trimmed = trim_messages(
+        compressed,
+        max_tokens=_HISTORY_TOKEN_BUDGET,
+        strategy="last",
+        token_counter=_approx_token_count,
+        start_on="human",
+        allow_partial=False,
+        include_system=False,
+    )
+    return trimmed
+
+
 # ── Reason node ───────────────────────────────────────────────────────────────
 
 async def reason_node(state: AgentState, config: RunnableConfig) -> dict:
@@ -673,6 +753,17 @@ async def reason_node(state: AgentState, config: RunnableConfig) -> dict:
         raw_messages = [HumanMessage(content=m) for m in raw_messages]
 
     _debug_log("REASON", "Calling LLM with tools", thread_id=thread_id, user_id=user_id, msg_count=len(raw_messages))
+
+    # ── History compression (B2 strategy) ────────────────────────────────
+    # Past turns: keep only HumanMessage + final AIMessage text (drop the
+    # AIMessage(tool_calls) + ToolMessage pairs — the final AI reply
+    # already summarized those tool outputs in natural language).
+    # Current turn: keep the full chain intact so in-flight tool-call
+    # references survive (breaking the chain throws OpenAI/Anthropic errors).
+    # Then trim the compressed list to ~6K input tokens so context cost
+    # stays bounded regardless of conversation length.
+    raw_messages = _compress_and_trim_history(raw_messages)
+    _debug_log("REASON", "history compressed", thread_id=thread_id, msg_count_after=len(raw_messages))
 
     current_date = date.today().isoformat()
 

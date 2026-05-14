@@ -287,14 +287,23 @@ def _sse(payload: dict) -> str:
 
 
 _STATUS_LABELS = {
-    "thinking": "🧠 AI กำลังคิด...",
-    "calculating": "🧮 AI คำนวณข้อมูล...",
-    "writing": "✍️ AI เรียบเรียงคำตอบ...",
+    "thinking": "กำลังคิด...",
+    "calculating": "กำลังคำนวณ...",
+    "writing": "กำลังเรียบเรียงคำตอบ...",
+    "reading_slip": "กำลังอ่านสลิป...",
+    "saving_slip": "กำลังจัดรายการ...",
 }
 
 # Nodes that mean the agent is doing heavy compute (CodeAct / analyze
 # subgraph). Entering any of these emits the `calculating` status.
 _CALCULATING_NODES = {"act", "analyze"}
+
+# Slip subgraph nodes — image turns bypass the ReAct loop entirely, so
+# they need their own phase labels to drive the typing indicator. The
+# `slip` node runs the vision LLM (reading the receipt) and `slip_tool`
+# validates + dispatches the propose_transaction event.
+_SLIP_READING_NODES = {"slip"}
+_SLIP_SAVING_NODES = {"slip_tool"}
 
 
 # ── <suggestions> tag streaming filter ────────────────────────────────────────
@@ -439,11 +448,14 @@ async def _stream_graph(
     input_data: dict[str, Any] = {
         "messages": [HumanMessage(content=message)],
         "user_id": user_id,
+        # Always reset `images` per turn. The checkpointer persists every
+        # state field across turns; if we omit `images` on a text-only
+        # follow-up the previous slip's data URLs survive in state and
+        # `_route_by_input` re-routes the turn through the vision
+        # subgraph — producing a stray proposal for a question like "hi".
+        # Explicit empty list forces the router back onto the ReAct lane.
+        "images": image_b64s or [],
     }
-    if image_b64s:
-        # Only set when present so text-only turns don't trip the
-        # slip router (checks truthiness, not presence).
-        input_data["images"] = image_b64s
 
     # Track status emission so we never repeat a phase inside one run.
     emitted_phases: set[str] = set()
@@ -464,6 +476,7 @@ async def _stream_graph(
 
             # === Status: thinking (on first reason entry) ===
             # === Status: calculating (on first act/analyze entry) ===
+            # === Status: reading_slip / saving_slip (slip subgraph) ===
             if kind == "on_chain_start":
                 if node == "reason" and "thinking" not in emitted_phases:
                     emitted_phases.add("thinking")
@@ -471,6 +484,12 @@ async def _stream_graph(
                 elif node in _CALCULATING_NODES and "calculating" not in emitted_phases:
                     emitted_phases.add("calculating")
                     yield _status_event("calculating")
+                elif node in _SLIP_READING_NODES and "reading_slip" not in emitted_phases:
+                    emitted_phases.add("reading_slip")
+                    yield _status_event("reading_slip")
+                elif node in _SLIP_SAVING_NODES and "saving_slip" not in emitted_phases:
+                    emitted_phases.add("saving_slip")
+                    yield _status_event("saving_slip")
 
             # === Status: writing (when calculating finishes — clean handoff) ===
             elif kind == "on_chain_end" and node in _CALCULATING_NODES:
@@ -512,11 +531,14 @@ async def _stream_graph(
                     _debug_log(
                         "STREAM",
                         "data event",
+                        payload_type=payload.get("type"),
                         kind=payload.get("kind"),
                         metric=payload.get("metric"),
                         rows=len(payload.get("rows") or []) if isinstance(payload.get("rows"), list) else None,
                     )
                     yield _sse({"type": "data", "payload": payload})
+                else:
+                    _debug_log("STREAM", "data event with null payload — skipped")
 
         _debug_log("STREAM", "Done", user_id=user_id)
 

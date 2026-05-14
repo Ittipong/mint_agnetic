@@ -24,7 +24,12 @@ from datetime import date
 from typing import Any
 
 from langchain_core.callbacks import adispatch_custom_event
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import RunnableConfig
 
 from src.entity_catalog import (
@@ -37,6 +42,30 @@ from src.llm import vision_llm
 from src.tools.transaction import propose_transaction
 
 _logger = logging.getLogger(__name__)
+
+# ── File-backed debug log (same pattern as reason_node) ──────────────
+from datetime import datetime as _dt
+from pathlib import Path as _Path
+
+_SLIP_LOG_DIR = _Path(__file__).parent.parent.parent / "logs"
+_SLIP_LOG_DIR.mkdir(exist_ok=True)
+
+
+def _slip_log(tag: str, msg: str, **kwargs) -> None:
+    """Write a structured slip-flow line to logs/slip_debug_YYYY-MM-DD.log.
+
+    Mirrors reason_node's `_debug_log` format so failures across both
+    flows can be tail-merged when diagnosing a turn.
+    """
+    log_file = _SLIP_LOG_DIR / f"slip_debug_{_dt.now().strftime('%Y-%m-%d')}.log"
+    parts = [f"[{_dt.now().isoformat()}] [{tag}] {msg}"]
+    for k, v in kwargs.items():
+        parts.append(f" {k}={v}")
+    try:
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write("".join(parts) + "\n")
+    except Exception:  # noqa: BLE001 - logging must never fail the turn
+        pass
 
 
 def _build_slip_system_prompt(
@@ -124,8 +153,39 @@ async def slip_node(state: AgentState, config: RunnableConfig) -> dict:
         raise ValueError("user_id is required for slip_node")
 
     images = state.get("images") or []
+    _slip_log(
+        "SLIP",
+        "slip_node entered",
+        user_id=user_id,
+        image_count=len(images),
+        msg_count=len(state.get("messages") or []),
+    )
     if not images:
         raise ValueError("slip_node invoked with no images")
+
+    # Log per-image size + detected mime so we can diagnose later why a
+    # given slip turn confused the vision model. Data URLs look like
+    # `data:image/jpeg;base64,xxxx` — pull the mime prefix verbatim and
+    # compute the decoded byte size from the base64 length.
+    for idx, url in enumerate(images):
+        mime = "unknown"
+        b64_len = len(url)
+        if url.startswith("data:") and ";base64," in url:
+            header, _, _ = url.partition(",")
+            mime = header[5:].split(";")[0]  # data:<mime>;base64
+            b64_only_len = b64_len - header.__len__() - 1
+            # base64 → bytes ratio is 4:3; subtract padding bytes too
+            approx_bytes = (b64_only_len * 3) // 4
+        else:
+            approx_bytes = (b64_len * 3) // 4
+        _slip_log(
+            "SLIP",
+            "image metadata",
+            index=idx,
+            mime=mime,
+            approx_kb=approx_bytes // 1024,
+            data_url_chars=b64_len,
+        )
 
     # Pull both shapes of the catalog: regular for diagnostics,
     # wallet-grouped for the prompt.
@@ -154,11 +214,15 @@ async def slip_node(state: AgentState, config: RunnableConfig) -> dict:
     if not user_text:
         user_text = "[INTENT:parse_transaction_from_slip]"
 
-    # Build multimodal content blocks. `detail: "low"` keeps token cost
-    # down — slip layouts are simple enough that low-res understanding
-    # is sufficient for amount/merchant extraction.
+    # Build multimodal content blocks. We previously set `detail: "low"`
+    # to save tokens, but on Gemini-2.5-flash-lite (via OpenRouter) that
+    # downscale plus the mobile-side compression (1280px @ q70 JPEG) was
+    # producing empty responses on real slips — the small-font amounts
+    # weren't legible after triple downscale. Letting the model pick the
+    # detail tier costs ~1000 extra tokens per slip but reliably parses
+    # the amounts (which is the whole point of this feature).
     image_blocks: list[dict[str, Any]] = [
-        {"type": "image_url", "image_url": {"url": url, "detail": "low"}}
+        {"type": "image_url", "image_url": {"url": url}}
         for url in images
     ]
     human_msg = HumanMessage(
@@ -181,6 +245,7 @@ async def slip_node(state: AgentState, config: RunnableConfig) -> dict:
         _logger.warning(
             "slip_node: empty response on first call, retrying once"
         )
+        _slip_log("SLIP", "vision LLM empty on first call — retrying")
         response = await llm_with_tools.ainvoke([system_msg, human_msg])
 
     # Debug trace — surfaces whether the vision LLM produced a tool
@@ -193,6 +258,45 @@ async def slip_node(state: AgentState, config: RunnableConfig) -> dict:
         len(tool_calls),
         _text_preview(response),
     )
+    # Pull model metadata so empty-response investigations can see the
+    # actual finish_reason / token counts / model name without re-running.
+    resp_meta = getattr(response, "response_metadata", None) or {}
+    usage_meta = getattr(response, "usage_metadata", None) or {}
+    _slip_log(
+        "SLIP",
+        "vision LLM response",
+        image_count=len(images),
+        tool_calls=len(tool_calls),
+        text_preview=_text_preview(response)[:200],
+        model=resp_meta.get("model_name"),
+        finish_reason=resp_meta.get("finish_reason"),
+        input_tokens=usage_meta.get("input_tokens"),
+        output_tokens=usage_meta.get("output_tokens"),
+    )
+
+    # No tool_calls means the vision model couldn't (or wouldn't) parse
+    # the slip. Two flavors we've observed:
+    #   1. Truly empty response (model silently failed).
+    #   2. Text refusal — model returned a Thai sentence like
+    #      "กรุณาส่งสลิปที่ชัดเจนกว่านี้" instead of calling the tool.
+    # Both end the slip flow without a `structured_data` dispatch, so
+    # mobile gets `reading_slip` → `done` and the user sees a dots
+    # indicator with no card and no explanation. Surface either case as
+    # an SSE `error` event (server.py:567-569 maps the raised exception
+    # → `{"type": "error", "message": ...}` → mobile snackbar). When the
+    # model gave a refusal text, prefer it as the message so the user
+    # sees the model's actual feedback ("ภาพไม่ใช่สลิป" / "ภาพไม่ชัด").
+    if not tool_calls:
+        refusal_text = _text_preview(response).strip()
+        error_msg = refusal_text or "อ่านสลิปไม่ได้ ลองถ่ายใหม่ให้ชัดขึ้น"
+        _slip_log(
+            "SLIP",
+            "no tool_calls — surfacing error to client",
+            image_count=len(images),
+            had_text=bool(refusal_text),
+            error_msg=error_msg[:200],
+        )
+        raise ValueError(error_msg)
 
     # If the LLM returned tool calls, propose_validation_node will
     # execute them on the next hop. We just return the message.
@@ -369,7 +473,17 @@ async def propose_validation_node(
                 "currency_symbol": args.get("currency_symbol") or "฿",
             },
         }
+        _slip_log(
+            "PROPOSE",
+            "dispatching structured_data",
+            wallet_id=wallet_id,
+            category_id=category_id,
+            amount=payload["data"]["amount"],
+            type=payload["data"]["type"],
+            sync_id=payload["data"]["sync_id"],
+        )
         await adispatch_custom_event("structured_data", payload)
+        _slip_log("PROPOSE", "dispatched OK")
 
         tc_id = (
             tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "tc-0")
@@ -383,3 +497,58 @@ async def propose_validation_node(
         )
 
     return {"messages": tool_messages}
+
+
+async def slip_cleanup_node(
+    state: AgentState, config: RunnableConfig
+) -> dict:
+    """Terminal step of the slip flow — strip every message added during
+    this turn so the checkpoint has no trace of the slip exchange.
+
+    Slip turns produce three artifacts that are useless once the
+    proposal SSE event has been emitted to the mobile client:
+        1. `HumanMessage("[INTENT:parse_transaction_from_slip]")` — the
+           routing marker from mobile; the image content blocks attached
+           to it bloat the checkpoint with base64 payloads
+        2. `AIMessage(tool_calls=[propose_transaction(...)])` — vision
+           LLM output; not user-facing
+        3. `ToolMessage("(proposal dispatched)")` — placeholder from
+           `propose_validation_node`
+
+    Removing them here means:
+      • No orphan markers in chat history reloads (no need for mobile
+        client to filter — the data simply isn't there)
+      • ReAct turns that follow can't reference "the slip I just sent",
+        but that's acceptable: the mobile UI keeps the proposal card
+        in its own state and the user interacts with it directly
+      • Checkpoint stays lean — base64 image blocks aren't persisted
+    """
+    msgs = state.get("messages") or []
+    if not msgs:
+        return {"images": []}
+    # Find the slip turn's start: walk back to the most recent
+    # HumanMessage. Everything from there onward is part of this turn
+    # (text marker + vision AIMessage + optional ToolMessage).
+    start = -1
+    for i in range(len(msgs) - 1, -1, -1):
+        if isinstance(msgs[i], HumanMessage):
+            start = i
+            break
+    if start < 0:
+        return {"images": []}
+    removals: list[RemoveMessage] = []
+    for m in msgs[start:]:
+        mid = getattr(m, "id", None)
+        if mid:
+            removals.append(RemoveMessage(id=mid))
+    _logger.info(
+        "slip_cleanup_node: removing %d messages from current turn",
+        len(removals),
+    )
+    _slip_log(
+        "CLEANUP",
+        "removing slip turn",
+        removal_count=len(removals),
+        total_msgs=len(msgs),
+    )
+    return {"messages": removals, "images": []}

@@ -27,7 +27,11 @@ from src.graph.nodes import (
     ANALYZE_TOOL_NAMES,
 )
 from src.graph.compute_subgraph import act_node
-from src.graph.slip_node import slip_node, propose_validation_node
+from src.graph.slip_node import (
+    slip_node,
+    propose_validation_node,
+    slip_cleanup_node,
+)
 
 
 def _route_by_input(state: AgentState) -> str:
@@ -56,11 +60,11 @@ def _should_route(state: AgentState) -> str:
 
 
 def _route_after_slip(state: AgentState) -> str:
-    """After slip_node: execute tool if the LLM called one, else END."""
+    """After slip_node: execute tool if the LLM called one, else clean up."""
     last_msg = state["messages"][-1]
     if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
         return "slip_tool"
-    return "end"
+    return "cleanup"
 
 
 def _build_builder() -> StateGraph:
@@ -69,6 +73,11 @@ def _build_builder() -> StateGraph:
     # Slip subgraph (vision LLM → validate + dispatch propose_transaction)
     builder.add_node("slip", slip_node)
     builder.add_node("slip_tool", propose_validation_node)
+    # Terminal cleanup — strips the slip turn from the checkpoint so it
+    # doesn't pollute history reloads or bloat token usage on future
+    # ReAct turns. The proposal payload was already sent to mobile via
+    # the SSE custom event, so the messages have no further purpose.
+    builder.add_node("slip_cleanup", slip_cleanup_node)
 
     # ReAct loop nodes
     builder.add_node("reason", reason_node)
@@ -82,13 +91,15 @@ def _build_builder() -> StateGraph:
         {"slip": "slip", "reason": "reason"},
     )
 
-    # Slip lane is straight-line — no loop back to reason
+    # Slip lane is straight-line — no loop back to reason. Both
+    # branches funnel into slip_cleanup so cleanup runs unconditionally.
     builder.add_conditional_edges(
         "slip",
         _route_after_slip,
-        {"slip_tool": "slip_tool", "end": END},
+        {"slip_tool": "slip_tool", "cleanup": "slip_cleanup"},
     )
-    builder.add_edge("slip_tool", END)
+    builder.add_edge("slip_tool", "slip_cleanup")
+    builder.add_edge("slip_cleanup", END)
 
     # ReAct lane (unchanged)
     builder.add_conditional_edges(
