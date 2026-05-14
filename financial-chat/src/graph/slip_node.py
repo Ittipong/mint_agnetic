@@ -72,73 +72,134 @@ def _build_slip_system_prompt(
     current_date: str,
     wallet_category_map: str,
 ) -> str:
-    """Single-shot prompt — focused, no ReAct reasoning."""
+    """Single-shot prompt — three-step chain-of-thought, single call."""
     return f"""You are a slip-parsing agent inside Mint Money.
 
 **Today's date:** {current_date}
 
-Your only job: look at the attached slip image, extract the
-transaction, and call the `propose_transaction` tool **exactly once**
-with the matched values. Do NOT describe the transaction in chat — the
-mobile client renders it as a card.
+Your job: look at the attached image, decide whether it is a slip /
+receipt, and turn it into one or more transactions by calling the
+`propose_transaction` tool (once per line item). The mobile client
+renders each call as a transaction card — do NOT describe them in
+chat.
 
-## Scope (slip flow only)
+## Scope
 
-This flow handles **bank/cash slips** that hit a real account —
-deposits, payments, transfers, payroll deposits, ATM receipts, retail
-receipts paid by cash/bank. The wallet list below shows ONLY the
-user's general (cash/bank) wallets. Credit-card wallets and goal
-wallets are out of scope and intentionally hidden — you must NOT
-invent or guess sync_ids for those types.
+This flow accepts **bank transfer slips** and **retail receipts**
+(in any language, any format). Anything else — random photos, app
+screenshots, blank images, unreadable images — is out of scope:
+reply with the exact Thai sentence "ไม่สามารถอ่านสลิปได้" and do
+NOT call the tool.
 
-## Wallets + their categories (for matching)
+## Wallets + their categories (catalog for matching)
 
-Use the **sync_id** values verbatim when calling the tool, NOT names.
-Every `sync_id` you pass MUST appear in the list below — never
-fabricate one. If you cannot find a confident match, set
-`wallet_id`/`category_id` to **null** rather than guessing.
+The wallet list below shows ONLY the user's `general` (cash/bank)
+wallets — credit-card and goal wallets are intentionally hidden.
+Every `sync_id` you pass to the tool MUST appear verbatim in this
+catalog — never fabricate one.
 
 {wallet_category_map}
 
-## Matching rules
+## Workflow — think through these three steps, then act
 
-1. **Wallet** — look for bank logo, account name, account number
-   prefix, payment method, or wallet name. Pick a wallet from the
-   list above whose name best matches. The wallets listed above are
-   already filtered to `type=general` — never suggest a credit-card
-   or goal wallet here. If nothing clearly matches, set `wallet_id`
-   to null.
-2. **Category** — search **only** within the matched wallet's
-   category list. Match by merchant/item keywords ("ร้านอาหาร" /
-   "อาหาร", "Cafe Amazon" / "เครื่องดื่ม", "BTS" / "เดินทาง", "Shopee"
-   / "ช้อปปิ้ง", "เงินเดือน" / "salary"). If the matched wallet has no
-   matching category, set `category_id` to null.
-3. **Amount** = total paid / total received (look for "รวม", "ยอดรวม",
-   "Total", "Amount", "รายได้สุทธิ").
-4. **Date** = ISO 8601. If the slip has no timestamp, use today.
-   Pay attention to Buddhist Era — if a year looks like 25xx, subtract
-   543 to convert to AD before formatting.
-5. **Type** — pick by money direction relative to the user:
-   - `income` — money INTO the user's account (payroll / payslip /
-     incoming transfer / cashback / refund).
-   - `expense` — money OUT of the user's account (purchase / outgoing
-     transfer / bill payment / withdrawal).
-6. **Note** = one-line summary. For receipts with multiple line items,
-   list comma-separated (e.g. "ข้าวมันไก่ 60, ชา 25").
-7. **Merchant** = store/vendor name (for expense) or employer name
-   (for income payslips). Pull from the slip header.
+### Step 1 — Extract raw context (in your head)
 
-## Failure mode
+Pull these fields from the image:
 
-If the image is **clearly not a slip** (random photo, screenshot of
-the app UI, blank, unreadable) → do NOT call the tool. Reply with a
-short Thai sentence asking the user to send a real slip, then stop.
+- `amount` — the money figure for the slip / each line item.
+- `date_time` — ISO 8601; Buddhist Era 25xx → subtract 543 for AD.
+  Missing → use **today** ({current_date}).
+- `transaction_type` — `expense` (money leaves the user) or
+  `income` (money enters the user). Missing / ambiguous →
+  default to **expense**.
+- `merchant_or_recipient_name` — store name, vendor, recipient,
+  or employer (for payslips). Pull from the slip header.
+- `bank_name` — issuing bank logo / abbreviation (KBANK, SCB,
+  TrueMoney, etc.) if visible.
+- `account_number` — sender or recipient account if shown.
+- `items` — list of line items on a retail receipt with each
+  item's name and amount.
+- `summary` — one short Thai sentence describing what the slip is
+  about (e.g. "ซื้อของชำที่ Tesco", "จ่ายค่ากาแฟที่ Amazon",
+  "โอนเงินจาก KBANK ไปยังร้านข้าวมันไก่"). This is your reasoning
+  context for picking the wallet and category in steps 2 and 3.
+- `raw_note` — any other free text visible on the slip.
 
-## After the tool call
+**Required:** only `amount`. If you cannot extract `amount`, treat
+the image as unreadable — reply with "ไม่สามารถอ่านสลิปได้" and stop.
+
+### Step 2 — Map wallet (`wallet_id`)
+
+Pick exactly one wallet from the catalog for this entire slip
+(all line items share the same wallet). Match priority:
+
+1. Best match by **wallet name + bank context** (e.g. slip shows
+   "KBANK" → wallet whose name contains "KBank" / "กสิกร").
+2. If nothing is a confident match → **the first wallet** in the
+   catalog as a last-resort fallback.
+
+`wallet_id` is **required** — it must always be one of the
+sync_ids in the catalog. Never null, never fabricated.
+
+### Step 3 — Map category (`category_id`) per line item
+
+For each line item / VAT line / discount line, pick a category
+**from the matched wallet's category list only**:
+
+1. Filter to categories whose `type` matches the line's
+   `transaction_type` (expense items use expense categories;
+   income / discount lines use income categories).
+2. Best match by name using the item name + `summary` as context
+   (e.g. "นม", "ขนมปัง" → "อาหาร"; "ผงซักฟอก" → "ของใช้ในบ้าน";
+   "เงินเดือน" → "เงินเดือน"; VAT → "ภาษี" / "ค่าธรรมเนียม" or
+   nearest by name).
+3. If no category name is a confident match → **the first
+   category of the matching type** under that wallet.
+
+`category_id` is **required** — never null, never fabricated.
+
+### Step 4 — Build transactions (call the tool)
+
+Emit **one `propose_transaction` tool call per line item** in a
+single response.
+
+**Simple transfer slip** (no line items) → 1 tool call with the
+slip total.
+
+**Retail receipt with N items + VAT + discount** → N + 2 tool
+calls (each item + VAT + discount), all sharing the same
+`wallet_id`, `date`, `currency_code`. Per-call rules:
+
+- **Each item line** → `type="expense"` (or "income" for incoming
+  receipts like payslip components), `amount` = the item's price,
+  `note` = item name + merchant (e.g. "นม @ Tesco"),
+  `include_in_report=true`.
+- **VAT line** → separate call. `type="expense"`,
+  `amount` = the VAT amount, `category_id` = a tax / fee category
+  if one exists, else the nearest-name match,
+  `note` = "VAT 7% @ Merchant" (use the actual rate seen),
+  `include_in_report=true`.
+- **Discount line** → separate call. `type="income"`,
+  `amount` = the discount magnitude (positive number),
+  `category_id` = nearest-name match in income categories,
+  `note` = "ส่วนลด @ Merchant",
+  **`include_in_report=false`** — discounts are tracked but must
+  NOT inflate income totals on reports.
+
+## Common conventions
+
+- `currency_code` / `currency_symbol` — default THB / ฿ unless the
+  slip clearly shows another currency.
+- `merchant_name` — the store/vendor/employer string; the server
+  appends it to `note` for display.
+- Do NOT split a transfer slip into multiple transactions — splitting
+  is only for receipts that list individual items.
+
+## After the tool calls
 
 Reply with **one short Thai sentence** like
-"ดูข้อมูลในการ์ดด้านบนได้เลยครับ — กดบันทึกถ้าถูกต้อง". Do not restate
-the transaction details, do not emit a `<suggestions>` tag.
+"ดูข้อมูลในการ์ดด้านบนได้เลยครับ — กดบันทึกถ้าถูกต้อง". Do not
+restate the transaction details and do not emit a `<suggestions>` tag.
 """
 
 
@@ -287,14 +348,21 @@ async def slip_node(state: AgentState, config: RunnableConfig) -> dict:
     # model gave a refusal text, prefer it as the message so the user
     # sees the model's actual feedback ("ภาพไม่ใช่สลิป" / "ภาพไม่ชัด").
     if not tool_calls:
+        # Spec: surface a single, user-friendly Thai sentence whenever
+        # the model could not produce a transaction — whether it
+        # refused (text reply) or silently failed (empty). The model is
+        # already told to use this exact phrase, so honour it here too
+        # instead of leaking the raw refusal text (which may say things
+        # like "the image appears blurry" in inconsistent wording).
         refusal_text = _text_preview(response).strip()
-        error_msg = refusal_text or "อ่านสลิปไม่ได้ ลองถ่ายใหม่ให้ชัดขึ้น"
+        error_msg = "ไม่สามารถอ่านสลิปได้"
         _slip_log(
             "SLIP",
             "no tool_calls — surfacing error to client",
             image_count=len(images),
             had_text=bool(refusal_text),
-            error_msg=error_msg[:200],
+            refusal_preview=refusal_text[:200],
+            error_msg=error_msg,
         )
         raise ValueError(error_msg)
 
@@ -386,9 +454,17 @@ async def propose_validation_node(
 
     # Load the catalog once — used to validate every tool_call below.
     catalog = await fetch_user_catalog(user_id)
-    valid_wallet_ids = {
-        w.sync_id for w in catalog.wallets if w.wallet_type == "general"
-    }
+    general_wallets = [
+        w for w in catalog.wallets if w.wallet_type == "general"
+    ]
+    valid_wallet_ids = {w.sync_id for w in general_wallets}
+    # Last-resort wallet for the "wallet_id must never be null" rule.
+    # Mirrors the prompt's fallback chain: if the LLM picked an invalid
+    # / null id we still need to surface a real wallet to mobile, so
+    # use the first general wallet in catalog order.
+    fallback_wallet_id: str | None = (
+        general_wallets[0].sync_id if general_wallets else None
+    )
 
     # Build the wallet → categories map BEFORE iterating tool_calls so
     # we can validate `category_id` against the matched wallet's
@@ -399,6 +475,13 @@ async def propose_validation_node(
     by_wallet = await fetch_categories_by_wallet(user_id)
 
     tool_messages: list[ToolMessage] = []
+    # Collect every validated transaction here, then dispatch ONE
+    # bundled `propose_transaction_group` event at the end. Mobile
+    # renders the entire turn as a single card with N rows + a wallet/
+    # total footer + a single set of group-level actions — sending
+    # multiple events would produce N stacked cards instead of a group.
+    group_transactions: list[dict[str, Any]] = []
+    group_wallet_id: str | None = None
     for tc in tool_calls:
         name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
         if name != "propose_transaction":
@@ -406,32 +489,37 @@ async def propose_validation_node(
         args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
         args = dict(args or {})
 
-        # ── id validation ───────────────────────────────────────
+        # ── id validation with never-null fallback ──────────────
+        # Spec: wallet_id / category_id must ALWAYS hold a real value.
+        # If the LLM passed an invalid id (hallucinated / stale dedup
+        # leftover), fall back to the same chain the prompt instructs:
+        # nearest valid match → first wallet / first category of the
+        # matching type.
         wallet_id_in = args.get("wallet_id")
         category_id_in = args.get("category_id")
-        wallet_id = wallet_id_in if wallet_id_in in valid_wallet_ids else None
-        if wallet_id_in and not wallet_id:
-            _logger.warning(
-                "propose_validation_node: dropped hallucinated wallet_id=%s",
-                wallet_id_in,
-            )
+        txn_type = args.get("type", "expense")
 
-        # Category must belong to the matched wallet's category list.
-        # If wallet didn't match, no category context — drop the
-        # category id rather than guessing. Match by sync_id directly
-        # OR by (name, type) when sync_id is a stale duplicate of a
-        # categorically equivalent row in the same wallet.
+        if wallet_id_in in valid_wallet_ids:
+            wallet_id = wallet_id_in
+        else:
+            if wallet_id_in:
+                _logger.warning(
+                    "propose_validation_node: dropped invalid wallet_id=%s "
+                    "→ falling back to %s",
+                    wallet_id_in, fallback_wallet_id,
+                )
+            wallet_id = fallback_wallet_id
+
         category_id: str | None = None
-        if wallet_id and category_id_in:
+        if wallet_id:
             wallet_cats = by_wallet.get(wallet_id, [])
             wallet_cat_ids = {c["sync_id"] for c in wallet_cats}
             if category_id_in in wallet_cat_ids:
                 category_id = category_id_in
-            else:
-                # Stale-duplicate rescue: the LLM may have picked a
-                # different sync_id of a category with the same name
-                # under a different wallet (catalog dedups by name).
-                # Find a same-name row under the matched wallet.
+            elif category_id_in:
+                # Stale-duplicate rescue: same category name under a
+                # different wallet in the deduped catalog. Find a
+                # same-name row under the matched wallet first.
                 stale_name = None
                 for c in catalog.categories:
                     if c.sync_id == category_id_in:
@@ -448,42 +536,75 @@ async def propose_validation_node(
                                 category_id_in, category_id, stale_name,
                             )
                             break
+            # Final never-null fallback: first category of the matching
+            # type under this wallet. Mirrors the prompt rule.
             if not category_id:
-                _logger.warning(
-                    "propose_validation_node: dropped category_id=%s "
-                    "(not in wallet %s)",
-                    category_id_in, wallet_id,
-                )
+                for c in wallet_cats:
+                    if c.get("type") == txn_type:
+                        category_id = c["sync_id"]
+                        break
+                # Last resort: any category under this wallet.
+                if not category_id and wallet_cats:
+                    category_id = wallet_cats[0]["sync_id"]
+                if category_id_in:
+                    _logger.warning(
+                        "propose_validation_node: dropped category_id=%s "
+                        "(not in wallet %s) → fell back to %s",
+                        category_id_in, wallet_id, category_id,
+                    )
 
         # ── note merge ──────────────────────────────────────────
         final_note = _combine_note(args.get("note"), args.get("merchant_name"))
 
-        # ── slim payload ────────────────────────────────────────
-        payload = {
-            "type": "propose_transaction",
-            "data": {
-                "sync_id": str(uuid.uuid4()),
-                "type": args.get("type", "expense"),
-                "amount": float(args.get("amount") or 0),
-                "date": args.get("date"),
-                "wallet_id": wallet_id,
-                "category_id": category_id,
-                "note": final_note,
-                "currency_code": args.get("currency_code") or "THB",
-                "currency_symbol": args.get("currency_symbol") or "฿",
-            },
+        # The group shares one wallet — first valid wallet_id wins.
+        # If later items pick a different wallet (LLM noise) we coerce
+        # them onto the group's wallet so the group footer stays honest.
+        if group_wallet_id is None:
+            group_wallet_id = wallet_id
+        elif wallet_id != group_wallet_id:
+            _logger.warning(
+                "propose_validation_node: coercing item wallet_id %s → "
+                "group wallet %s (group shares one wallet)",
+                wallet_id, group_wallet_id,
+            )
+            wallet_id = group_wallet_id
+            # Re-resolve category against the group wallet's list so
+            # the category still belongs to a real category of the
+            # final wallet.
+            wallet_cats = by_wallet.get(group_wallet_id, [])
+            if category_id not in {c["sync_id"] for c in wallet_cats}:
+                category_id = None
+                for c in wallet_cats:
+                    if c.get("type") == txn_type:
+                        category_id = c["sync_id"]
+                        break
+                if not category_id and wallet_cats:
+                    category_id = wallet_cats[0]["sync_id"]
+
+        include_in_report = bool(args.get("include_in_report", True))
+        item = {
+            "sync_id": str(uuid.uuid4()),
+            "type": txn_type,
+            "amount": float(args.get("amount") or 0),
+            "date": args.get("date"),
+            "wallet_id": wallet_id,
+            "category_id": category_id,
+            "note": final_note,
+            "currency_code": args.get("currency_code") or "THB",
+            "currency_symbol": args.get("currency_symbol") or "฿",
+            "includeInReport": include_in_report,
         }
+        group_transactions.append(item)
         _slip_log(
             "PROPOSE",
-            "dispatching structured_data",
+            "validated tool_call",
             wallet_id=wallet_id,
             category_id=category_id,
-            amount=payload["data"]["amount"],
-            type=payload["data"]["type"],
-            sync_id=payload["data"]["sync_id"],
+            amount=item["amount"],
+            type=item["type"],
+            include_in_report=include_in_report,
+            sync_id=item["sync_id"],
         )
-        await adispatch_custom_event("structured_data", payload)
-        _slip_log("PROPOSE", "dispatched OK")
 
         tc_id = (
             tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "tc-0")
@@ -495,6 +616,48 @@ async def propose_validation_node(
                 name="propose_transaction",
             )
         )
+
+    # ── bundle + dispatch ────────────────────────────────────────
+    # Mobile contract: ALWAYS emit a `propose_transaction_group` even
+    # for a single-item slip (Q2=B). The card UI renders a single
+    # consistent group layout regardless of item count — backend
+    # doesn't try to second-guess whether to send "single" vs "group".
+    if group_transactions:
+        # `total` = net amount the user actually paid out of pocket.
+        # Per spec Q3: expense + (VAT-ish expense) − income (discounts).
+        # Iterate the validated items rather than re-parsing args so the
+        # total stays in lockstep with what mobile renders.
+        total = 0.0
+        for t in group_transactions:
+            if t["type"] == "expense":
+                total += t["amount"]
+            else:  # income (discounts / rebates)
+                total -= t["amount"]
+        group_payload = {
+            "type": "propose_transaction_group",
+            "data": {
+                "group_id": str(uuid.uuid4()),
+                "wallet_id": group_wallet_id,
+                "currency_code": (
+                    group_transactions[0].get("currency_code") or "THB"
+                ),
+                "currency_symbol": (
+                    group_transactions[0].get("currency_symbol") or "฿"
+                ),
+                "total": total,
+                "transactions": group_transactions,
+            },
+        }
+        _slip_log(
+            "PROPOSE",
+            "dispatching group structured_data",
+            group_id=group_payload["data"]["group_id"],
+            wallet_id=group_wallet_id,
+            item_count=len(group_transactions),
+            total=total,
+        )
+        await adispatch_custom_event("structured_data", group_payload)
+        _slip_log("PROPOSE", "dispatched group OK")
 
     return {"messages": tool_messages}
 

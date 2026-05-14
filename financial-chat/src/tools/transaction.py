@@ -31,36 +31,50 @@ async def propose_transaction(
     merchant_name: str | None = None,
     currency_code: str = "THB",
     currency_symbol: str = "฿",
+    include_in_report: bool = True,
 ) -> str:
     """Propose a transaction extracted from a slip image.
 
-    Call this **only** when the user message starts with
-    `[INTENT:parse_transaction_from_slip]` and a slip image is
-    attached. Extract slip data from the image, match wallet/category
-    against the user's catalog (provided in the system prompt under
+    Call this tool **once per line item** when a slip image is
+    attached. A retail receipt with 3 items + VAT + 1 discount =
+    5 separate tool calls in one response (3 items + 1 VAT +
+    1 discount), each with its own category and amount.
+
+    Extract slip data from the image, match wallet/category against
+    the user's catalog (provided in the system prompt under
     `Slip context` with sync_ids), and pass the matched ids here.
 
     `wallet_id` / `category_id` **MUST** be a sync_id (UUID) that
-    appears verbatim in the system-prompt catalog. The server-side
-    validation node will null-out any id not in the user's catalog,
-    so guessing only loses you the match. When in doubt, pass null.
+    appears verbatim in the system-prompt catalog. Always pass a
+    value — the prompt's fallback rules guarantee at least one match
+    (nearest by name → first wallet / first category of the matched
+    type). Never pass null; the server expects every id to resolve.
 
     Args:
-        type: "expense" or "income". Pick by money direction relative
-              to the user.
-        amount: Positive numeric amount (the slip total).
+        type: "expense" for money leaving the wallet, "income" for
+              money entering it. Discounts are modeled as "income"
+              with `include_in_report=false`.
+        amount: Positive numeric amount for this line item only
+              (NOT the receipt total when items are split).
         date: ISO 8601 timestamp. Convert Buddhist Era to AD
-              (subtract 543) before formatting.
-        note: One-line summary. For receipts with multiple items,
-              concatenate them comma-separated. Server will append
-              `merchant_name` after a separator automatically.
-        wallet_id: sync_id of the matched **general** wallet, or null.
-        category_id: sync_id of the matched category (from the
-                     matched wallet's category list), or null.
+              (subtract 543) before formatting. If the slip has no
+              timestamp, use today's date.
+        note: One-line summary describing what this transaction is
+              about — e.g. "นม @ Tesco", "VAT 7%", "ส่วนลด @ Tesco",
+              "มื้อเที่ยง @ KFC". The server merges merchant_name into
+              this field automatically.
+        wallet_id: sync_id of the matched **general** wallet. Always
+                   required.
+        category_id: sync_id of the matched category from the matched
+                     wallet's category list. Always required.
         merchant_name: Optional merchant/employer name from the slip
                        header — server merges it into the final note.
         currency_code: ISO currency code (default THB).
         currency_symbol: Display symbol (default ฿).
+        include_in_report: Whether this transaction should appear in
+                           income/expense reports. Default true. Set
+                           to **false** for discount lines so they
+                           don't inflate the user's income totals.
 
     Returns:
         A short status string. The validation node intercepts the
