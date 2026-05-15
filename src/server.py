@@ -1,11 +1,12 @@
 """FastAPI server with SSE streaming for the ReAct chat agent."""
 
+import asyncio
 import json
-import logging
 import re
+import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -15,23 +16,21 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import settings
+from src.debug_log import LogLevel, get_request_id, log as _debug_log_fn, set_request_id
 from src.graph.agent_graph import build_async_graph
 from src import threads_repo
 
-# ── Debug Logger Setup ─────────────────────────────────────────────────────────
-_LOG_DIR = Path(__file__).parent.parent.parent / "logs"
-_LOG_DIR.mkdir(exist_ok=True)
-_DEBUG_LOG = _LOG_DIR / f"chat_debug_{datetime.now().strftime('%Y-%m-%d')}.log"
 
 def _debug_log(tag: str, msg: str, **kwargs):
-    """Write structured debug log to file."""
-    parts = [f"[{datetime.now().isoformat()}] [{tag}] {msg}"]
-    for k, v in kwargs.items():
-        parts.append(f" {k}={v}")
-    log_line = "".join(parts) + "\n"
-    with open(_DEBUG_LOG, "a", encoding="utf-8") as f:
-        f.write(log_line)
-    logging.info(log_line.strip())
+    """Thin wrapper preserving the old call signature.
+
+    Defaults to `MILESTONE` because every existing call site at this
+    layer (HTTP entry, stream lifecycle, thread mutations, tool
+    boundaries) is high-signal. Switch individual calls to
+    `LogLevel.DETAIL` when adding verbose payload dumps.
+    """
+    level = kwargs.pop("_level", LogLevel.MILESTONE)
+    _debug_log_fn(tag, msg, level=level, **kwargs)
 
 
 # ── Lifespan: set up checkpointer + graph once at startup ────────────────────
@@ -139,6 +138,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _request_id_middleware(request: Request, call_next):
+    """Attach a correlation id to every request.
+
+    Honors a caller-supplied `X-Request-Id` (so mobile can stamp its own
+    and join logs end-to-end) or generates a uuid4 when absent. The id
+    lives in a ContextVar so any `debug_log.log()` call inside the
+    request scope — including LangGraph nodes — picks it up without an
+    explicit parameter.
+    """
+    rid = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    set_request_id(rid)
+    try:
+        response = await call_next(request)
+    finally:
+        # Clear so background tasks spawned after the response don't
+        # leak the previous request's id.
+        set_request_id(None)
+    response.headers["X-Request-Id"] = rid
+    return response
 
 
 # ── Request schemas ───────────────────────────────────────────────────────────
@@ -306,6 +327,18 @@ _SLIP_READING_NODES = {"slip"}
 _SLIP_SAVING_NODES = {"slip_tool"}
 
 
+# ── Stream pacing ─────────────────────────────────────────────────────────────
+# How often to emit an SSE keep-alive when the graph is silent. Mobile
+# clients read this to detect dead connections; intermediaries (nginx,
+# Cloudflare, ngrok) also reset idle TCP after ~30–60s, so a 15s tick
+# keeps the pipe warm.
+_HEARTBEAT_SEC = 15.0
+# Hard ceiling: if no real event arrives within this window the stream
+# is presumed wedged (LLM timeout will normally trip first at 60s per
+# call; this is the safety net for tool/subgraph hangs).
+_HARD_TIMEOUT_SEC = 120.0
+
+
 # ── <suggestions> tag streaming filter ────────────────────────────────────────
 
 _SUGGEST_OPEN = "<suggestions>"
@@ -461,6 +494,10 @@ async def _stream_graph(
     emitted_phases: set[str] = set()
     assistant_reply_chunks: list[str] = []
     suggestions_filter = _SuggestionsFilter()
+    # `on_tool_start` → start ts; popped on `on_tool_end` to compute
+    # duration. Keyed by LangChain run_id so concurrent tool calls
+    # (e.g., parallel `get_financial_advice` invocations) don't collide.
+    tool_starts: dict[str, tuple[str, float]] = {}
 
     def _status_event(phase: str) -> str:
         return _sse({
@@ -469,8 +506,83 @@ async def _stream_graph(
             "label": _STATUS_LABELS.get(phase, phase),
         })
 
+    # First SSE event — gives the client a stable id to echo back when
+    # reporting a bug. Mobile parsers should ignore unknown `type`
+    # values, so this is forward-compatible.
+    yield _sse({
+        "type": "meta",
+        "request_id": get_request_id() or "",
+        "thread_id": thread_id,
+        "model": settings.react_model,
+    })
+
+    # Manual iteration so we can interleave SSE heartbeats during quiet
+    # stretches and bail out hard if the graph wedges. The previous
+    # `async for` had no way to inject keep-alives or to observe how
+    # long we'd been idle.
+    #
+    # Why `asyncio.wait` and not `asyncio.wait_for`: `wait_for` cancels
+    # the awaited coroutine on timeout, which would propagate
+    # CancelledError into the LangGraph async generator and close it —
+    # so the first heartbeat would silently kill the stream. We instead
+    # keep the same pending Task across heartbeat ticks and only cancel
+    # it on the hard-timeout escape hatch.
+    events_iter = _graph.astream_events(
+        input_data, config, version="v2"
+    ).__aiter__()
+    last_real_event = time.monotonic()
+    stream_aborted = False
+    pending: asyncio.Task | None = None
+
     try:
-        async for event in _graph.astream_events(input_data, config, version="v2"):
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(events_iter.__anext__())
+
+            done, _pending_set = await asyncio.wait(
+                {pending}, timeout=_HEARTBEAT_SEC
+            )
+
+            if pending not in done:
+                # Heartbeat tick — the iterator is still working.
+                idle_sec = time.monotonic() - last_real_event
+                if idle_sec >= _HARD_TIMEOUT_SEC:
+                    _debug_log(
+                        "STREAM",
+                        "Hard timeout — aborting",
+                        user_id=user_id,
+                        thread_id=thread_id,
+                        idle_sec=int(idle_sec),
+                    )
+                    pending.cancel()
+                    yield _sse({
+                        "type": "error",
+                        "message": (
+                            f"LLM unresponsive for {int(idle_sec)}s — "
+                            "request aborted"
+                        ),
+                    })
+                    stream_aborted = True
+                    break
+                _debug_log(
+                    "STREAM",
+                    "Heartbeat",
+                    idle_sec=int(idle_sec),
+                    _level=LogLevel.DETAIL,
+                )
+                # SSE comment line — clients (Dio / EventSource) ignore
+                # it but the framing keeps proxies from idling the TCP.
+                yield ": keep-alive\n\n"
+                continue
+
+            try:
+                event = pending.result()
+            except StopAsyncIteration:
+                break
+            finally:
+                pending = None
+
+            last_real_event = time.monotonic()
             kind = event["event"]
             node = (event.get("metadata") or {}).get("langgraph_node")
 
@@ -518,11 +630,31 @@ async def _stream_graph(
                     yield _sse({"type": "token", "content": visible})
 
             elif kind == "on_tool_start":
-                _debug_log("STREAM", "Tool started", tool=event["name"])
+                run_id = str(event.get("run_id") or "")
+                tool_starts[run_id] = (event["name"], time.monotonic())
+                _debug_log(
+                    "STREAM",
+                    "Tool started",
+                    tool=event["name"],
+                    tool_run_id=run_id[:8] or "-",
+                )
                 yield _sse({"type": "tool_start", "tool": event["name"]})
 
             elif kind == "on_tool_end":
-                _debug_log("STREAM", "Tool ended", tool=event["name"])
+                run_id = str(event.get("run_id") or "")
+                started = tool_starts.pop(run_id, None)
+                duration_ms = (
+                    int((time.monotonic() - started[1]) * 1000)
+                    if started
+                    else -1
+                )
+                _debug_log(
+                    "STREAM",
+                    "Tool ended",
+                    tool=event["name"],
+                    tool_run_id=run_id[:8] or "-",
+                    duration_ms=duration_ms,
+                )
                 yield _sse({"type": "tool_end", "tool": event["name"]})
 
             elif kind == "on_custom_event" and event.get("name") == "structured_data":
@@ -539,6 +671,13 @@ async def _stream_graph(
                     yield _sse({"type": "data", "payload": payload})
                 else:
                     _debug_log("STREAM", "data event with null payload — skipped")
+
+        if stream_aborted:
+            # The hard-timeout branch already emitted an `error` event.
+            # Skip the success-path tail/suggestions/persist — there's no
+            # full reply to save, and emitting `done` after `error` would
+            # confuse clients.
+            return
 
         _debug_log("STREAM", "Done", user_id=user_id)
 

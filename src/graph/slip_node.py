@@ -43,29 +43,20 @@ from src.tools.transaction import propose_transaction
 
 _logger = logging.getLogger(__name__)
 
-# ── File-backed debug log (same pattern as reason_node) ──────────────
-from datetime import datetime as _dt
-from pathlib import Path as _Path
-
-_SLIP_LOG_DIR = _Path(__file__).parent.parent.parent / "logs"
-_SLIP_LOG_DIR.mkdir(exist_ok=True)
+# ── Debug log (delegates to unified logger) ──────────────────────────
+from src.debug_log import LogLevel as _LogLevel, log as _log
 
 
 def _slip_log(tag: str, msg: str, **kwargs) -> None:
-    """Write a structured slip-flow line to logs/slip_debug_YYYY-MM-DD.log.
+    """Write a slip-flow line via the unified debug logger.
 
-    Mirrors reason_node's `_debug_log` format so failures across both
-    flows can be tail-merged when diagnosing a turn.
+    All slip-internal mechanics (mode, retries, payload shapes) are
+    `DETAIL`; production mode shows only the high-signal vision call
+    boundaries via dedicated MILESTONE calls. Callers can override
+    by passing `_level=_LogLevel.MILESTONE`.
     """
-    log_file = _SLIP_LOG_DIR / f"slip_debug_{_dt.now().strftime('%Y-%m-%d')}.log"
-    parts = [f"[{_dt.now().isoformat()}] [{tag}] {msg}"]
-    for k, v in kwargs.items():
-        parts.append(f" {k}={v}")
-    try:
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write("".join(parts) + "\n")
-    except Exception:  # noqa: BLE001 - logging must never fail the turn
-        pass
+    level = kwargs.pop("_level", _LogLevel.DETAIL)
+    _log(tag, msg, level=level, **kwargs)
 
 
 def _build_slip_system_prompt(
@@ -112,8 +103,18 @@ Pull these fields from the image:
 - `transaction_type` — `expense` (money leaves the user) or
   `income` (money enters the user). Missing / ambiguous →
   default to **expense**.
-- `merchant_or_recipient_name` — store name, vendor, recipient,
-  or employer (for payslips). Pull from the slip header.
+- `merchant_or_recipient_name` — the **actual** store/vendor/
+  recipient/employer name, NOT the payment provider. Strip Thai
+  and global payment-app wrappers such as "ร้านถุงเงิน",
+  "TrueMoney Wallet", "PromptPay", "Rabbit LINE Pay",
+  "ShopeePay", "GrabPay", "K PLUS", "SCB EASY" — these are
+  payment systems, not merchants. If the slip shows
+  `<provider> (<real store>)`, extract only `<real store>`.
+  Examples:
+    "ร้านถุงเงิน (ร้านณสา)"        → "ร้านณสา"
+    "TrueMoney Wallet (ร้านสมชาย)" → "ร้านสมชาย"
+    "Tesco Lotus"                  → "Tesco Lotus" (no provider → keep)
+  Pull from the slip header.
 - `bank_name` — issuing bank logo / abbreviation (KBANK, SCB,
   TrueMoney, etc.) if visible.
 - `account_number` — sender or recipient account if shown.
@@ -144,19 +145,52 @@ sync_ids in the catalog. Never null, never fabricated.
 ### Step 3 — Map category (`category_id`) per line item
 
 For each line item / VAT line / discount line, pick a category
-**from the matched wallet's category list only**:
+**from the matched wallet's category list only**. The catalog is
+fully user-defined — you only see `name` (and `type`). Reason
+about the names; do not invent ids.
 
-1. Filter to categories whose `type` matches the line's
-   `transaction_type` (expense items use expense categories;
-   income / discount lines use income categories).
-2. Best match by name using the item name + `summary` as context
-   (e.g. "นม", "ขนมปัง" → "อาหาร"; "ผงซักฟอก" → "ของใช้ในบ้าน";
-   "เงินเดือน" → "เงินเดือน"; VAT → "ภาษี" / "ค่าธรรมเนียม" or
-   nearest by name).
-3. If no category name is a confident match → **the first
-   category of the matching type** under that wallet.
+**Reasoning strategy (apply in order):**
+
+1. **Filter by type.** Keep only categories whose `type` matches
+   the line's `transaction_type`. Expense lines → expense
+   categories; income / discount → income categories.
+
+2. **Identify the item's function/domain in 1–3 words** before
+   looking at the catalog. Examples of the *kind of thinking*
+   (not literal mappings):
+     - Item used on the body for hygiene → personal-care domain.
+     - Item used to clean the house / surfaces → home-cleaning
+       domain.
+     - Raw food bought to cook later → grocery domain.
+     - Prepared food/drink served at a shop → dining domain.
+     - Bill, utility, subscription → bills domain.
+   Then read each candidate category name as the question
+   *"does this name naturally cover the item's domain?"* Use the
+   item word, the merchant context, and the slip `summary`.
+
+3. **Prefer the most specific name that fits.** If multiple
+   categories overlap, the narrower name wins (e.g. a coffee
+   purchase fits a "กาแฟ"-style category better than a generic
+   "อาหาร" or "ช้อปปิ้ง"). Specific personal-care / household /
+   grocery / transport / utility names all beat generic ones.
+
+4. **Generic catch-alls only if no specific name fits.** A broad
+   name like "ช้อปปิ้ง" / "อาหาร" / "บันเทิง" is OK when the item
+   is plausibly inside its scope but no narrower name applies.
+
+5. **"อื่นๆ" / "Other" is a LAST RESORT.** Only pick a category
+   named "อื่นๆ" (or any obvious "Other"/`expense_other`-style
+   bucket) when **every other** name in the filtered list has no
+   semantic overlap with the item at all. If even one name has
+   any plausible coverage — prefer it over "อื่นๆ".
+
+6. **Never-null safety net.** If after all the above no category
+   feels right, fall back to the first category of the matching
+   type in the wallet.
 
 `category_id` is **required** — never null, never fabricated.
+VAT / ภาษี / ค่าธรรมเนียม follow the same rules: pick a
+tax/fee-named category if one exists, else nearest by name.
 
 ### Step 4 — Build transactions (call the tool)
 
@@ -172,17 +206,18 @@ calls (each item + VAT + discount), all sharing the same
 
 - **Each item line** → `type="expense"` (or "income" for incoming
   receipts like payslip components), `amount` = the item's price,
-  `note` = item name + merchant (e.g. "นม @ Tesco"),
+  `note` = item name **only** (e.g. "นม", "ค่ากาแฟ") — do NOT
+  append the merchant; the server adds it from `merchant_name`,
   `include_in_report=true`.
 - **VAT line** → separate call. `type="expense"`,
   `amount` = the VAT amount, `category_id` = a tax / fee category
   if one exists, else the nearest-name match,
-  `note` = "VAT 7% @ Merchant" (use the actual rate seen),
+  `note` = "VAT 7%" (use the actual rate seen — no merchant),
   `include_in_report=true`.
 - **Discount line** → separate call. `type="income"`,
   `amount` = the discount magnitude (positive number),
   `category_id` = nearest-name match in income categories,
-  `note` = "ส่วนลด @ Merchant",
+  `note` = "ส่วนลด" (no merchant),
   **`include_in_report=false`** — discounts are tracked but must
   NOT inflate income totals on reports.
 

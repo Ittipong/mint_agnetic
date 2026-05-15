@@ -4,7 +4,7 @@ PY := python
 UV := uv
 DB_URL ?= postgresql://mint:mint123@localhost:5433/mint_agentic
 BACKEND_DB_URL ?= postgresql://postgres:postgres@localhost:5432/mint_money_dev
-STUDIO_PORT ?= 8080
+STUDIO_PORT ?= 2024
 
 # === Development ===
 
@@ -18,20 +18,45 @@ dev-chat: ## Run the agent in chat mode
 dev-react: ## Run the agent in ReAct mode
 	$(UV) run $(PY) -m src.main --mode react
 
+# === FastAPI Server ===
+
+SERVER_HOST ?= 0.0.0.0
+SERVER_PORT ?= 8000
+
+server: ## Start FastAPI chat server (streaming SSE)
+	$(UV) sync
+	$(UV) run uvicorn src.server:app --host $(SERVER_HOST) --port $(SERVER_PORT) --reload
+
+server-prod: ## Start FastAPI chat server (production, no reload)
+	$(UV) run uvicorn src.server:app --host $(SERVER_HOST) --port $(SERVER_PORT) --workers 2
+
+server-stop: ## Stop FastAPI chat server (kills anything bound to SERVER_PORT)
+	-lsof -ti :$(SERVER_PORT) | xargs kill -9 2>/dev/null || true
+	-pkill -f "uvicorn src.server:app" 2>/dev/null || true
+
+server-restart: server-stop server ## Restart FastAPI chat server
+
+# Test streaming endpoint
+test-stream: ## Test SSE stream (usage: USER_ID=<uuid> THREAD_ID=<uuid> MSG="question")
+	@curl -sN -X POST http://localhost:$(SERVER_PORT)/chat/stream \
+		-H "Content-Type: application/json" \
+		-d '{"user_id":"$(USER_ID)","thread_id":"$(THREAD_ID)","message":"$(MSG)"}' \
+		| while IFS= read -r line; do echo "$$line"; done
+
 # === LangGraph Studio ===
 
 studio: ## Start LangGraph Studio API server
-	@echo "🚀 Starting LangGraph Studio on http://localhost:$(STUDIO_PORT)"
-	@echo "   Studio UI: https://smith.langchain.com/studio/?baseUrl=http://localhost:$(STUDIO_PORT)"
-	@echo "   API Docs:  http://localhost:$(STUDIO_PORT)/docs"
-	@echo ""
+	-lsof -ti :$(STUDIO_PORT) | xargs kill -9 2>/dev/null; sleep 1
+	@echo "Starting LangGraph Studio on http://localhost:$(STUDIO_PORT)"
+	@echo "Studio UI: https://smith.langchain.com/studio/?baseUrl=http://localhost:$(STUDIO_PORT)"
 	$(UV) run langgraph dev \
 		--config langgraph.json \
 		--port $(STUDIO_PORT) \
 		--no-browser
 
 studio-stop: ## Stop LangGraph dev server
-	pkill -f "langgraph dev" 2>/dev/null || true
+	-lsof -ti :$(STUDIO_PORT) | xargs kill -9 2>/dev/null || true
+	-pkill -f "langgraph dev" 2>/dev/null || true
 
 studio-restart: studio-stop studio ## Restart LangGraph Studio
 
@@ -78,17 +103,27 @@ update: ## Upgrade all dependencies
 
 # === Evaluation ===
 
-eval: ## Run all evaluation tests
-	$(UV) run python -m tests.data.chat_eval
+eval: ## Run upload + eval (usage: make eval FILE=evaluation/dataset_poc.jsonl [ALL_MODELS=1] [BASELINE_MODEL=x] [RUN_BY=ci])
+	$(UV) run python -m tests.data.chat_eval --file $(FILE) \
+		$(if $(ALL_MODELS),--all-models,) \
+		$(if $(BASELINE_MODEL),--baseline-model $(BASELINE_MODEL),) \
+		$(if $(RUN_BY),--run-by $(RUN_BY),)
 
+eval-all-models: eval ## Alias for ALL_MODELS=1
 eval-intent: ## Run evaluation for specific intent (usage: make eval-intent INTENT=GOAL_PROGRESS)
 	$(UV) run python -m tests.data.chat_eval --intent $(INTENT)
 
-eval-export: ## Run evaluation and export to JSON (usage: make eval-export FILE=results.json)
-	$(UV) run python -m tests.data.chat_eval --export $(FILE)
+compare: ## Run model comparison (usage: make compare FILE=evaluation/dataset_poc.jsonl [OUTPUT_DIR=./results])
+	$(UV) run python evaluation/compare.py --file $(FILE) --output-dir $(if $(OUTPUT_DIR),$(OUTPUT_DIR),./eval_results)
+
+compare-dataset-id: ## Run comparison on existing dataset (usage: make compare-dataset-id DATASET_ID=xxx DATASET_NAME=xxx)
+	$(UV) run python evaluation/compare.py --dataset-id $(DATASET_ID) --dataset-name $(DATASET_NAME) --output-dir $(if $(OUTPUT_DIR),$(OUTPUT_DIR),./eval_results)
+
+eval-export: ## Run evaluation and export to JSON (usage: make eval FILE=dataset_poc.jsonl OUTPUT=results.json)
+	$(UV) run python -m tests.data.chat_eval --file $(FILE) --export $(OUTPUT)
 
 eval-langsmith: ## Run evaluation and log to LangSmith
-	$(UV) run python -m tests.data.chat_eval --langsmith
+	$(UV) run python -m tests.data.chat_eval --file $(FILE)
 
 # === Testing ===
 

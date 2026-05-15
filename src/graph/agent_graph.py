@@ -1,42 +1,131 @@
-"""Main ReAct agent graph — minimal, LangGraph Studio compatible.
+"""ReAct LangGraph with dedicated Reasoner and Actor — plus a parallel
+slip-to-transaction vision subgraph for image-attached turns.
 
-For LangGraph Studio: config.json references this module.
-For programmatic use: use get_graph() with PostgresSaver separately.
+Architecture:
+  START
+    ├─ images?  → slip → [slip_tool] → END         (vision flow)
+    └─ otherwise → reason → [act|tool|respond] → ↶ (ReAct loop)
+
+ReAct Loop:
+  1. Reason: LLM decides action (call tool or respond)
+  2. Act: Execute tool → return ToolMessage
+  3. Loop: LLM sees ToolMessage in state → decides next step
+  4. Repeat until final response → END
+
+Slip flow is intentionally NOT a loop — vision LLM runs once, optionally
+fires the propose_transaction tool, then we terminate. Failures throw
+to the FastAPI stream layer (no silent fallback to text reply).
 """
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
+
 from src.graph.state import AgentState
-from src.graph.nodes import reason_node, TOOLS
+from src.graph.nodes import (
+    reason_node,
+    REGULAR_TOOLS,
+    ANALYZE_TOOL_NAMES,
+)
+from src.graph.compute_subgraph import act_node
+from src.graph.slip_node import (
+    slip_node,
+    propose_validation_node,
+    slip_cleanup_node,
+)
 
 
-def build_graph():
-    """Build and compile the ReAct agent graph (no checkpointer).
+def _route_by_input(state: AgentState) -> str:
+    """Entry router: slip subgraph for image turns, ReAct for text-only."""
+    if state.get("images"):
+        return "slip"
+    return "reason"
 
-    Use get_graph() for Studio or get_async_graph() for programmatic use.
-    """
+
+def _should_route(state: AgentState) -> str:
+    """Route after reason_node: CodeAct, regular tools, or respond directly."""
+    last_msg = state["messages"][-1]
+
+    if not hasattr(last_msg, "tool_calls") or not last_msg.tool_calls:
+        # No tool call = LLM gave direct answer
+        return "respond"
+
+    tool_names = {tc["name"] for tc in last_msg.tool_calls}
+
+    # CodeAct tool → run CodeAct subgraph
+    if tool_names & ANALYZE_TOOL_NAMES:
+        return "act"
+
+    # Regular tools → run via ToolNode
+    return "tool"
+
+
+def _route_after_slip(state: AgentState) -> str:
+    """After slip_node: execute tool if the LLM called one, else clean up."""
+    last_msg = state["messages"][-1]
+    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+        return "slip_tool"
+    return "cleanup"
+
+
+def _build_builder() -> StateGraph:
     builder = StateGraph(AgentState)
 
-    tool_node = ToolNode(TOOLS)
+    # Slip subgraph (vision LLM → validate + dispatch propose_transaction)
+    builder.add_node("slip", slip_node)
+    builder.add_node("slip_tool", propose_validation_node)
+    # Terminal cleanup — strips the slip turn from the checkpoint so it
+    # doesn't pollute history reloads or bloat token usage on future
+    # ReAct turns. The proposal payload was already sent to mobile via
+    # the SSE custom event, so the messages have no further purpose.
+    builder.add_node("slip_cleanup", slip_cleanup_node)
 
+    # ReAct loop nodes
     builder.add_node("reason", reason_node)
-    builder.add_node("tools", tool_node)
+    builder.add_node("act", act_node)
+    builder.add_node("tool", ToolNode(REGULAR_TOOLS))
 
-    builder.add_edge(START, "reason")
-
-    def should_continue(state: AgentState) -> str:
-        last_msg = state["messages"][-1]
-        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-            return "tools"
-        return END
-
+    # Entry: pick lane based on whether images are attached
     builder.add_conditional_edges(
-        "reason", should_continue, {"tools": "tools", END: END}
+        START,
+        _route_by_input,
+        {"slip": "slip", "reason": "reason"},
     )
-    builder.add_edge("tools", "reason")
 
-    return builder.compile()
+    # Slip lane is straight-line — no loop back to reason. Both
+    # branches funnel into slip_cleanup so cleanup runs unconditionally.
+    builder.add_conditional_edges(
+        "slip",
+        _route_after_slip,
+        {"slip_tool": "slip_tool", "cleanup": "slip_cleanup"},
+    )
+    builder.add_edge("slip_tool", "slip_cleanup")
+    builder.add_edge("slip_cleanup", END)
+
+    # ReAct lane (unchanged)
+    builder.add_conditional_edges(
+        "reason",
+        _should_route,
+        {
+            "act": "act",        # CodeAct for computations
+            "tool": "tool",       # Regular tools
+            "respond": END,        # Direct answer → END
+        },
+    )
+    builder.add_edge("act", "reason")
+    builder.add_edge("tool", "reason")
+
+    return builder
 
 
-# Exported for LangGraph Studio (references: ./src/graph/agent_graph.py:graph)
+def build_graph(checkpointer=None):
+    """Compile graph — pass a checkpointer for persistent chat history."""
+    return _build_builder().compile(checkpointer=checkpointer)
+
+
+def build_async_graph(checkpointer):
+    """Compile graph with an AsyncPostgresSaver for server use."""
+    return _build_builder().compile(checkpointer=checkpointer)
+
+
+# Exported for LangGraph Studio (no checkpointer — Studio manages its own)
 graph = build_graph()

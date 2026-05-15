@@ -99,3 +99,21 @@ CREATE INDEX IF NOT EXISTS idx_cd_lookup
 CREATE INDEX IF NOT EXISTS idx_cd_expires
     ON ai_insight_cooldowns (expires_at)
     WHERE expires_at IS NOT NULL;
+
+-- ============================================================
+-- 4. chat_threads — Flutter chat session metadata
+-- Messages themselves live in LangGraph's `checkpoints` table;
+-- this table only stores sidebar metadata (title, preview, sort key).
+-- ============================================================
+CREATE TABLE IF NOT EXISTS chat_threads (
+    thread_id            TEXT PRIMARY KEY,
+    user_id              TEXT NOT NULL,
+    title                TEXT NOT NULL DEFAULT 'แชตใหม่',
+    last_message_preview TEXT,
+    message_count        INT  NOT NULL DEFAULT 0,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_threads_user
+    ON chat_threads (user_id, updated_at DESC);
