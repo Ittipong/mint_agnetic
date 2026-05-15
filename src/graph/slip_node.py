@@ -105,6 +105,7 @@ mapping, and how many tool calls you emit.
 | `restaurant_bill`| Food/drink items, often a table number or order id, may include service charge / VAT. Examples: cafés, ร้านอาหาร, MK, Sukishi. |
 | `transfer_slip`  | Bank, e-wallet, or QR-payment confirmation: **single amount**, "โอนเงิน"/"Transfer"/"ชำระ"/"Pay", sender → recipient names, reference number. Examples: KBank / SCB / TrueMoney / PromptPay / ร้านถุงเงิน confirmations. |
 | `utility_bill`   | "ใบแจ้งหนี้"/"Invoice"/"Statement" from a service provider — electricity, water, internet, mobile, credit card. Has billing period and/or **due date**, account/customer number. The amount may be marked "ยอดที่ต้องชำระ" / "Total Due". Examples: MEA, PEA, MWA, AIS, TRUE, 3BB, credit-card statements. |
+| `payslip`        | "ใบรับเงินเดือน" / "Pay Slip" / "Payroll" header from an employer. Has employee id/name, pay **period** (monthly), and two columns "รายได้"/"Earnings" and "รายการหัก"/"Deductions", plus a **net pay** ("รายได้สุทธิ"/"Net Pay") at the bottom. |
 | `reject`         | Not a paid transaction: ใบเสนอราคา (quote), proforma invoice, order page still pending payment, wallet balance screenshot, generic photo, blurry image. |
 
 **If `slip_type == reject`:** reply with the exact Thai sentence
@@ -148,6 +149,10 @@ Pull these fields from the image:
       บัตรเครดิตธนาคารกรุงเทพ). NOT the payment rail you used
       to pay. If the bill is unpaid, there is no payment rail
       anyway — only the provider matters.
+    - `payslip` → the **employer** name (the company paying
+      the salary, from the header — e.g. "บริษัท ตัวอย่าง
+      จำกัด"). Not the payroll software vendor (PROSOFT,
+      Bplus, Tigersoft, etc.) shown as a watermark/logo.
   Examples:
     "ร้านถุงเงิน (ร้านณสา)"        → "ร้านณสา"
     "TrueMoney Wallet (ร้านสมชาย)" → "ร้านสมชาย"
@@ -223,13 +228,46 @@ these):**
 
 ### Step 2 — Map wallet (`wallet_id`)
 
-Pick exactly one wallet from the catalog for this entire slip
-(all line items share the same wallet). Match priority:
+Pick exactly one wallet from the catalog for the entire slip
+(all line items share the same wallet). The catalog gives you
+each wallet's `name` and `currency`. Users name wallets in many
+styles — by bank ("KBank", "SCB"), by function ("ร้านค้า",
+"เก็บออม", "ค่าใช้จ่ายบ้าน"), by purpose ("ทริปญี่ปุ่น"), or a
+mix — so run this **cascade** and stop at the first confident
+hit:
 
-1. Best match by **wallet name + bank context** (e.g. slip shows
-   "KBANK" → wallet whose name contains "KBank" / "กสิกร").
-2. If nothing is a confident match → **the first wallet** in the
-   catalog as a last-resort fallback.
+1. **Account-number match.** If the slip's `account_number`
+   (sender / source account from Step 1) appears in or matches a
+   wallet's name, use that wallet. This is the strongest signal
+   when present.
+
+2. **Bank / payment-app context.** Match by the bank or e-wallet
+   brand shown on the slip:
+     - "KBANK" / "กสิกร" → wallet name containing "KBank" or
+       "กสิกร"
+     - "SCB" → "SCB" / "ไทยพาณิชย์"
+     - "TrueMoney" / "ทรูมันนี่" → wallet name containing those
+     - generalises to any bank / e-wallet brand visible.
+
+3. **Functional name overlap.** If no bank context is visible
+   (e.g. retail receipts paid in cash, or wallets named by
+   purpose), pick the wallet whose name best fits the slip's
+   `summary` or use case:
+     - business expense slip + wallet "ร้านค้า" → "ร้านค้า"
+     - travel slip in foreign currency + "ทริปต่างประเทศ" → that
+     - groceries / household + "ค่าใช้จ่ายบ้าน" → that
+     - default personal spending + "ใช้จ่ายส่วนตัว" → that
+   Read each wallet name as the question *"does this wallet's
+   purpose naturally cover this slip?"*
+
+4. **Currency constraint** (always apply). Drop any wallet whose
+   `currency` differs from the slip's currency — a THB-only
+   wallet cannot hold a USD/JPY transfer. If exactly one wallet
+   remains after this filter, use it.
+
+5. **Last resort.** The first wallet in the catalog whose
+   currency matches the slip; if none matches, the first wallet
+   outright. Trust the user to correct it on the proposal card.
 
 `wallet_id` is **required** — it must always be one of the
 sync_ids in the catalog. Never null, never fabricated.
@@ -333,6 +371,32 @@ the item lines themselves:
 - **Service charge** (restaurants, if listed separately) →
   emit as a normal expense line with note = "ค่าบริการ"
   (or "Service Charge"), `include_in_report=true`.
+
+#### `payslip` → **N + M** tool calls (income lines + deductions)
+Emit one call per earnings line and one per deduction line in
+the upper transaction block. Share `wallet_id`, `date` (the pay
+period's end date if shown, else the slip's issue date),
+`currency_code`, `merchant_name` (= employer).
+
+- **Earnings lines** (เงินเดือน, โบนัส, OT, ค่าคอมมิชชั่น,
+  เบี้ยขยัน, ค่าตำแหน่ง, ...) → `type="income"`,
+  `amount` = the figure, `category_id` = best name match from
+  income categories (salary-style names match well here),
+  `note` = the earnings-line label (e.g. "เงินเดือน"),
+  `include_in_report=true`.
+  Skip any earnings row whose amount is `0.00` (e.g. "ภาษีนาย
+  จ้างออกให้ 0.00" — nothing was paid out).
+- **Deduction lines** (ภาษีเงินได้, ประกันสังคม, เงินสะสมกอง
+  ทุนสำรองฯ, หักเงินกู้, ...) → `type="expense"`,
+  `amount` = the deduction figure (positive),
+  `category_id` = best name match (a tax/insurance/savings
+  category if present, else nearest by name),
+  `note` = the deduction-line label, `include_in_report=true`.
+
+**Reconciliation:** `sum(earnings) − sum(deductions) == net pay`
+("รายได้สุทธิ" / "Net Pay"). If the numbers don't match, trust
+the printed net pay — emit one income line for that amount with
+`note = "รายได้สุทธิ"` instead of splitting.
 
 #### `reject` → **0** tool calls
 Reply with the exact Thai sentence "ไม่สามารถอ่านสลิปได้".
