@@ -76,11 +76,15 @@ chat.
 
 ## Scope
 
-This flow accepts **bank transfer slips** and **retail receipts**
-(in any language, any format). Anything else — random photos, app
-screenshots, blank images, unreadable images — is out of scope:
-reply with the exact Thai sentence "ไม่สามารถอ่านสลิปได้" and do
-NOT call the tool.
+This flow accepts **any image with a readable money amount** — bank
+transfer slips, retail receipts, restaurant bills, service invoices
+(utilities/contractor/professional/subscriptions), payslips, and
+even less formal sources like quotes, pending-order screens, app
+composer screens, or wallet balance screenshots. The single gate is
+the `amount`: if you can read at least one money figure, process it
+and call `propose_transaction`. If no money figure can be read
+(fully blurry, unreadable, or not money-related), reply with the
+exact Thai sentence "ไม่สามารถอ่านสลิปได้" and do NOT call the tool.
 
 ## Wallets + their categories (catalog for matching)
 
@@ -104,23 +108,32 @@ mapping, and how many tool calls you emit.
 | `retail_receipt` | Store header with tax id, **multiple** itemised lines with prices, sub-total/grand total, often cash/change. Examples: 7-Eleven, Lotus, Big C, Tesco, Tops, MaxValu. |
 | `restaurant_bill`| Food/drink items, often a table number or order id, may include service charge / VAT. Examples: cafés, ร้านอาหาร, MK, Sukishi. |
 | `transfer_slip`  | Bank, e-wallet, or QR-payment confirmation: **single amount**, "โอนเงิน"/"Transfer"/"ชำระ"/"Pay", sender → recipient names, reference number. Examples: KBank / SCB / TrueMoney / PromptPay / ร้านถุงเงิน confirmations. |
-| `utility_bill`   | "ใบแจ้งหนี้"/"Invoice"/"Statement" from a service provider — electricity, water, internet, mobile, credit card. Has billing period and/or **due date**, account/customer number. The amount may be marked "ยอดที่ต้องชำระ" / "Total Due". Examples: MEA, PEA, MWA, AIS, TRUE, 3BB, credit-card statements. |
+| `service_bill`   | "ใบแจ้งหนี้"/"Invoice"/"Statement" from a service provider for a **single-amount** payment. Covers: utilities (MEA, PEA, MWA, AIS, TRUE, 3BB, credit-card statements); **contractor / construction billing** (งวดงานก่อสร้าง, ใบแจ้งหนี้ผู้รับเหมา, BOQ summary); professional fees (สถาปนิก, ทนาย, ที่ปรึกษา, วิศวกร); subscriptions (Netflix, AWS, SaaS). Has an issuer + amount due (sometimes "ยอดที่ต้องชำระ"/"Total Due") + optional due date / billing period. Distinguish from `retail_receipt`: no itemised price-per-product list; the bill is for a service/work scope, not a basket of goods. |
 | `payslip`        | "ใบรับเงินเดือน" / "Pay Slip" / "Payroll" header from an employer. Has employee id/name, pay **period** (monthly), and two columns "รายได้"/"Earnings" and "รายการหัก"/"Deductions", plus a **net pay** ("รายได้สุทธิ"/"Net Pay") at the bottom. |
-| `reject`         | Not a paid transaction: ใบเสนอราคา (quote), proforma invoice, order page still pending payment, wallet balance screenshot, generic photo, blurry image. |
+| `reject`         | **No extractable `amount`.** Use this ONLY when the image has no money figure you can read — fully blurry, completely unreadable, or simply not money-related (e.g. a landscape photo, a meme). Any image with a readable amount is acceptable regardless of whether it is "officially" a paid transaction — accept quotes, proforma invoices, pending-payment orders, app composer screens, wallet balance screenshots, etc., and route them to the best-fit slip_type below. |
 
 **If `slip_type == reject`:** reply with the exact Thai sentence
 "ไม่สามารถอ่านสลิปได้" and do NOT call the tool. Stop here.
 
 **Ambiguity tiebreakers:**
-- A utility/credit-card payment **confirmation slip** (showing
-  the bill was paid via a bank/e-wallet) is `transfer_slip`, not
-  `utility_bill`. `utility_bill` is the bill itself before/at
-  payment.
+- A service-bill payment **confirmation slip** (showing the
+  bill was paid via a bank/e-wallet) is `transfer_slip`, not
+  `service_bill`. `service_bill` is the bill / invoice itself
+  before/at payment.
 - A receipt with only 1 line item is still `retail_receipt` /
   `restaurant_bill` — what matters is the format, not the count.
 - If a receipt has both food items and a tax-invoice header from
   a non-restaurant chain (e.g. Lotus food court), treat as
   `retail_receipt`.
+- **Has-amount fallback** — if the image clearly shows a money
+  figure but does not match any specific type above (e.g. a
+  quote, a pending-order screen, an in-app composer with the
+  amount filled in, a wallet balance screenshot), default to
+  `transfer_slip` with that single amount. Pick `expense` or
+  `income` based on the on-screen direction (saving / depositing
+  / receiving → `income`; spending / paying → `expense`;
+  ambiguous → `expense`). Only fall back to `reject` if no
+  amount can be read at all.
 
 ### Step 1 — Extract raw context (in your head)
 
@@ -144,11 +157,12 @@ Pull these fields from the image:
       are the payment rails, not the merchant. If the slip
       shows `<provider> (<real store>)`, extract only
       `<real store>`.
-    - `utility_bill` → the **service provider** (the company
-      billing you, e.g. MEA, PEA, MWA, AIS, TRUE, 3BB,
-      บัตรเครดิตธนาคารกรุงเทพ). NOT the payment rail you used
-      to pay. If the bill is unpaid, there is no payment rail
-      anyway — only the provider matters.
+    - `service_bill` → the **issuer / service provider** — the
+      company or individual billing you (MEA, PEA, AIS, 3BB,
+      บัตรเครดิตธนาคารกรุงเทพ, "บริษัทผู้รับเหมา ABC", "สถาปนิก
+      สมชาย", "Netflix"). NOT the payment rail you used to pay.
+      If the bill is unpaid, there is no payment rail anyway —
+      only the issuer matters.
     - `payslip` → the **employer** name (the company paying
       the salary, from the header — e.g. "บริษัท ตัวอย่าง
       จำกัด"). Not the payroll software vendor (PROSOFT,
@@ -157,8 +171,9 @@ Pull these fields from the image:
     "ร้านถุงเงิน (ร้านณสา)"        → "ร้านณสา"
     "TrueMoney Wallet (ร้านสมชาย)" → "ร้านสมชาย"
     "Tesco Lotus"                  → "Tesco Lotus" (no wrapper → keep)
-    utility_bill from MEA          → "การไฟฟ้านครหลวง"
-    utility_bill from AIS          → "AIS"
+    service_bill from MEA          → "การไฟฟ้านครหลวง"
+    service_bill from AIS          → "AIS"
+    service_bill from contractor   → "บริษัทผู้รับเหมา ABC"
   Pull from the slip header / provider block.
 - `bank_name` — issuing bank logo / abbreviation (KBANK, SCB,
   TrueMoney, etc.) if visible.
@@ -213,18 +228,99 @@ these):**
   is NOT consistent with `items_sum − grand_total` is a **promo
   advertisement** — skip it.
 
-**Reconciliation check (mandatory before Step 4):**
-1. Compute `items_sum` from your extracted line items.
-2. Compare with the slip's grand total.
-3. If `items_sum == grand_total` → emit items only. Do NOT
-   invent a discount line just because the word "ส่วนลด"
-   appears anywhere on the slip.
-4. If `items_sum − applied_discount == grand_total` → the
-   discount above the total is real; emit it as the discount
-   line.
-5. If numbers cannot be reconciled → trust the grand total and
-   emit a single transaction for that amount instead of split
-   items.
+**Reconciliation (MANDATORY before Step 4 — do the math, do not
+just list what you see):**
+
+**Step ① — Detect VAT mode.** Decide ONCE for the whole slip:
+- **Bundled / "VAT INCLUDED"** — telltales: the phrase
+  "VAT INCLUDED" / "ภาษีมูลค่าเพิ่มแล้ว" / "รวม VAT แล้ว",
+  OR the math `pre_vat + vat == grand_total` AND the grand
+  total already equals the post-discount paid amount.
+  → VAT is **already inside item prices.** **Do NOT emit a
+  separate VAT line.** The printed pre-VAT / VAT figures on the
+  slip are informational only.
+- **Added on top** — VAT appears as a separate paid amount AND
+  `(items − discount) + vat == grand_total`.
+  → Emit VAT as its own expense line.
+
+**Step ② — Pick ONE item-amount convention** for the whole slip:
+- **Convention A (simple)** — items at their final paid price;
+  their sum equals grand_total. **Do NOT emit a discount line**
+  even if the word "ส่วนลด" appears on the slip.
+- **Convention B (split)** — items at pre-discount price; emit
+  exactly ONE discount/income line so
+  `items_sum − discount == grand_total`.
+
+**Step ③ — Pre-flight verify (REQUIRED before any tool call):**
+
+  emit_sum =   Σ(expense amounts: items + VAT-on-top + service)
+             − Σ(income/discount amounts)
+
+  emit_sum MUST equal grand_total.
+
+If `emit_sum ≠ grand_total` you mixed conventions. The two
+most common mistakes:
+- Using post-discount item amounts AND still emitting a
+  discount line (double-counts the discount).
+- Emitting a VAT line when VAT is bundled (double-counts VAT).
+Drop the offending line(s), re-verify, then emit.
+
+If you still cannot reconcile, fall back to a **single expense
+line** for the grand total. Better to under-split than to
+over-count.
+
+**Worked example — VAT INCLUDED + applied discount.**
+
+Slip prints:
+```
+50 × เมล็ดกาแฟคั่วเข้ม                  11,875.00
+รวมเป็นเงิน                              12,500.00
+ส่วนลด                                      625.00
+จำนวนเงินหลังหักส่วนลด                   11,875.00
+ราคาไม่รวมภาษีมูลค่าเพิ่ม                11,098.13
+ภาษีมูลค่าเพิ่ม 7%                          776.87
+รวมทั้งสิ้น                              11,875.00
+VAT INCLUDED
+```
+
+VAT mode = **bundled** (phrase "VAT INCLUDED" + 11,098.13 +
+776.87 = 11,875). → Skip VAT line.
+Grand total = 11,875.
+
+Two valid emit shapes (pick ONE — both reconcile):
+- **Convention A** (1 call):
+    expense  11,875  (item, post-discount)
+    emit_sum = 11,875 ✓
+- **Convention B** (2 calls):
+    expense  12,500  (item, pre-discount = "รวมเป็นเงิน")
+    income      625  (discount)
+    emit_sum = 12,500 − 625 = 11,875 ✓
+
+**Forbidden mix** (this is the bug to avoid):
+    expense  11,875  (item, post-discount) ← uses paid price
+    income      625  (discount)             ← AND still emits discount
+    emit_sum = 11,875 − 625 = 11,250 ✗  ← off by exactly the discount
+
+If you emit a discount line, the item amount MUST be the
+pre-discount price ("รวมเป็นเงิน" / "Subtotal"). If you keep
+the post-discount price as the item, do NOT emit a discount line.
+
+**Worked example — amount-only (composer / quote / balance shot).**
+
+Image is an in-app composer screen. No merchant header, no
+itemised list, no grand-total label — just a focused amount
+field, e.g. `7,161 THB`, with a wallet name "เที่ยวอังกฤษ"
+nearby.
+
+slip_type = `transfer_slip` (has-amount fallback, see Step 0
+tiebreakers). Emit:
+    expense  7,161  note = "เที่ยวอังกฤษ" (or empty)
+    emit_sum = 7,161 ✓ (treat the single readable amount as
+    the grand_total)
+
+Do NOT reject this image — it has a readable money figure, so
+it qualifies. Reject only when no money figure can be read at
+all.
 
 ### Step 2 — Map wallet (`wallet_id`)
 
@@ -335,14 +431,18 @@ calls share the same `wallet_id`, `date`, `currency_code`,
 - `note` = a short purpose if visible (e.g. "ค่ากาแฟ"), else
   empty — the server appends the recipient.
 
-#### `utility_bill` → exactly **1** tool call
+#### `service_bill` → exactly **1** tool call
 - `type = "expense"`.
 - `amount` = the amount due / paid on the bill (use the grand
   total after any applied discount; ignore promo ads).
-- `category_id` prefers a bills / utilities-named category in
-  the wallet (e.g. "ค่าไฟ", "ค่าบิล") per Step 3 rules.
-- `note` = a short label of what the bill is for (e.g.
-  "ค่าไฟ", "อินเทอร์เน็ต", "บัตรเครดิต") — no merchant.
+- `category_id` prefers a bills / utilities / service-named
+  category per Step 3 (e.g. "ค่าไฟ", "ค่าบิล", "ที่อยู่อาศัย"
+  for construction). If nothing specific fits, fall through
+  Step 3's cascade.
+- `note` = a short label of what the bill is for, drawn from
+  the bill's subject (e.g. "ค่าไฟ", "อินเทอร์เน็ต",
+  "บัตรเครดิต", "ค่างวดงาน 2", "ค่าออกแบบ",
+  "Netflix subscription") — no merchant.
 
 #### `retail_receipt` / `restaurant_bill` → **N + optional**
 Emit one call per **transaction-relevant line** in the upper
@@ -353,15 +453,20 @@ the item lines themselves:
   `type="expense"`, `amount` = the item's price,
   `note` = item name **only** (e.g. "นม", "ค่ากาแฟ") — no
   merchant, `include_in_report=true`.
-- **VAT line** (only if shown as a separate paid amount above
-  the grand total; skip if "VAT INCLUDED" / bundled) →
-  `type="expense"`, `amount` = the VAT amount,
+- **VAT line** — emit ONLY when Step 1b VAT-mode is
+  *"added on top"*. SKIP entirely when VAT is bundled / "VAT
+  INCLUDED" (the slip's pre-VAT / VAT figures are
+  informational; emitting them double-counts). If unsure,
+  assume bundled. When emitted: `type="expense"`,
+  `amount` = the VAT amount,
   `category_id` = a tax/fee-named category if present, else
   nearest by name, `note` = "VAT 7%" (actual rate),
   `include_in_report=true`.
-- **Applied discount line** (only if the reconciliation check
-  in Step 1b proved it reduces the grand total; never emit one
-  for promo / coupon ads) → `type="income"`,
+- **Applied discount line** — emit ONLY when using Step 1b
+  Convention B (items at pre-discount prices). In Convention A
+  (items already at post-discount prices) you MUST skip this,
+  even if the word "ส่วนลด" appears on the slip. Never emit
+  one for promo / coupon ads. When emitted: `type="income"`,
   `amount` = discount magnitude (positive),
   `category_id` = nearest match in income categories (refund /
   cashback / discount names beat salary-style names),
