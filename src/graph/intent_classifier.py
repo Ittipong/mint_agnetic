@@ -178,53 +178,58 @@ async def classify_intent_node(
 
 
 def _last_human_text(msgs: list) -> str:
-    """Find the most recent HumanMessage's text content."""
+    """Find the most recent HumanMessage's text content, skipping
+    system markers like `[INTENT:transaction_saved]`. Markers are
+    routing signals from mobile, not the user's voice.
+    """
     for m in reversed(msgs):
         if isinstance(m, HumanMessage):
-            content = m.content
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                for blk in content:
-                    if isinstance(blk, dict) and blk.get("type") == "text":
-                        return str(blk.get("text", ""))
-            return ""
+            text = _text_of(m)
+            if text.strip().startswith("[INTENT:"):
+                continue
+            return text
     return ""
 
 
 def _last_ai_text(msgs: list) -> str:
-    """Find the most recent AIMessage's text content, bounded by the
-    last session boundary.
+    """Find the most recent AIMessage text from the CURRENT session.
 
-    A session boundary is an AIMessage carrying `tool_calls` — that's
-    the moment the previous quick-add was dispatched as a transaction
-    card. Anything before that point belongs to a CLOSED conversation
-    (user already saved/rejected on mobile) and must NOT leak into
-    the current turn's classifier context.
+    Two kinds of session boundary stop the search:
+    1. **AIMessage with tool_calls** — a quick-add proposal was
+       dispatched as a transaction card; the user has since saved or
+       rejected it on mobile, so anything before is closed.
+    2. **HumanMessage that's a marker** — `[INTENT:transaction_saved
+       /dismissed]`. The confirmation AIMessage that follows belongs
+       to the closed session, not to the new turn — skip it.
 
-    Without this bound, a user typing "เที่ยว" right after a confirmed
-    "กิน kfc 100" would inherit the prior AI's "ดูข้อมูลในการ์ดได้
-    เลยครับ" as `last_assistant`, which still implies a recent
-    add-transaction context. With the bound, `last_assistant` is empty
-    and "เที่ยว" is classified purely on its own merits (bare noun →
-    add_transaction).
+    Returning "" tells the classifier "no prior question to anchor
+    against" so it judges the user's text on its own merits.
     """
     for m in reversed(msgs):
         if isinstance(m, AIMessage):
-            # Session boundary — stop searching.
             if getattr(m, "tool_calls", None):
                 return ""
-            content = m.content
-            text = ""
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, list):
-                for blk in content:
-                    if isinstance(blk, dict) and blk.get("type") == "text":
-                        text = str(blk.get("text", ""))
-                        break
+            text = _text_of(m)
             if text.strip():
                 return text
+        elif isinstance(m, HumanMessage):
+            text = _text_of(m)
+            if text.strip().startswith("[INTENT:"):
+                # Marker = session boundary. Any earlier AI message
+                # belongs to a closed conversation.
+                return ""
+    return ""
+
+
+def _text_of(message) -> str:
+    """Pull plain text out of a Human/AIMessage (string or list content)."""
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for blk in content:
+            if isinstance(blk, dict) and blk.get("type") == "text":
+                return str(blk.get("text", ""))
     return ""
 
 

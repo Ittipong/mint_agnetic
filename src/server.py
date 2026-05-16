@@ -620,10 +620,11 @@ async def _stream_graph(
 
             elif kind == "on_chat_model_stream":
                 # Stream tokens from user-facing nodes only. `quick_add`
-                # is included so its ask-back text ("รับทราบว่าจะบันทึก
-                # 'เที่ยว' จำนวนเงินเท่าไหร่ครับ?") reaches the user when
-                # required fields are missing.
-                if node not in ("reason", "quick_add"):
+                # streams its ask-back text; `confirmation` streams the
+                # post-save / post-dismiss acknowledgement that
+                # references the actual transaction the user just acted
+                # on.
+                if node not in ("reason", "quick_add", "confirmation"):
                     continue
                 chunk = event["data"]["chunk"]
                 if not chunk.content:

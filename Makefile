@@ -136,6 +136,44 @@ lint: ## Run ruff linter
 typecheck: ## Run mypy type checker
 	$(UV) run mypy src/
 
+# === Chat Stream Test Plan ===
+# Plan doc: ../docs/test_scenarios/chat_stream_api_test_plan.md
+# Runner = the assistant (Claude); these targets bootstrap the log directory
+# and print the canonical Thai invocation to paste into chat.
+
+CHAT_TEST_PLAN     := ../docs/test_scenarios/chat_stream_api_test_plan.md
+CHAT_TEST_LOG_ROOT := ../mobile/test_logs/chat_stream
+
+chat-test-smoke: ## Bootstrap + print invocation for chat stream SMOKE (6 cases, ~2 min)
+	@mkdir -p $(CHAT_TEST_LOG_ROOT)
+	@echo "==> Chat Stream Test Plan — SMOKE"
+	@echo "    Plan:  $(CHAT_TEST_PLAN)"
+	@echo "    Cases: A1, B1, C1, D1, E1, F1  (6 total)"
+	@echo "    Logs:  $(CHAT_TEST_LOG_ROOT)/<timestamp>_smoke/"
+	@echo ""
+	@echo "    Paste to assistant:"
+	@echo "      \"รัน chat stream test plan\"   (default = smoke)"
+	@echo "      \"รัน chat stream smoke test\""
+
+chat-test-full: ## Bootstrap + print invocation for chat stream FULL (45 cases, ~25-30 min)
+	@mkdir -p $(CHAT_TEST_LOG_ROOT)
+	@echo "==> Chat Stream Test Plan — FULL"
+	@echo "    Plan:  $(CHAT_TEST_PLAN)"
+	@echo "    Cases: A1-A7, B1-B8, C1-C5, D1-D5, E1-E8, F1-F12  (45 total)"
+	@echo "    Logs:  $(CHAT_TEST_LOG_ROOT)/<timestamp>_full/"
+	@echo ""
+	@echo "    Paste to assistant:"
+	@echo "      \"รัน chat stream full test\""
+	@echo "      \"รัน chat stream test plan แบบเต็ม\""
+
+chat-test-replay-failed: ## Print invocation to replay only FAIL cases from the last run
+	@echo "==> Chat Stream Test Plan — replay failed"
+	@echo "    Paste to assistant:"
+	@echo "      \"รัน chat stream test plan เฉพาะเคส failed รอบที่แล้ว\""
+
+chat-test-plan: ## Open the chat stream test plan doc
+	@command -v open >/dev/null 2>&1 && open $(CHAT_TEST_PLAN) || less $(CHAT_TEST_PLAN)
+
 # === Docker ===
 
 docker-build: ## Build docker image

@@ -257,7 +257,8 @@ def _recent_dialog(msgs: list, window: int) -> list:
     Algorithm: drop everything up to and including the last AIMessage
     with tool_calls; from what remains, keep only Human/AI text
     messages (Tool messages and empty AI messages are routing
-    artifacts that confuse the LLM).
+    artifacts that confuse the LLM). Also drop `[INTENT:...]` markers
+    from mobile — those are system signals, not conversational text.
     """
     # Find the index of the most recent AIMessage with tool_calls —
     # that's the session boundary. Anything ≤ this index is closed.
@@ -270,6 +271,10 @@ def _recent_dialog(msgs: list, window: int) -> list:
     filtered = []
     for m in relevant:
         if isinstance(m, HumanMessage):
+            text = _text_preview(m).strip()
+            if text.startswith("[INTENT:"):
+                # Routing signal from mobile — not user speech.
+                continue
             filtered.append(m)
         elif isinstance(m, AIMessage):
             text = _text_preview(m).strip()

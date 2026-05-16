@@ -30,6 +30,10 @@ from src.graph.nodes import (
     ANALYZE_TOOL_NAMES,
 )
 from src.graph.compute_subgraph import act_node
+from src.graph.confirmation_node import (
+    confirmation_node,
+    is_confirmation_marker,
+)
 from src.graph.intent_classifier import classify_intent_node
 from src.graph.quick_add_node import quick_add_node
 from src.graph.slip_node import (
@@ -38,11 +42,34 @@ from src.graph.slip_node import (
     slip_cleanup_node,
 )
 
+from langchain_core.messages import HumanMessage as _HumanMessage
+
 
 def _route_by_input(state: AgentState) -> str:
-    """Entry router: slip subgraph for image turns, classifier for text-only."""
+    """Entry router: image turn → slip; save/dismiss marker →
+    confirmation; everything else → classifier.
+    """
     if state.get("images"):
         return "slip"
+    # Latest HumanMessage may be a system marker from mobile after
+    # the user saved or dismissed a transaction card. Route those to
+    # the dedicated confirmation node so they bypass intent
+    # classification and quick_add entirely.
+    msgs = state.get("messages") or []
+    for m in reversed(msgs):
+        if isinstance(m, _HumanMessage):
+            content = m.content
+            text = ""
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                for blk in content:
+                    if isinstance(blk, dict) and blk.get("type") == "text":
+                        text = str(blk.get("text", ""))
+                        break
+            if is_confirmation_marker(text):
+                return "confirmation"
+            break
     return "classify_intent"
 
 
@@ -118,18 +145,28 @@ def _build_builder() -> StateGraph:
     # same id-validation + SSE dispatch contract as the slip lane.
     builder.add_node("quick_add_tool", propose_validation_node)
 
+    # Confirmation node — reacts to mobile's save/dismiss marker by
+    # generating a short Thai acknowledgement that references the
+    # actual transaction the user just acted on.
+    builder.add_node("confirmation", confirmation_node)
+
     # ReAct loop nodes
     builder.add_node("reason", reason_node)
     builder.add_node("act", act_node)
     builder.add_node("tool", ToolNode(REGULAR_TOOLS))
 
-    # Entry: image turns go straight to slip; text turns hit the
-    # classifier first.
+    # Entry: image turns → slip, save/dismiss markers → confirmation,
+    # text turns → classifier.
     builder.add_conditional_edges(
         START,
         _route_by_input,
-        {"slip": "slip", "classify_intent": "classify_intent"},
+        {
+            "slip": "slip",
+            "confirmation": "confirmation",
+            "classify_intent": "classify_intent",
+        },
     )
+    builder.add_edge("confirmation", END)
 
     # Classifier → quick-add lane or regular ReAct
     builder.add_conditional_edges(
