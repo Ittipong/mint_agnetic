@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     vision_model: str = "bytedance-seed/seedream-4.5"
     vision_base_url: str = "https://openrouter.ai/api/v1"
 
+    # Intent classifier — runs on every text-only turn to decide whether
+    # the user is asking to RECORD a new transaction ("กิน kfc 100บาท")
+    # vs anything else (analytics question, chit-chat). The output
+    # routes between the quick-add lane and the regular ReAct lane.
+    # Picked for low cost + low latency; OpenRouter exposes Gemini.
+    intent_classifier_model: str = "google/gemini-2.5-flash-lite"
+    intent_classifier_base_url: str = "https://openrouter.ai/api/v1"
+
     server_host: str = "0.0.0.0"
     server_port: int = 8000
 

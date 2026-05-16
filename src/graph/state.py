@@ -1,6 +1,6 @@
 """ReAct agent state schema."""
 
-from typing import Annotated, NotRequired
+from typing import Annotated, Literal, NotRequired
 from typing_extensions import TypedDict
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
@@ -21,3 +21,9 @@ class AgentState(TypedDict):
     # `data:image/jpeg;base64,...`). Present → graph routes to slip_node
     # instead of the ReAct reason loop. Empty/missing → regular chat.
     images: NotRequired[list[str]]
+
+    # Set by `intent_classifier_node` for text-only turns. `add_transaction`
+    # routes to the quick_add lane (mirrors slip lane, no image);
+    # `other` routes to the regular ReAct reason loop. Not persisted
+    # across turns — re-classified on every new HumanMessage.
+    intent: NotRequired[Literal["add_transaction", "other"]]

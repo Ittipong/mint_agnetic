@@ -74,7 +74,25 @@ def create_vision_llm():
     return _make_typhoon_llm(settings.vision_model, settings.vision_base_url, temperature=0.1)
 
 
+def create_intent_classifier_llm():
+    """Cheap, low-latency LLM for the entry-router intent classifier.
+
+    Temperature pinned to 0 — classification is a discrete decision, not
+    a creative task; randomness only adds variance to the routing.
+    """
+    if _is_openrouter(settings.intent_classifier_base_url):
+        return _make_openrouter_llm(
+            settings.intent_classifier_model, [], temperature=0.0
+        )
+    return _make_typhoon_llm(
+        settings.intent_classifier_model,
+        settings.intent_classifier_base_url,
+        temperature=0.0,
+    )
+
+
 # Module-level singletons — imported by nodes.py / step.py
 llm = create_react_llm()
 codeact_llm = create_codeact_llm()
 vision_llm = create_vision_llm()
+intent_classifier_llm = create_intent_classifier_llm()

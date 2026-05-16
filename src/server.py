@@ -1,5 +1,14 @@
 """FastAPI server with SSE streaming for the ReAct chat agent."""
 
+# Load .env into os.environ BEFORE any import that reads tracing env
+# vars (langchain/langsmith clients read LANGCHAIN_TRACING_V2 etc. at
+# import time). pydantic-settings populates the Settings object but
+# does not inject into os.environ, so LangSmith would otherwise see no
+# tracing config and silently disable traces.
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import asyncio
 import json
 import re
@@ -610,8 +619,11 @@ async def _stream_graph(
                     yield _status_event("writing")
 
             elif kind == "on_chat_model_stream":
-                # Only stream tokens from the user-facing reasoner.
-                if node != "reason":
+                # Stream tokens from user-facing nodes only. `quick_add`
+                # is included so its ask-back text ("รับทราบว่าจะบันทึก
+                # 'เที่ยว' จำนวนเงินเท่าไหร่ครับ?") reaches the user when
+                # required fields are missing.
+                if node not in ("reason", "quick_add"):
                     continue
                 chunk = event["data"]["chunk"]
                 if not chunk.content:
