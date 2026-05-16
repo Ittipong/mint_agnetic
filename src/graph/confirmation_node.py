@@ -30,7 +30,7 @@ from langchain_core.runnables import RunnableConfig
 
 from src.debug_log import LogLevel as _LogLevel, log as _log
 from src.graph.state import AgentState
-from src.llm import llm
+from src.llm import transaction_llm
 
 
 SAVED_MARKER_RE = re.compile(r"\[INTENT:transaction_saved\]")
@@ -180,7 +180,7 @@ async def confirmation_node(state: AgentState, config: RunnableConfig) -> dict:
     )
 
     started = time.monotonic()
-    response = await llm.ainvoke([system_msg, human_msg])
+    response = await transaction_llm.ainvoke([system_msg, human_msg])
     duration_ms = int((time.monotonic() - started) * 1000)
 
     text = ""

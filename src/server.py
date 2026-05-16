@@ -352,6 +352,13 @@ _HARD_TIMEOUT_SEC = 120.0
 
 _SUGGEST_OPEN = "<suggestions>"
 _SUGGEST_CLOSE = "</suggestions>"
+
+# Some models (notably Amazon Nova Lite) emit `<thinking>...</thinking>`
+# blocks alongside the user-facing reply. The block is the model's
+# internal reasoning and must NOT reach the chat UI — strip it in the
+# token stream before suggestions parsing runs.
+_THINK_OPEN = "<thinking>"
+_THINK_CLOSE = "</thinking>"
 # Extracts and strips <suggestions>…</suggestions> from stored message content.
 _HISTORY_SUGGEST_RE = re.compile(
     r"<suggestions>(.*?)</suggestions>", re.DOTALL
@@ -459,6 +466,73 @@ class _SuggestionsFilter:
         return self._payloads
 
 
+class _ThinkingFilter:
+    """Streaming filter that drops `<thinking>...</thinking>` blocks.
+
+    Simpler than [_SuggestionsFilter] because we have no payload to
+    capture — the content between the tags is the model's reasoning
+    and gets thrown away. The trailing holdback prevents leaking a
+    partial open tag (e.g. "<think") to the client when the chunk
+    boundary lands mid-tag.
+    """
+
+    def __init__(self) -> None:
+        self._in_tag = False
+        self._hold = ""
+
+    @staticmethod
+    def _trailing_partial(text: str, target: str) -> int:
+        max_len = min(len(text), len(target) - 1)
+        for n in range(max_len, 0, -1):
+            if target.startswith(text[-n:]):
+                return n
+        return 0
+
+    def feed(self, token: str) -> str:
+        buf = self._hold + token
+        self._hold = ""
+        out = ""
+
+        while buf:
+            if not self._in_tag:
+                idx = buf.find(_THINK_OPEN)
+                if idx != -1:
+                    out += buf[:idx]
+                    buf = buf[idx + len(_THINK_OPEN):]
+                    self._in_tag = True
+                    continue
+                hold_len = self._trailing_partial(buf, _THINK_OPEN)
+                if hold_len:
+                    out += buf[:-hold_len]
+                    self._hold = buf[-hold_len:]
+                else:
+                    out += buf
+                buf = ""
+            else:
+                idx = buf.find(_THINK_CLOSE)
+                if idx != -1:
+                    buf = buf[idx + len(_THINK_CLOSE):]
+                    self._in_tag = False
+                    continue
+                hold_len = self._trailing_partial(buf, _THINK_CLOSE)
+                if hold_len:
+                    self._hold = buf[-hold_len:]
+                # Else discard buf entirely — it's reasoning text.
+                buf = ""
+
+        return out
+
+    def flush(self) -> str:
+        """Stream finished — emit any remaining holdback if we're outside
+        a tag; otherwise discard (malformed unterminated reasoning)."""
+        if self._in_tag:
+            self._hold = ""
+            return ""
+        tail = self._hold
+        self._hold = ""
+        return tail
+
+
 async def _stream_graph(
     user_id: str,
     thread_id: str,
@@ -525,6 +599,9 @@ async def _stream_graph(
     emitted_phases: set[str] = set()
     assistant_reply_chunks: list[str] = []
     suggestions_filter = _SuggestionsFilter()
+    # Strip <thinking>...</thinking> blocks BEFORE suggestions parsing
+    # so the inner content (model reasoning) never reaches the chat UI.
+    thinking_filter = _ThinkingFilter()
     # `on_tool_start` → start ts; popped on `on_tool_end` to compute
     # duration. Keyed by LangChain run_id so concurrent tool calls
     # (e.g., parallel `get_financial_advice` invocations) don't collide.
@@ -657,9 +734,13 @@ async def _stream_graph(
                 # (pure conversational), `thinking` stays visible until
                 # `done`, which is acceptable UX given tokens are
                 # streaming visibly.
-                # Strip <suggestions> tag from visible stream — surfaces as
-                # a separate `suggestions` SSE event after the run finishes.
-                visible = suggestions_filter.feed(chunk.content)
+                # Two-stage filter: strip <thinking> first (model reasoning
+                # that must never reach the UI), then strip <suggestions>
+                # (extracted into a separate SSE event after the run).
+                no_thinking = thinking_filter.feed(chunk.content)
+                if not no_thinking:
+                    continue
+                visible = suggestions_filter.feed(no_thinking)
                 if visible:
                     assistant_reply_chunks.append(visible)
                     yield _sse({"type": "token", "content": visible})
@@ -758,7 +839,15 @@ async def _stream_graph(
 
         _debug_log("STREAM", "Done", user_id=user_id)
 
-        # Drain any holdback that didn't form a tag.
+        # Drain holdbacks from both filters in the same order they run
+        # during streaming (thinking → suggestions). The thinking tail
+        # may be empty if the model never opened a `<think` prefix.
+        thinking_tail = thinking_filter.flush()
+        if thinking_tail:
+            visible_tail = suggestions_filter.feed(thinking_tail)
+            if visible_tail:
+                assistant_reply_chunks.append(visible_tail)
+                yield _sse({"type": "token", "content": visible_tail})
         tail = suggestions_filter.flush()
         if tail:
             assistant_reply_chunks.append(tail)

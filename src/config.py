@@ -1,13 +1,27 @@
-"""Application configuration via Pydantic Settings."""
+"""Application configuration via Pydantic Settings.
+
+.env is the single source of truth for runtime values — every model
+identifier, base URL, fallback list, port, and credential MUST be
+declared in `.env` (or `.env.example`). The defaults here are
+intentionally empty so a missing/typo'd entry surfaces immediately
+at startup via [Settings.validate_required] instead of silently
+shipping a stale hardcoded value (e.g. last quarter's vision model).
+"""
 
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, model_validator
 
 
 class Settings(BaseSettings):
-    """Environment variables for mint-agentic."""
+    """Environment variables for mint-agentic.
+
+    All LLM-related fields default to "" / [] — populate them via
+    `.env`. Required ones are checked at startup (see
+    [Settings.validate_required]); optional ones (fallback lists,
+    secondary classifier) stay empty when unset.
+    """
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -15,74 +29,120 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # ── Provider credentials ─────────────────────────────────────────
     openrouter_api_key: str = ""
     typhoon_api_key: str = Field(default="", validation_alias="TYPOHOON_API_KEY")
-    database_url: str = "postgresql://mint:mint123@localhost:5433/mint_agentic"
-    backend_database_url: str = "postgresql://postgres:postgres@localhost:5432/mint_money_dev"
-    langgraph_studio_port: int = 8080
 
-    # ReAct agent model (Typhoon)
+    # ── Databases ────────────────────────────────────────────────────
+    database_url: str = ""
+    backend_database_url: str = ""
+
+    # ── Studio + server ──────────────────────────────────────────────
+    langgraph_studio_port: int = 8080
+    server_host: str = "0.0.0.0"
+    server_port: int = 8000
+
+    # ── 1. ReAct (analytics chat) ────────────────────────────────────
     react_model: str = ""
     react_base_url: str = ""
-    # Fallback models for ReAct — only active when react_base_url is OpenRouter.
-    react_fallback_models: list[str] = Field(
-        default=[],
-    )
+    # Fallback active only when react_base_url is OpenRouter.
+    react_fallback_models: list[str] = Field(default=[])
 
-    # CodeAct agent model (OpenRouter)
+    # ── 2. CodeAct (SQL/analytics sandbox) ───────────────────────────
     codeact_model: str = ""
     codeact_base_url: str = ""
-    # Fallback models tried in order when primary is down/rate-limited.
-    codeact_fallback_models: list[str] = Field(
-        default=[],
-    )
+    codeact_fallback_models: list[str] = Field(default=[])
 
-    # Vision model — used by the slip-to-transaction subgraph only.
+    # ── 3. Vision (slip / receipt parsing) ───────────────────────────
     # Must be a multimodal model that accepts `image_url` content blocks
-    # in OpenAI-compatible chat format. Failure to invoke surfaces as
-    # an SSE error to the mobile client (no silent fallback).
-    vision_model: str = "bytedance-seed/seedream-4.5"
-    vision_base_url: str = "https://openrouter.ai/api/v1"
+    # in OpenAI-compatible chat format.
+    vision_model: str = ""
+    vision_base_url: str = ""
 
-    # Intent classifier — runs on every text-only turn to decide whether
-    # the user is asking to RECORD a new transaction ("กิน kfc 100บาท")
-    # vs anything else (analytics question, chit-chat). The output
-    # routes between the quick-add lane and the regular ReAct lane.
-    # Picked for low cost + low latency; OpenRouter exposes Gemini.
-    intent_classifier_model: str = "google/gemini-2.5-flash-lite"
-    intent_classifier_base_url: str = "https://openrouter.ai/api/v1"
+    # ── 4. Intent classifier (entry-router routing decision) ─────────
+    intent_classifier_model: str = ""
+    intent_classifier_base_url: str = ""
 
-    # Speech-to-text — used by the /chat/voice multipart endpoint to
-    # transcribe an uploaded audio clip (m4a/aac/mp3/wav, ≤60s) before
-    # the rest of the graph runs. Gemini 2.0 Flash Lite is the cheapest
-    # multimodal model on OpenRouter that accepts audio_inputs.
-    stt_model: str = "google/gemini-2.0-flash-lite-001"
-    stt_base_url: str = "https://openrouter.ai/api/v1"
+    # Optional fallback — retries on primary failure. Empty = no
+    # fallback (failures default to `intent='other'`, ReAct lane
+    # still works). Should be a DIFFERENT provider than primary so a
+    # regional outage doesn't take both down at once.
+    intent_classifier_fallback_model: str = ""
+    intent_classifier_fallback_base_url: str = ""
 
-    # Deployment environment — controls Postel's Law fallbacks per the
-    # project rule: in production, sync/voice endpoints tolerate
-    # imperfect payloads (missing optional fields, oddly-named mime
-    # types) and log warnings; in dev/test the same code paths must
-    # fail loudly so bad data is surfaced before it ships.
+    # ── 5. Transaction (quick_add + confirmation) ────────────────────
+    # Must support tool/function calling AND Thai text output. Used by
+    # `quick_add_node` (propose_transaction tool call) and
+    # `confirmation_node` (save/dismiss acknowledgement).
+    transaction_llm_model: str = ""
+    transaction_llm_base_url: str = ""
+
+    # ── 6. Speech-to-text (/chat/voice) ──────────────────────────────
+    # Multimodal model that accepts audio_input content blocks.
+    stt_model: str = ""
+    stt_base_url: str = ""
+
+    # ── Environment + logging ────────────────────────────────────────
+    # Postel's-law fallbacks (sync/voice payload tolerance) only kick
+    # in when production; dev/staging/test throw loudly so bad data
+    # is caught before shipping.
     environment: Literal["development", "staging", "test", "production"] = "development"
+
+    # `debug` = full node-internal traces (state, catalog counts,
+    # compression). `production` = milestones only (HTTP entry, stream
+    # lifecycle, tool boundaries with duration_ms, tool_calls summary).
+    log_mode: Literal["production", "debug"] = "debug"
 
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
 
-    server_host: str = "0.0.0.0"
-    server_port: int = 8000
-
-    # `debug` writes every node-internal detail (state_keys, catalog
-    # counts, history compression, etc.) — useful while iterating on
-    # prompts/tools. `production` drops to milestones only (HTTP entry,
-    # STREAM start/done/error, tool start/end + duration, LLM tool_calls
-    # summary). Toggle via env var `LOG_MODE`.
-    log_mode: Literal["production", "debug"] = "debug"
-
     @property
     def is_debug_log(self) -> bool:
         return self.log_mode == "debug"
+
+    # ── Validation ───────────────────────────────────────────────────
+    # Required-field check runs at startup. Optional fields
+    # (`intent_classifier_fallback_*`, fallback model lists) are
+    # allowed to stay empty.
+    _REQUIRED_FIELDS = (
+        ("openrouter_api_key",        "OPENROUTER_API_KEY"),
+        ("database_url",              "DATABASE_URL"),
+        ("react_model",               "REACT_MODEL"),
+        ("react_base_url",            "REACT_BASE_URL"),
+        ("codeact_model",             "CODEACT_MODEL"),
+        ("codeact_base_url",          "CODEACT_BASE_URL"),
+        ("vision_model",              "VISION_MODEL"),
+        ("vision_base_url",           "VISION_BASE_URL"),
+        ("intent_classifier_model",   "INTENT_CLASSIFIER_MODEL"),
+        ("intent_classifier_base_url","INTENT_CLASSIFIER_BASE_URL"),
+        ("transaction_llm_model",     "TRANSACTION_LLM_MODEL"),
+        ("transaction_llm_base_url",  "TRANSACTION_LLM_BASE_URL"),
+        ("stt_model",                 "STT_MODEL"),
+        ("stt_base_url",              "STT_BASE_URL"),
+    )
+
+    @model_validator(mode="after")
+    def _validate_required(self) -> "Settings":
+        """Fail loudly at import time when required `.env` entries are
+        missing — a silent empty model would produce confusing 400s
+        from the LLM provider at the first chat turn.
+
+        The fallback intent classifier and the *_FALLBACK_MODELS lists
+        are intentionally NOT required; an empty fallback simply
+        disables the retry.
+        """
+        missing = [
+            env for (attr, env) in self._REQUIRED_FIELDS
+            if not (getattr(self, attr) or "").strip()
+        ]
+        if missing:
+            joined = ", ".join(missing)
+            raise ValueError(
+                f"Missing required environment variables in .env: {joined}.\n"
+                f"Copy `.env.example` to `.env` and fill in the values."
+            )
+        return self
 
 
 settings = Settings()

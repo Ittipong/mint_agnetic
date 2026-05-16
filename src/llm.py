@@ -104,9 +104,58 @@ def create_intent_classifier_llm():
     )
 
 
+def create_intent_classifier_fallback_llm():
+    """Optional fallback LLM for the intent classifier.
+
+    Returns None when no fallback model is configured — caller treats
+    that as "no fallback available" and short-circuits to the existing
+    `intent='other'` default. We keep this opt-in to avoid silently
+    doubling per-classification cost (most workloads won't need it).
+
+    When configured, the fallback should be a DIFFERENT provider than
+    the primary so they don't share a single point of failure (one
+    OpenRouter region down, one model deprecation, etc.).
+    """
+    model = (settings.intent_classifier_fallback_model or "").strip()
+    if not model:
+        return None
+    if _is_openrouter(settings.intent_classifier_fallback_base_url):
+        return _make_openrouter_llm(model, [], temperature=0.0)
+    return _make_typhoon_llm(
+        model,
+        settings.intent_classifier_fallback_base_url,
+        temperature=0.0,
+    )
+
+
+def create_transaction_llm():
+    """LLM for the propose_transaction lanes (`quick_add` + `confirmation`).
+
+    Picked separately from the main ReAct LLM so we can use a cheaper /
+    faster model for the short, structured workload these nodes run:
+    short prompt, one tool call (or one short text reply), no ReAct loop.
+
+    Temperature 0.1 — we want deterministic wallet/category matches but
+    leave a tiny bit of slack for the confirmation node's natural-language
+    acknowledgement (e.g. "บันทึก KFC 100 บาทเรียบร้อย" vs "เก็บไว้แล้ว").
+    """
+    if _is_openrouter(settings.transaction_llm_base_url):
+        return _make_openrouter_llm(
+            settings.transaction_llm_model, [], temperature=0.1
+        )
+    return _make_typhoon_llm(
+        settings.transaction_llm_model,
+        settings.transaction_llm_base_url,
+        temperature=0.1,
+    )
+
+
 # Module-level singletons — imported by nodes.py / step.py
 llm = create_react_llm()
 codeact_llm = create_codeact_llm()
 vision_llm = create_vision_llm()
 intent_classifier_llm = create_intent_classifier_llm()
+# May be None — caller (classify_intent_node) checks before retry.
+intent_classifier_fallback_llm = create_intent_classifier_fallback_llm()
 stt_llm = create_stt_llm()
+transaction_llm = create_transaction_llm()

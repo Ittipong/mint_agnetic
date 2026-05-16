@@ -27,7 +27,7 @@ from langchain_core.runnables import RunnableConfig
 
 from src.debug_log import LogLevel as _LogLevel, log as _log
 from src.graph.state import AgentState
-from src.llm import intent_classifier_llm
+from src.llm import intent_classifier_fallback_llm, intent_classifier_llm
 
 
 def _ic_log(tag: str, msg: str, **kwargs: Any) -> None:
@@ -146,35 +146,70 @@ async def classify_intent_node(
         ensure_ascii=False,
     )
 
-    started = time.monotonic()
-    try:
-        response = await intent_classifier_llm.ainvoke(
-            [SystemMessage(content=_SYSTEM_PROMPT), HumanMessage(content=context_payload)]
-        )
-    except Exception as exc:
-        duration_ms = int((time.monotonic() - started) * 1000)
-        _ic_log(
-            "INTENT",
-            "classifier failed — defaulting to other",
-            duration_ms=duration_ms,
-            error_type=type(exc).__name__,
-            error=str(exc)[:200],
-            _level=_LogLevel.MILESTONE,
-        )
-        return {"intent": "other"}
+    messages = [
+        SystemMessage(content=_SYSTEM_PROMPT),
+        HumanMessage(content=context_payload),
+    ]
 
-    duration_ms = int((time.monotonic() - started) * 1000)
-    raw = (getattr(response, "content", "") or "").strip()
-    intent = _parse_intent(raw)
+    intent, source, duration_ms = await _classify_with_fallback(messages)
     _ic_log(
         "INTENT",
         "classified",
         intent=intent,
         duration_ms=duration_ms,
-        raw_preview=raw[:120].replace("\n", " "),
+        source=source,
         _level=_LogLevel.MILESTONE,
     )
     return {"intent": intent}
+
+
+async def _classify_with_fallback(messages: list) -> tuple[str, str, int]:
+    """Run the primary classifier; on any failure retry on the optional
+    fallback. Returns (intent, source, total_duration_ms).
+
+    `source` distinguishes "primary", "fallback", "primary_failed_default",
+    or "fallback_failed_default" so logs can attribute classification
+    decisions back to a specific model.
+    """
+    started = time.monotonic()
+    try:
+        response = await intent_classifier_llm.ainvoke(messages)
+        raw = (getattr(response, "content", "") or "").strip()
+        intent = _parse_intent(raw)
+        return intent, "primary", int((time.monotonic() - started) * 1000)
+    except Exception as exc:
+        primary_ms = int((time.monotonic() - started) * 1000)
+        _ic_log(
+            "INTENT",
+            "primary classifier failed",
+            duration_ms=primary_ms,
+            error_type=type(exc).__name__,
+            error=str(exc)[:200],
+            has_fallback=intent_classifier_fallback_llm is not None,
+            _level=_LogLevel.MILESTONE,
+        )
+
+    if intent_classifier_fallback_llm is None:
+        return "other", "primary_failed_default", int(
+            (time.monotonic() - started) * 1000
+        )
+
+    try:
+        response = await intent_classifier_fallback_llm.ainvoke(messages)
+        raw = (getattr(response, "content", "") or "").strip()
+        intent = _parse_intent(raw)
+        return intent, "fallback", int((time.monotonic() - started) * 1000)
+    except Exception as exc:
+        _ic_log(
+            "INTENT",
+            "fallback classifier also failed",
+            error_type=type(exc).__name__,
+            error=str(exc)[:200],
+            _level=_LogLevel.MILESTONE,
+        )
+        return "other", "fallback_failed_default", int(
+            (time.monotonic() - started) * 1000
+        )
 
 
 def _last_human_text(msgs: list) -> str:

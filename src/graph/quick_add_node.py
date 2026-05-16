@@ -28,7 +28,7 @@ from src.entity_catalog import (
     render_for_slip,
 )
 from src.graph.state import AgentState
-from src.llm import llm  # same chat LLM as the ReAct loop (text-only is fine)
+from src.llm import transaction_llm
 from src.tools.transaction import propose_transaction
 
 _logger = logging.getLogger(__name__)
@@ -209,7 +209,7 @@ async def quick_add_node(state: AgentState, config: RunnableConfig) -> dict:
         _level=_LogLevel.MILESTONE,
     )
 
-    llm_with_tool = llm.bind_tools([propose_transaction])
+    llm_with_tool = transaction_llm.bind_tools([propose_transaction])
 
     started = time.monotonic()
     response = await llm_with_tool.ainvoke([system_msg, *history])
