@@ -74,6 +74,19 @@ def create_vision_llm():
     return _make_typhoon_llm(settings.vision_model, settings.vision_base_url, temperature=0.1)
 
 
+def create_stt_llm():
+    """Speech-to-text LLM. Routes through OpenRouter so we get one bill
+    and one auth flow for every multimodal call (vision, audio, text).
+
+    Temperature pinned to 0 — transcription is a deterministic task; any
+    randomness only introduces variance in the produced transcript.
+
+    Gemini 2.0 Flash Lite accepts audio inputs via OpenRouter's
+    OpenAI-compatible `input_audio` content block (see `stt_node.py`).
+    """
+    return _make_openrouter_llm(settings.stt_model, [], temperature=0.0)
+
+
 def create_intent_classifier_llm():
     """Cheap, low-latency LLM for the entry-router intent classifier.
 
@@ -96,3 +109,4 @@ llm = create_react_llm()
 codeact_llm = create_codeact_llm()
 vision_llm = create_vision_llm()
 intent_classifier_llm = create_intent_classifier_llm()
+stt_llm = create_stt_llm()

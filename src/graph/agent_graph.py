@@ -41,14 +41,21 @@ from src.graph.slip_node import (
     propose_validation_node,
     slip_cleanup_node,
 )
+from src.graph.stt_node import stt_node, stt_error_node
 
 from langchain_core.messages import HumanMessage as _HumanMessage
 
 
 def _route_by_input(state: AgentState) -> str:
-    """Entry router: image turn → slip; save/dismiss marker →
-    confirmation; everything else → classifier.
+    """Entry router: audio turn → stt; image turn → slip; save/dismiss
+    marker → confirmation; everything else → classifier.
+
+    Audio takes priority over images so a future "voice + slip" turn
+    can be handled by chaining (stt → slip) once the spec lands;
+    today the voice endpoint never sends images so the order is moot.
     """
+    if state.get("audio_data"):
+        return "stt"
     if state.get("images"):
         return "slip"
     # Latest HumanMessage may be a system marker from mobile after
@@ -117,6 +124,35 @@ def _should_route(state: AgentState) -> str:
     return "tool"
 
 
+def _route_after_stt(state: AgentState) -> str:
+    """After stt_node: short-circuit on error, otherwise fall back to
+    the regular text entry (intent classifier + confirmation marker).
+
+    Mirrors `_route_by_input` for the non-audio branches so a future
+    feature like "send a save/dismiss marker by voice" still routes
+    through `confirmation`. Today the mobile client only uses voice
+    for free-form chat, so the practical path is stt → classify_intent.
+    """
+    if state.get("stt_error"):
+        return "stt_error"
+    msgs = state.get("messages") or []
+    for m in reversed(msgs):
+        if isinstance(m, _HumanMessage):
+            content = m.content
+            text = ""
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                for blk in content:
+                    if isinstance(blk, dict) and blk.get("type") == "text":
+                        text = str(blk.get("text", ""))
+                        break
+            if is_confirmation_marker(text):
+                return "confirmation"
+            break
+    return "classify_intent"
+
+
 def _route_after_slip(state: AgentState) -> str:
     """After slip_node: execute tool if the LLM called one, else clean up."""
     last_msg = state["messages"][-1]
@@ -127,6 +163,13 @@ def _route_after_slip(state: AgentState) -> str:
 
 def _build_builder() -> StateGraph:
     builder = StateGraph(AgentState)
+
+    # Voice lane (audio → transcript → reroute as text). `stt` runs
+    # the speech-to-text model and either short-circuits to
+    # `stt_error` on failure or hands off to the normal text entry
+    # (intent classifier / confirmation).
+    builder.add_node("stt", stt_node)
+    builder.add_node("stt_error", stt_error_node)
 
     # Slip subgraph (vision LLM → validate + dispatch propose_transaction)
     builder.add_node("slip", slip_node)
@@ -155,18 +198,33 @@ def _build_builder() -> StateGraph:
     builder.add_node("act", act_node)
     builder.add_node("tool", ToolNode(REGULAR_TOOLS))
 
-    # Entry: image turns → slip, save/dismiss markers → confirmation,
-    # text turns → classifier.
+    # Entry: audio turns → stt, image turns → slip, save/dismiss
+    # markers → confirmation, text turns → classifier.
     builder.add_conditional_edges(
         START,
         _route_by_input,
         {
+            "stt": "stt",
             "slip": "slip",
             "confirmation": "confirmation",
             "classify_intent": "classify_intent",
         },
     )
     builder.add_edge("confirmation", END)
+
+    # Voice lane: stt → (error|classify|confirmation). The error node
+    # is the only terminal — successful transcription rejoins the
+    # standard text flow at classify_intent.
+    builder.add_conditional_edges(
+        "stt",
+        _route_after_stt,
+        {
+            "stt_error": "stt_error",
+            "classify_intent": "classify_intent",
+            "confirmation": "confirmation",
+        },
+    )
+    builder.add_edge("stt_error", END)
 
     # Classifier → quick-add lane or regular ReAct
     builder.add_conditional_edges(

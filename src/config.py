@@ -52,6 +52,24 @@ class Settings(BaseSettings):
     intent_classifier_model: str = "google/gemini-2.5-flash-lite"
     intent_classifier_base_url: str = "https://openrouter.ai/api/v1"
 
+    # Speech-to-text — used by the /chat/voice multipart endpoint to
+    # transcribe an uploaded audio clip (m4a/aac/mp3/wav, ≤60s) before
+    # the rest of the graph runs. Gemini 2.0 Flash Lite is the cheapest
+    # multimodal model on OpenRouter that accepts audio_inputs.
+    stt_model: str = "google/gemini-2.0-flash-lite-001"
+    stt_base_url: str = "https://openrouter.ai/api/v1"
+
+    # Deployment environment — controls Postel's Law fallbacks per the
+    # project rule: in production, sync/voice endpoints tolerate
+    # imperfect payloads (missing optional fields, oddly-named mime
+    # types) and log warnings; in dev/test the same code paths must
+    # fail loudly so bad data is surfaced before it ships.
+    environment: Literal["development", "staging", "test", "production"] = "development"
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
     server_host: str = "0.0.0.0"
     server_port: int = 8000
 

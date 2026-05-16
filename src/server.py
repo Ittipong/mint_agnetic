@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, AsyncGenerator
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
@@ -464,6 +464,8 @@ async def _stream_graph(
     thread_id: str,
     message: str,
     image_b64s: list[str] | None = None,
+    audio_data: bytes | None = None,
+    audio_mime: str | None = None,
 ) -> AsyncGenerator[str, None]:
     image_b64s = image_b64s or []
     _debug_log(
@@ -473,10 +475,16 @@ async def _stream_graph(
         thread_id=thread_id,
         message=message[:50],
         image_count=len(image_b64s),
+        has_audio=bool(audio_data),
+        audio_bytes=(len(audio_data) if audio_data else 0),
+        audio_mime=audio_mime or "",
     )
 
     # Upsert thread metadata before the run — first message becomes the title.
-    if _pool is not None:
+    # Voice turns start with an empty placeholder; the transcript only
+    # exists after stt_node runs, so we skip the thread upsert here for
+    # voice and let the post-run preview update carry the load.
+    if _pool is not None and message:
         try:
             inserted = await threads_repo.upsert_on_first_message(
                 _pool, thread_id, user_id, message,
@@ -487,8 +495,15 @@ async def _stream_graph(
             _debug_log("THREAD", "Upsert failed", error=str(exc), thread_id=thread_id)
 
     config = {"configurable": {"thread_id": thread_id}}
+    # For voice turns the message starts empty — stt_node replaces the
+    # latest HumanMessage with the transcript before any downstream
+    # node looks at it. Always include a placeholder so LangGraph has
+    # something to anchor the turn on (the message-add reducer drops
+    # empty content, but the HumanMessage object itself must exist for
+    # the entry router to find it).
+    placeholder_human = HumanMessage(content=message or "[INTENT:voice_pending]")
     input_data: dict[str, Any] = {
-        "messages": [HumanMessage(content=message)],
+        "messages": [placeholder_human],
         "user_id": user_id,
         # Always reset `images` per turn. The checkpointer persists every
         # state field across turns; if we omit `images` on a text-only
@@ -497,6 +512,13 @@ async def _stream_graph(
         # subgraph — producing a stray proposal for a question like "hi".
         # Explicit empty list forces the router back onto the ReAct lane.
         "images": image_b64s or [],
+        # Same reset story for the voice fields — without these a stale
+        # `audio_data` from a previous turn would survive in state and
+        # mis-route the next plain-text turn into stt_node.
+        "audio_data": audio_data,
+        "audio_mime": audio_mime,
+        "stt_error": None,
+        "transcript": None,
     }
 
     # Track status emission so we never repeat a phase inside one run.
@@ -685,6 +707,48 @@ async def _stream_graph(
                 else:
                     _debug_log("STREAM", "data event with null payload — skipped")
 
+            elif kind == "on_custom_event" and event.get("name") == "stt_transcript":
+                # Voice lane — emit BEFORE any token events so the
+                # mobile client can render the transcript in the user
+                # bubble while the assistant's reply is still streaming.
+                payload = event.get("data") or {}
+                transcript = (payload.get("text") or "").strip()
+                _debug_log(
+                    "STREAM",
+                    "transcript event",
+                    transcript_len=len(transcript),
+                    transcript_preview=transcript[:80].replace("\n", " "),
+                )
+                # Persist now so threads_repo has the real first message
+                # (the placeholder we sent in was "[INTENT:voice_pending]").
+                # The thread is auto-created on first text turn; voice
+                # turns hit this branch instead.
+                if _pool is not None and transcript:
+                    try:
+                        inserted = await threads_repo.upsert_on_first_message(
+                            _pool, thread_id, user_id, transcript,
+                        )
+                        if inserted:
+                            _debug_log("THREAD", "Created (voice)", thread_id=thread_id)
+                    except Exception as exc:
+                        _debug_log(
+                            "THREAD",
+                            "Upsert failed (voice)",
+                            error=str(exc),
+                            thread_id=thread_id,
+                        )
+                yield _sse({"type": "transcript", "text": transcript})
+
+            elif kind == "on_custom_event" and event.get("name") == "stt_error_event":
+                payload = event.get("data") or {}
+                reason = payload.get("reason") or "transcription_failed"
+                _debug_log(
+                    "STREAM",
+                    "stt_error event",
+                    reason=reason,
+                )
+                yield _sse({"type": "stt_error", "reason": reason})
+
         if stream_aborted:
             # The hard-timeout branch already emitted an `error` event.
             # Skip the success-path tail/suggestions/persist — there's no
@@ -776,6 +840,117 @@ async def chat_stream(req: ChatRequest, request: Request):
 
     return StreamingResponse(
         _stream_graph(req.user_id, req.thread_id, req.message, req.image_b64s),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# Voice upload — capped well below the 6 MB hard cap inside stt_node.
+# Mobile clips are typically <250 KB at 60s (AAC 32 kbps), so a 5 MB
+# ceiling leaves headroom for an outlier without inviting abuse.
+_MAX_VOICE_BYTES = 5 * 1024 * 1024
+
+# Suffix → mime fallback when the multipart envelope lies (some HTTP
+# clients send `application/octet-stream` for everything).
+_VOICE_SUFFIX_MIME = {
+    ".m4a": "audio/m4a",
+    ".mp4": "audio/mp4",
+    ".aac": "audio/aac",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".webm": "audio/webm",
+    ".flac": "audio/flac",
+}
+
+
+def _detect_audio_mime(upload: UploadFile) -> str:
+    """Decide on the mime to feed stt_node.
+
+    Priority: declared `content_type` (when not the generic
+    octet-stream placeholder) → filename extension → "audio/m4a".
+    """
+    declared = (upload.content_type or "").lower()
+    if declared and declared not in {"application/octet-stream", ""}:
+        return declared
+    filename = (upload.filename or "").lower()
+    for suffix, mime in _VOICE_SUFFIX_MIME.items():
+        if filename.endswith(suffix):
+            return mime
+    return "audio/m4a"
+
+
+@app.post(
+    "/chat/voice",
+    tags=["Chat"],
+    summary="Stream a chat reply for an uploaded voice clip (SSE)",
+    description=(
+        "Multipart upload (`audio` file + `user_id` + `thread_id`). The "
+        "server runs speech-to-text on the clip, then routes the "
+        "transcript through the same graph as `/chat/stream`. Emits two "
+        "voice-specific SSE event types **in addition to** the standard "
+        "set documented on `/chat/stream`:\n\n"
+        "| `type`        | Payload fields | When |\n"
+        "|---------------|----------------|------|\n"
+        "| `transcript`  | `text`          | Emitted once after STT, before any token. |\n"
+        "| `stt_error`   | `reason` (`no_speech`/`too_short`/`transcription_failed`) | STT failed — token stream will not appear. |\n\n"
+        "Accepted audio formats: m4a / aac / mp3 / wav / ogg / webm / "
+        "flac, up to 5 MB. The mobile client uploads ~60s AAC clips."
+    ),
+    responses=_SSE_RESPONSES
+    | {
+        413: {"model": ErrorOut, "description": "Audio exceeds 5 MB limit."},
+        400: {"model": ErrorOut, "description": "Missing or empty audio file."},
+    },
+)
+async def chat_voice(
+    request: Request,
+    audio: UploadFile = File(..., description="Audio clip (m4a/aac/mp3/wav, ≤60s, ≤5 MB)"),
+    user_id: str = Form(..., description="Owner user UUID"),
+    thread_id: str = Form(..., description="Client-generated thread id (UUID)."),
+):
+    if _graph is None:
+        raise HTTPException(status_code=503, detail="Graph not ready")
+
+    client = request.client
+    audio_bytes = await audio.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="audio file is empty")
+    if len(audio_bytes) > _MAX_VOICE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"audio exceeds {_MAX_VOICE_BYTES // (1024 * 1024)} MB limit",
+        )
+
+    mime = _detect_audio_mime(audio)
+    _debug_log(
+        "HTTP",
+        "POST /chat/voice",
+        client=f"{client.host}:{client.port}" if client else "unknown",
+        thread_id=thread_id,
+        user_id=user_id,
+        filename=audio.filename or "",
+        content_type=audio.content_type or "",
+        resolved_mime=mime,
+        bytes=len(audio_bytes),
+    )
+
+    return StreamingResponse(
+        _stream_graph(
+            user_id=user_id,
+            thread_id=thread_id,
+            # Empty message — stt_node replaces the latest HumanMessage
+            # with the produced transcript before any downstream node
+            # reads it.
+            message="",
+            image_b64s=None,
+            audio_data=audio_bytes,
+            audio_mime=mime,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

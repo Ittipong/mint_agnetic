@@ -27,3 +27,31 @@ class AgentState(TypedDict):
     # `other` routes to the regular ReAct reason loop. Not persisted
     # across turns — re-classified on every new HumanMessage.
     intent: NotRequired[Literal["add_transaction", "other"]]
+
+    # Voice-chat input: raw audio bytes from `POST /chat/voice` plus
+    # the mime type detected from the upload (e.g. "audio/m4a"). When
+    # present the entry router sends the turn through `stt_node` first
+    # — the resulting transcript is stuffed into the latest
+    # HumanMessage and the graph continues like a text turn.
+    #
+    # NotRequired so existing text-only callers (and Studio JSON) do
+    # not need to know about these fields. The bytes never make it
+    # into the checkpoint — `stt_node` strips them on the way out so
+    # the AsyncPostgresSaver never persists a multi-megabyte blob.
+    audio_data: NotRequired[bytes | None]
+    audio_mime: NotRequired[str | None]
+
+    # Set by `stt_node` to the produced transcript text. Currently
+    # informational only — the same text is also injected into the
+    # latest HumanMessage so downstream nodes see it as if the user
+    # typed it. Useful when the SSE layer wants to emit a
+    # `transcript` event without re-reading messages.
+    transcript: NotRequired[str | None]
+
+    # Failure mode marker set by `stt_node`:
+    #   "no_speech"            — model returned empty text
+    #   "too_short"            — audio bytes below the 0.5s heuristic
+    #   "transcription_failed" — model raised or returned malformed output
+    # When set, the entry router skips downstream nodes and lands on
+    # `stt_error_node` which dispatches an SSE error event and ends.
+    stt_error: NotRequired[Literal["no_speech", "too_short", "transcription_failed"] | None]
