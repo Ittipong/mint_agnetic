@@ -39,9 +39,19 @@ def _qa_log(tag: str, msg: str, **kwargs: Any) -> None:
     _log(tag, msg, level=level, **kwargs)
 
 
-def _build_quick_add_prompt(current_date: str, wallet_category_map: str) -> str:
+def _build_quick_add_prompt(
+    current_date: str,
+    wallet_category_map: str,
+    currency_code: str,
+    currency_symbol: str,
+) -> str:
     """Multi-turn prompt — ask back when required fields are missing,
     fire `propose_transaction` when the user has provided enough info.
+
+    `currency_code` / `currency_symbol` come from the user's app
+    settings (forwarded on every chat request). The prompt does NOT
+    contain any THB-specific rule any more — the LLM just copies the
+    forwarded values into the tool call.
     """
     return f"""You are a quick-add agent inside Mint Money.
 
@@ -53,6 +63,15 @@ This may take ONE turn ("กิน kfc 100บาท" → done) or MULTIPLE turns
 will see the full recent conversation each turn — merge what the
 user said earlier with the latest reply before deciding what to do.
 
+## Currency defaults (from the user's app settings)
+
+- `currency_code` = `{currency_code}`
+- `currency_symbol` = `{currency_symbol}`
+
+Copy these values verbatim into the tool call. They came from the
+user's settings screen, so they are already correct. Do not infer
+a different currency from anything the user typed.
+
 ## Wallets + their categories (catalog for matching)
 
 ONLY `general` (cash/bank) wallets are listed — credit-card and goal
@@ -61,17 +80,29 @@ verbatim below. Never fabricate one.
 
 {wallet_category_map}
 
-## REQUIRED fields (gate the tool call on these two)
+## REQUIRED fields — gate the tool call on EXACTLY these two
 
 1. **name / note** — what was bought, paid, or received. A short
    Thai noun phrase. Examples: "เที่ยว", "กินข้าว", "ค่าไฟ",
    "ค่ากาแฟ", "เงินเดือน". The user's first turn almost always
    gives you this.
 2. **amount** — a positive number. May be in the first turn
-   ("กิน kfc 100") or in a follow-up turn after you ask.
+   ("กิน kfc 100") or in a follow-up turn after you ask. Strip any
+   currency symbol or word the user typed ("$", "฿", "บาท",
+   "ดอลลาร์") — keep only the numeric value.
 
-If EITHER is missing, do NOT call the tool. Ask back instead
-(see "Asking back" below).
+**DECISION RULE (read this carefully):**
+
+If BOTH name and amount are available across the conversation
+window (count what the user said in ANY prior turn, not just the
+latest reply) → CALL THE TOOL IMMEDIATELY. Do not ask anything
+else. Optional fields below all have defaults — use them.
+
+If EITHER is missing → ask back (see "Asking back" below).
+
+NEVER ask about anything OTHER than name and amount. Wallet,
+category, date, merchant, type — these are NEVER worth a question;
+you have defaults for all of them.
 
 ## OPTIONAL fields — apply defaults silently
 
@@ -93,7 +124,9 @@ asking the user:
   whose `type` matches. Prefer the most specific name that fits; use
   a generic catch-all ("อาหาร", "ช้อปปิ้ง") only when no narrower
   name applies. "อื่นๆ"/"Other" is a LAST resort.
-- **`currency_code` / `currency_symbol`** — always THB / ฿.
+- **`currency_code` / `currency_symbol`** — use the values supplied
+  in the "Currency defaults" section below verbatim. The mobile
+  client decides the currency for the user.
 - **`merchant_name`** — fill if the user named a brand/vendor (KFC,
   Starbucks); else leave empty.
 - **`include_in_report`** — always true.
@@ -138,8 +171,8 @@ window — merge prior turns with the current reply), call
 - `wallet_id` = matched sync_id (cascade above)
 - `category_id` = matched sync_id (cascade above)
 - `merchant_name` = brand/vendor string, else empty
-- `currency_code` = "THB"
-- `currency_symbol` = "฿"
+- `currency_code` = "{currency_code}"   (see "Currency defaults")
+- `currency_symbol` = "{currency_symbol}"   (see "Currency defaults")
 - `include_in_report` = true
 
 After the tool call, reply with exactly this Thai sentence:
@@ -184,8 +217,15 @@ async def quick_add_node(state: AgentState, config: RunnableConfig) -> dict:
     wallet_category_map = render_for_slip(catalog, by_wallet)
 
     current_date = date.today().isoformat()
+    currency_code = (state.get("default_currency_code") or "THB").strip() or "THB"
+    currency_symbol = (state.get("default_currency_symbol") or "฿").strip() or "฿"
     system_msg = SystemMessage(
-        content=_build_quick_add_prompt(current_date, wallet_category_map)
+        content=_build_quick_add_prompt(
+            current_date,
+            wallet_category_map,
+            currency_code,
+            currency_symbol,
+        )
     )
 
     # Pass a sliding window of recent messages so the LLM can stitch

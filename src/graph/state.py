@@ -48,6 +48,17 @@ class AgentState(TypedDict):
     # `transcript` event without re-reading messages.
     transcript: NotRequired[str | None]
 
+    # User's preferred display currency, forwarded from the mobile
+    # client's settings on every chat request. Propose-transaction
+    # tool calls in `quick_add_node` default to these values so the
+    # transaction card matches what the user sees elsewhere in the
+    # app. Slip parsing still extracts the slip's actual currency
+    # (a foreign receipt should not be coerced into THB) and only
+    # falls back to these when the slip didn't carry one. Default
+    # THB / ฿ keeps callers that haven't migrated working.
+    default_currency_code: NotRequired[str]
+    default_currency_symbol: NotRequired[str]
+
     # Failure mode marker set by `stt_node`:
     #   "no_speech"            — model returned empty text
     #   "too_short"            — audio bytes below the 0.5s heuristic

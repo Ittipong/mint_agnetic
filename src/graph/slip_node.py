@@ -62,11 +62,20 @@ def _slip_log(tag: str, msg: str, **kwargs) -> None:
 def _build_slip_system_prompt(
     current_date: str,
     wallet_category_map: str,
+    default_currency_code: str,
+    default_currency_symbol: str,
 ) -> str:
-    """Single-shot prompt — three-step chain-of-thought, single call."""
+    """Single-shot prompt — three-step chain-of-thought, single call.
+
+    `default_currency_*` are the user's app settings (forwarded from
+    the chat request). The slip itself usually shows a real currency
+    (THB / USD / JPY printed on the receipt) — use that. Only when
+    the slip is silent on currency, fall back to the user's default.
+    """
     return f"""You are a slip-parsing agent inside Mint Money.
 
 **Today's date:** {current_date}
+**User's default currency (use as fallback only):** {default_currency_code} / {default_currency_symbol}
 
 Your job: look at the attached image, decide whether it is a slip /
 receipt, and turn it into one or more transactions by calling the
@@ -508,8 +517,10 @@ Reply with the exact Thai sentence "ไม่สามารถอ่านส�
 
 ## Common conventions
 
-- `currency_code` / `currency_symbol` — default THB / ฿ unless the
-  slip clearly shows another currency.
+- `currency_code` / `currency_symbol` — use the currency printed
+  on the slip if any (THB, USD, JPY, …). When the slip is silent
+  on currency, fall back to the user's default ({default_currency_code}
+  / {default_currency_symbol}).
 - `merchant_name` — the store/vendor/employer string; the server
   appends it to `note` for display.
 - Do NOT split a transfer slip into multiple transactions — splitting
@@ -576,7 +587,12 @@ async def slip_node(state: AgentState, config: RunnableConfig) -> dict:
 
     current_date = date.today().isoformat()
     system_msg = SystemMessage(
-        content=_build_slip_system_prompt(current_date, wallet_category_map)
+        content=_build_slip_system_prompt(
+            current_date,
+            wallet_category_map,
+            (state.get("default_currency_code") or "THB").strip() or "THB",
+            (state.get("default_currency_symbol") or "฿").strip() or "฿",
+        )
     )
 
     # Pull the latest human message text (typically the intent marker)
@@ -764,6 +780,14 @@ async def propose_validation_node(
     if not user_id:
         raise ValueError("user_id required for propose_validation_node")
 
+    # Currency fallback chain: tool_call args > user default > THB.
+    # Quick-add hard-copies the default into args (per prompt); slip
+    # may extract a different currency from the receipt itself. Either
+    # way, the explicit value wins — these only kick in when the LLM
+    # left the field empty.
+    default_currency_code = (state.get("default_currency_code") or "THB").strip() or "THB"
+    default_currency_symbol = (state.get("default_currency_symbol") or "฿").strip() or "฿"
+
     msgs = state.get("messages") or []
     if not msgs:
         return {}
@@ -910,8 +934,8 @@ async def propose_validation_node(
             "wallet_id": wallet_id,
             "category_id": category_id,
             "note": final_note,
-            "currency_code": args.get("currency_code") or "THB",
-            "currency_symbol": args.get("currency_symbol") or "฿",
+            "currency_code": args.get("currency_code") or default_currency_code,
+            "currency_symbol": args.get("currency_symbol") or default_currency_symbol,
             "includeInReport": include_in_report,
         }
         group_transactions.append(item)
@@ -959,10 +983,10 @@ async def propose_validation_node(
                 "group_id": str(uuid.uuid4()),
                 "wallet_id": group_wallet_id,
                 "currency_code": (
-                    group_transactions[0].get("currency_code") or "THB"
+                    group_transactions[0].get("currency_code") or default_currency_code
                 ),
                 "currency_symbol": (
-                    group_transactions[0].get("currency_symbol") or "฿"
+                    group_transactions[0].get("currency_symbol") or default_currency_symbol
                 ),
                 "total": total,
                 "transactions": group_transactions,

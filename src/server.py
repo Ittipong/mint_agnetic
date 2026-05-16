@@ -192,6 +192,19 @@ class ChatRequest(BaseModel):
             "persisted server-side."
         ),
     )
+    default_currency_code: str = Field(
+        default="THB",
+        description=(
+            "User's preferred display currency, sourced from the app's "
+            "settings screen. Quick-add proposals default to this code; "
+            "slip parsing only uses it as a fallback when the slip itself "
+            "doesn't carry a currency."
+        ),
+    )
+    default_currency_symbol: str = Field(
+        default="฿",
+        description="Display symbol that pairs with default_currency_code.",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -199,6 +212,8 @@ class ChatRequest(BaseModel):
                 "user_id": _EXAMPLE_USER_ID,
                 "thread_id": _EXAMPLE_THREAD_ID,
                 "message": "ใช้เงินไปเท่าไรเดือนนี้",
+                "default_currency_code": "THB",
+                "default_currency_symbol": "฿",
             }
         }
     )
@@ -213,6 +228,8 @@ class StudioChatRequest(BaseModel):
         default_factory=list,
         description="Optional data URLs for slip-to-transaction turns.",
     )
+    default_currency_code: str = Field(default="THB")
+    default_currency_symbol: str = Field(default="฿")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -220,6 +237,8 @@ class StudioChatRequest(BaseModel):
                 "user_id": _EXAMPLE_USER_ID,
                 "thread_id": _EXAMPLE_THREAD_ID,
                 "message": "งบเดือนนี้เหลือเท่าไหร่",
+                "default_currency_code": "THB",
+                "default_currency_symbol": "฿",
             }
         }
     )
@@ -540,6 +559,8 @@ async def _stream_graph(
     image_b64s: list[str] | None = None,
     audio_data: bytes | None = None,
     audio_mime: str | None = None,
+    default_currency_code: str = "THB",
+    default_currency_symbol: str = "฿",
 ) -> AsyncGenerator[str, None]:
     image_b64s = image_b64s or []
     _debug_log(
@@ -552,6 +573,7 @@ async def _stream_graph(
         has_audio=bool(audio_data),
         audio_bytes=(len(audio_data) if audio_data else 0),
         audio_mime=audio_mime or "",
+        default_currency_code=default_currency_code,
     )
 
     # Upsert thread metadata before the run — first message becomes the title.
@@ -593,6 +615,10 @@ async def _stream_graph(
         "audio_mime": audio_mime,
         "stt_error": None,
         "transcript": None,
+        # Forward the user's app currency setting so quick_add and
+        # slip's never-null fallbacks default to it instead of THB.
+        "default_currency_code": default_currency_code,
+        "default_currency_symbol": default_currency_symbol,
     }
 
     # Track status emission so we never repeat a phase inside one run.
@@ -928,7 +954,14 @@ async def chat_stream(req: ChatRequest, request: Request):
     )
 
     return StreamingResponse(
-        _stream_graph(req.user_id, req.thread_id, req.message, req.image_b64s),
+        _stream_graph(
+            req.user_id,
+            req.thread_id,
+            req.message,
+            req.image_b64s,
+            default_currency_code=req.default_currency_code,
+            default_currency_symbol=req.default_currency_symbol,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1075,7 +1108,14 @@ async def studio_chat(req: StudioChatRequest, request: Request):
     )
 
     return StreamingResponse(
-        _stream_graph(req.user_id, req.thread_id, req.message, req.image_b64s),
+        _stream_graph(
+            req.user_id,
+            req.thread_id,
+            req.message,
+            req.image_b64s,
+            default_currency_code=req.default_currency_code,
+            default_currency_symbol=req.default_currency_symbol,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
