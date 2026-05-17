@@ -13,8 +13,10 @@ Two public entry points:
   occasional missed charge than fail an otherwise-good turn).
 
 The LangChain callback in `callbacks.py` wires both into every
-ChatOpenRouter call site automatically by attaching itself via
-`callbacks=[…]` when each LLM is constructed in `llm.py`.
+OpenRouter LLM call site automatically by attaching itself via
+`callbacks=[…]` when each LLM is constructed in `llm.py`. OpenRouter
+calls run through `ChatOpenAI` pointed at the OpenRouter REST endpoint
+with `extra_body={"usage": {"include": True}}` so cost surfaces inline.
 """
 
 from src.billing.cost_extractor import CostBreakdown, extract_cost

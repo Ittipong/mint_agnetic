@@ -47,28 +47,40 @@ class Settings(BaseSettings):
     react_base_url: str = ""
     # Fallback active only when react_base_url is OpenRouter.
     react_fallback_models: list[str] = Field(default=[])
+    # OpenRouter provider routing — opt-in per node. Empty list /
+    # None = don't emit the `provider` block (default routing).
+    react_provider_order: list[str] = Field(default=[])
+    react_provider_allow_fallbacks: bool | None = None
 
     # ── 2. CodeAct (SQL/analytics sandbox) ───────────────────────────
     codeact_model: str = ""
     codeact_base_url: str = ""
     codeact_fallback_models: list[str] = Field(default=[])
+    codeact_provider_order: list[str] = Field(default=[])
+    codeact_provider_allow_fallbacks: bool | None = None
 
     # ── 3. Vision (slip / receipt parsing) ───────────────────────────
     # Must be a multimodal model that accepts `image_url` content blocks
     # in OpenAI-compatible chat format.
     vision_model: str = ""
     vision_base_url: str = ""
+    # Pick fallbacks from a DIFFERENT vendor than the primary so a
+    # provider-wide outage doesn't take the whole queue down. See the
+    # comment in .env for known-bad models on slip OCR.
+    vision_fallback_models: list[str] = Field(default=[])
+    vision_provider_order: list[str] = Field(default=[])
+    vision_provider_allow_fallbacks: bool | None = None
 
     # ── 4. Intent classifier (entry-router routing decision) ─────────
     intent_classifier_model: str = ""
     intent_classifier_base_url: str = ""
-
-    # Optional fallback — retries on primary failure. Empty = no
-    # fallback (failures default to `intent='other'`, ReAct lane
-    # still works). Should be a DIFFERENT provider than primary so a
-    # regional outage doesn't take both down at once.
-    intent_classifier_fallback_model: str = ""
-    intent_classifier_fallback_base_url: str = ""
+    # OpenRouter-side fallback queue. Same mechanism as React: each
+    # entry is another model id, OpenRouter retries them in order
+    # within a single HTTP call. Empty list = no fallback (primary
+    # failure defaults to `intent='other'`, ReAct lane still works).
+    intent_classifier_fallback_models: list[str] = Field(default=[])
+    intent_classifier_provider_order: list[str] = Field(default=[])
+    intent_classifier_provider_allow_fallbacks: bool | None = None
 
     # ── 5. Transaction (quick_add) ───────────────────────────────────
     # Must support tool/function calling AND Thai text output. Used by
@@ -78,11 +90,23 @@ class Settings(BaseSettings):
     # template — see `POST /chat/intent`.)
     transaction_llm_model: str = ""
     transaction_llm_base_url: str = ""
+    # Fallbacks MUST support tool calling (the `propose_transaction`
+    # tool is the whole point of this node) AND produce Thai text for
+    # the confirmation reply.
+    transaction_llm_fallback_models: list[str] = Field(default=[])
+    transaction_llm_provider_order: list[str] = Field(default=[])
+    transaction_llm_provider_allow_fallbacks: bool | None = None
 
     # ── 6. Speech-to-text (/chat/voice) ──────────────────────────────
     # Multimodal model that accepts audio_input content blocks.
     stt_model: str = ""
     stt_base_url: str = ""
+    # Fallback models MUST accept the `input_audio` content block —
+    # most "multimodal" models on OpenRouter only handle images, not
+    # audio. Verify support before adding.
+    stt_fallback_models: list[str] = Field(default=[])
+    stt_provider_order: list[str] = Field(default=[])
+    stt_provider_allow_fallbacks: bool | None = None
 
     # ── Environment + logging ────────────────────────────────────────
     # Postel's-law fallbacks (sync/voice payload tolerance) only kick
@@ -105,7 +129,7 @@ class Settings(BaseSettings):
 
     # ── Validation ───────────────────────────────────────────────────
     # Required-field check runs at startup. Optional fields
-    # (`intent_classifier_fallback_*`, fallback model lists) are
+    # (`*_fallback_models` lists, provider routing prefs) are
     # allowed to stay empty.
     _REQUIRED_FIELDS = (
         ("openrouter_api_key",        "OPENROUTER_API_KEY"),
@@ -130,9 +154,9 @@ class Settings(BaseSettings):
         missing — a silent empty model would produce confusing 400s
         from the LLM provider at the first chat turn.
 
-        The fallback intent classifier and the *_FALLBACK_MODELS lists
-        are intentionally NOT required; an empty fallback simply
-        disables the retry.
+        The `*_FALLBACK_MODELS` lists are intentionally NOT required;
+        an empty list simply disables OpenRouter's fallback queue for
+        that node.
         """
         missing = [
             env for (attr, env) in self._REQUIRED_FIELDS

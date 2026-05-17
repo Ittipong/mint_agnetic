@@ -24,6 +24,7 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.billing.user_context import set_user_id
 from src.config import settings
 from src.debug_log import LogLevel, get_request_id, log as _debug_log_fn, set_request_id
 from src.graph.agent_graph import build_async_graph
@@ -620,6 +621,12 @@ async def _stream_graph(
     default_currency_symbol: str = "฿",
 ) -> AsyncGenerator[str, None]:
     image_b64s = image_b64s or []
+    # Stamp the user_id onto the request-scoped ContextVar used by
+    # the billing callback. Every OpenRouter LLM call this stream
+    # triggers (ReAct turn, CodeAct subgraph, vision node, STT node,
+    # intent classifier) reads the same id so its cost report is
+    # routed to the correct ledger. Cleared in the `finally` below.
+    set_user_id(user_id)
     _debug_log(
         "STREAM",
         "Starting",
@@ -991,6 +998,18 @@ async def _stream_graph(
                 )
                 yield _sse({"type": "stt_error", "reason": reason})
 
+            elif kind == "on_custom_event" and event.get("name") == "assistant_text":
+                # Synthetic text emitted by a graph node that short-circuits
+                # the LLM (e.g. quick_add's open_edit_sheet redirect). We
+                # forward it as a `token` event so mobile renders it in a
+                # normal assistant bubble — same shape as a streamed LLM
+                # reply — and the user sees explicit feedback for actions
+                # that would otherwise just pop a sheet with no chat trail.
+                payload = event.get("data") or {}
+                text = payload.get("text") or ""
+                if text:
+                    yield _sse({"type": "token", "content": text})
+
         if stream_aborted:
             # The hard-timeout branch already emitted an `error` event.
             # Skip the success-path tail/suggestions/persist — there's no
@@ -1034,6 +1053,11 @@ async def _stream_graph(
         _debug_log("STREAM", "Error", error=str(exc), user_id=user_id)
         yield _sse({"type": "error", "message": str(exc)})
     finally:
+        # Clear the per-request user binding so a background task
+        # spawned after the response (or a future call on this same
+        # event loop) can't accidentally bill the wrong user. Mirrors
+        # how `set_request_id(None)` is handled in the HTTP middleware.
+        set_user_id(None)
         # [DEBUG-XX-VOICE] stream-close summary — last line written
         # regardless of how the generator exits (clean done, error,
         # client disconnect). Compare `total_events` against the

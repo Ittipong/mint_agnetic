@@ -30,7 +30,6 @@ from src.debug_log import LogLevel as _LogLevel, log as _log
 from src.graph.state import AgentState
 from src.llm import (
     cached_system_content,
-    intent_classifier_fallback_llm,
     intent_classifier_llm,
 )
 
@@ -82,6 +81,22 @@ A turn qualifies if ANY of these hold:
    records** ("ดูบันทึก" = view records, "บันทึกของเดือนที่แล้ว"
    = last month's records) it is a QUERY → "other".
 
+5. **Edit phrasing while a proposal card is on screen** — if
+   `last_assistant` contains "ดูข้อมูลในการ์ด" / "กดบันทึก" /
+   "การ์ดด้านบน" AND the current user turn references the active
+   card (correction words OR field names like "ยอด" / "จำนวนเงิน"
+   / "amount" / "หมวด" / "category" / "wallet" / "วันที่" / "date"),
+   classify as **add_transaction**. The quick-add node has a
+   pre-check that intercepts these turns and tells the mobile
+   client to open its in-app editor — the LLM is never invoked.
+   Routing here keeps that pre-check on the hot path.
+
+   Trigger words include common typos: "แค่" (autocorrect of
+   "แก้"), "ผิด", "ไม่ใช่", "แก้", "ขอแก้", "เปลี่ยน", "ที่จริง".
+   When in doubt with a pending card on screen → prefer
+   add_transaction; the pre-check handles both real edits and
+   misclassified adds gracefully.
+
 ## other
 Everything else: analytics questions, advice requests, chit-chat,
 greetings, summaries, comparisons, anything ending in a question
@@ -106,6 +121,11 @@ Examples (→ add_transaction):
 - "เซฟไว้หน่อย"                  (rule 4 — semantic paraphrase)
 - "อัพเดทรายจ่ายให้"            (rule 4 — semantic paraphrase)
 - "ลงรายการให้หน่อย"            (rule 4)
+- "แก้ยอดเป็น 300" (after assistant said "ดูข้อมูลในการ์ด...")  (rule 5)
+- "แค่ยอดเงินเป็น 100" (typo of "แก้ยอด...", after card on screen)  (rule 5)
+- "ขอแก้ category เป็น shopping" (after assistant said "ดูข้อมูลในการ์ด...")  (rule 5)
+- "เปลี่ยน wallet เป็น kbank" (after card on screen)  (rule 5)
+- "ยอดเงินผิด" (after card on screen)  (rule 5)
 
 Examples (→ other):
 - "เดือนนี้ใช้เงินไปเท่าไหร่"
@@ -207,12 +227,18 @@ async def classify_intent_node(
 
 
 async def _classify_with_fallback(messages: list) -> tuple[str, str, int]:
-    """Run the primary classifier; on any failure retry on the optional
-    fallback. Returns (intent, source, total_duration_ms).
+    """Run the classifier and return (intent, source, total_duration_ms).
 
-    `source` distinguishes "primary", "fallback", "primary_failed_default",
-    or "fallback_failed_default" so logs can attribute classification
-    decisions back to a specific model.
+    Fallback handling lives inside the single OpenRouter HTTP call — the
+    `models` array in the request body asks OpenRouter to retry through
+    the fallback list before returning. So there's no second LLM call
+    here; on exception we default to `intent='other'` so the ReAct lane
+    still works.
+
+    `source` distinguishes "primary" (any successful classification —
+    whether the primary or an OpenRouter-side fallback model handled it;
+    inspect `response.response_metadata['model_name']` to disambiguate)
+    from "primary_failed_default" (every model in the queue errored).
     """
     started = time.monotonic()
     try:
@@ -221,36 +247,15 @@ async def _classify_with_fallback(messages: list) -> tuple[str, str, int]:
         intent = _parse_intent(raw)
         return intent, "primary", int((time.monotonic() - started) * 1000)
     except Exception as exc:
-        primary_ms = int((time.monotonic() - started) * 1000)
         _ic_log(
             "INTENT",
-            "primary classifier failed",
-            duration_ms=primary_ms,
+            "classifier failed",
+            duration_ms=int((time.monotonic() - started) * 1000),
             error_type=type(exc).__name__,
             error=str(exc)[:200],
-            has_fallback=intent_classifier_fallback_llm is not None,
             _level=_LogLevel.MILESTONE,
         )
-
-    if intent_classifier_fallback_llm is None:
         return "other", "primary_failed_default", int(
-            (time.monotonic() - started) * 1000
-        )
-
-    try:
-        response = await intent_classifier_fallback_llm.ainvoke(messages)
-        raw = (getattr(response, "content", "") or "").strip()
-        intent = _parse_intent(raw)
-        return intent, "fallback", int((time.monotonic() - started) * 1000)
-    except Exception as exc:
-        _ic_log(
-            "INTENT",
-            "fallback classifier also failed",
-            error_type=type(exc).__name__,
-            error=str(exc)[:200],
-            _level=_LogLevel.MILESTONE,
-        )
-        return "other", "fallback_failed_default", int(
             (time.monotonic() - started) * 1000
         )
 
@@ -272,30 +277,33 @@ def _last_human_text(msgs: list) -> str:
 def _last_ai_text(msgs: list) -> str:
     """Find the most recent AIMessage text from the CURRENT session.
 
-    Two kinds of session boundary stop the search:
-    1. **AIMessage with tool_calls** — a quick-add proposal was
-       dispatched as a transaction card; the user has since saved or
-       rejected it on mobile, so anything before is closed.
-    2. **HumanMessage that's a marker** — `[INTENT:transaction_saved
-       /dismissed]`. The confirmation AIMessage that follows belongs
-       to the closed session, not to the new turn — skip it.
+    Closed-session boundary: a `[INTENT:transaction_saved/dismissed]`
+    HumanMessage marker, which mobile fires after the user taps
+    Save / Discard on a proposal card. Anything before such a marker
+    belongs to a finished conversation and is invisible to the
+    classifier.
+
+    An `AIMessage` with `tool_calls` is NOT a boundary on its own —
+    when a proposal is dispatched, the AIMessage carries BOTH the
+    tool_call AND the "ดูข้อมูลในการ์ด..." reply text. While the
+    user hasn't acted on the card yet (no INTENT marker has arrived),
+    that reply IS the active "last assistant" context the classifier
+    needs to recognize a follow-up correction.
 
     Returning "" tells the classifier "no prior question to anchor
     against" so it judges the user's text on its own merits.
     """
     for m in reversed(msgs):
-        if isinstance(m, AIMessage):
-            if getattr(m, "tool_calls", None):
-                return ""
-            text = _text_of(m)
-            if text.strip():
-                return text
-        elif isinstance(m, HumanMessage):
+        if isinstance(m, HumanMessage):
             text = _text_of(m)
             if text.strip().startswith("[INTENT:"):
                 # Marker = session boundary. Any earlier AI message
                 # belongs to a closed conversation.
                 return ""
+        elif isinstance(m, AIMessage):
+            text = _text_of(m)
+            if text.strip():
+                return text
     return ""
 
 

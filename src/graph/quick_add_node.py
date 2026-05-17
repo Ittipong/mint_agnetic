@@ -21,6 +21,7 @@ import uuid
 from datetime import date
 from typing import Any
 
+from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -75,9 +76,19 @@ You have ONLY two valid response shapes:
    field is missing. No JSON, no braces, no key/value pairs.
 
 NEVER write JSON, dict syntax, or anything that starts with `{{` in
-the assistant content. If you find yourself about to type `{{"date"`
-or `{{"note"`, STOP — you wanted to call the tool. Call it via the
-tool-calling API instead.
+the assistant content. NEVER write the tool call as Python function
+syntax in the assistant content either. If you find yourself about
+to type `propose_transaction(type=...)` or `{{"type": "..."}}`,
+STOP — fire the tool through the tool-calling API.
+
+## Scope — ADD ONLY (no in-chat editing)
+
+Quick-add is the **add-transaction** lane only. If the user is
+trying to correct a card that's already on screen (the mobile
+client opens an Edit sheet for that), an earlier guard intercepts
+the turn before this prompt runs — you will never see it. So treat
+EVERY turn that reaches you as a fresh ADD intent. There is no
+`corrects_group_id` to worry about; do not set it.
 
 The user is logging a single spending/income event through chat.
 This may take ONE turn ("กิน kfc 100บาท" → done) or MULTIPLE turns
@@ -90,9 +101,11 @@ user said earlier with the latest reply before deciding what to do.
 - `currency_code` = `{currency_code}`
 - `currency_symbol` = `{currency_symbol}`
 
-Copy these values verbatim into the tool call. They came from the
-user's settings screen, so they are already correct. Do not infer
-a different currency from anything the user typed.
+Copy these EXACT strings verbatim into the tool call. NEVER substitute
+a different currency code (USD, EUR, RUB, …) or a different symbol
+(₽, $, €, …), even if the user typed something that looks like a
+foreign currency word. The mobile client already decided the user's
+currency — your job is only to copy it into the tool args.
 
 ## Wallets + their categories (catalog for matching)
 
@@ -121,14 +134,6 @@ latest reply) → CALL THE TOOL IMMEDIATELY. Do not ask anything
 else. Optional fields below all have defaults — use them.
 
 If EITHER is missing → ask back (see "Asking back" below).
-
-**EXCEPTION — corrections inherit from the prior proposal.** If the
-latest user message is correcting a still-pending proposal (see
-"Correction detection" below), you ALREADY have a name + amount
-from the prior proposal's tool_call args in history. Reuse them
-verbatim and only overwrite the field the user just changed. NEVER
-ask back on a correction — the user gave you new info, not a fresh
-empty intent.
 
 NEVER ask about anything OTHER than name and amount. Wallet,
 category, date, merchant, type — these are NEVER worth a question;
@@ -204,28 +209,13 @@ window — merge prior turns with the current reply), call
 - `currency_code` = "{currency_code}"   (see "Currency defaults")
 - `currency_symbol` = "{currency_symbol}"   (see "Currency defaults")
 - `include_in_report` = true
-- `corrects_group_id` = see "Correction detection" below — usually null
+- `corrects_group_id` = ALWAYS null (chat doesn't edit — see "Scope" above)
 
 After the tool call, reply with exactly this Thai sentence:
 "ดูข้อมูลในการ์ดด้านบนได้เลยครับ — กดบันทึกถ้าถูกต้อง"
 
 Do NOT restate the transaction details. Do NOT emit a `<suggestions>`
 tag. Do NOT call any other tool.
-
-## Correction detection (`corrects_group_id`)
-
-Default: **null**. Only set it when correcting a prior proposal in
-this same conversation.
-
-How to detect a correction: the user's current message uses words like
-"ผิด", "ไม่ใช่", "แก้เป็น" + a new amount, AND the history above shows
-a recent `ToolMessage` with `(proposal dispatched, group_id=<uuid>)`.
-Copy that `<uuid>` into `corrects_group_id`.
-
-Additions like "อีกอัน 200", "เพิ่ม 200", "แล้วก็ 200" are NEW
-transactions, not corrections — leave null.
-
-When in doubt → null.
 """
 
 
@@ -258,6 +248,44 @@ async def quick_add_node(state: AgentState, config: RunnableConfig) -> dict:
     if not msgs:
         raise ValueError("quick_add_node invoked with no messages")
 
+    # Pre-check: if a proposal card is already on screen AND the user's
+    # latest message looks like an edit instruction, short-circuit the
+    # LLM. Dispatch an `open_edit_sheet` SSE event so mobile opens its
+    # in-app editor for the pending card and reply with a one-liner.
+    # Chat is intentionally add-only; this avoids the entire class of
+    # "LLM-parses-natural-language-edit" failures (which is why we
+    # don't have an in-chat correction flow any more).
+    pending_group_id = _pending_group_id(msgs)
+    if pending_group_id and _looks_like_edit(_latest_user_text(msgs)):
+        ack_text = (
+            "กำลังเปิดหน้าแก้ไขรายการให้ครับ — ปรับค่าได้ตามต้องการ"
+        )
+        # Stream the ack as a token so mobile shows a normal assistant
+        # bubble explaining WHY the editor sheet is popping up. Without
+        # this, the sheet appears out of nowhere and the chat trail has
+        # no record of the redirect — confusing UX.
+        await adispatch_custom_event("assistant_text", {"text": ack_text})
+        # Then tell mobile to actually pop the editor for the matching
+        # pending card.
+        await adispatch_custom_event(
+            "structured_data",
+            {
+                "type": "open_edit_sheet",
+                "data": {"group_id": pending_group_id},
+            },
+        )
+        _qa_log(
+            "QUICK_ADD",
+            "open_edit_sheet dispatched (chat-edit redirect)",
+            group_id=pending_group_id,
+            _level=_LogLevel.MILESTONE,
+        )
+        return {
+            "messages": [AIMessage(content=ack_text)],
+            "user_id": user_id,
+            "current_date": date.today().isoformat(),
+        }
+
     catalog = await fetch_user_catalog(user_id)
     by_wallet = await fetch_categories_by_wallet(user_id)
     wallet_category_map = render_for_slip(catalog, by_wallet)
@@ -265,6 +293,7 @@ async def quick_add_node(state: AgentState, config: RunnableConfig) -> dict:
     current_date = date.today().isoformat()
     currency_code = (state.get("default_currency_code") or "THB").strip() or "THB"
     currency_symbol = (state.get("default_currency_symbol") or "฿").strip() or "฿"
+
     # Wrap with cache_control so Nova (the configured transaction model)
     # only pays full price for the first turn of a session. The wrapper
     # is a no-op for auto-caching providers (DeepSeek/Gemini), so swapping
@@ -305,7 +334,43 @@ async def quick_add_node(state: AgentState, config: RunnableConfig) -> dict:
     llm_with_tool = transaction_llm.bind_tools([propose_transaction])
 
     started = time.monotonic()
-    response = await llm_with_tool.ainvoke([system_msg, *history])
+    try:
+        response = await llm_with_tool.ainvoke([system_msg, *history])
+    except Exception as exc:
+        # Provider-side failure (OpenRouter "Provider returned error",
+        # rate limit, timeout, etc.). If a card is already pending, the
+        # user is likely trying to edit it (keyword match missed) — fall
+        # back to the same redirect path so they aren't stuck staring at
+        # a raw error bubble. Without a pending card we have no safe
+        # recovery, so re-raise and let the stream emit its `error` event.
+        if pending_group_id:
+            _qa_log(
+                "QUICK_ADD",
+                "LLM error → open_edit_sheet fallback",
+                group_id=pending_group_id,
+                error_type=type(exc).__name__,
+                error=str(exc)[:200],
+                _level=_LogLevel.MILESTONE,
+            )
+            ack_text = (
+                "กำลังเปิดหน้าแก้ไขรายการให้ครับ — ปรับค่าได้ตามต้องการ"
+            )
+            await adispatch_custom_event(
+                "assistant_text", {"text": ack_text}
+            )
+            await adispatch_custom_event(
+                "structured_data",
+                {
+                    "type": "open_edit_sheet",
+                    "data": {"group_id": pending_group_id},
+                },
+            )
+            return {
+                "messages": [AIMessage(content=ack_text)],
+                "user_id": user_id,
+                "current_date": current_date,
+            }
+        raise
     duration_ms = int((time.monotonic() - started) * 1000)
 
     tool_calls = getattr(response, "tool_calls", None) or []
@@ -319,6 +384,24 @@ async def quick_add_node(state: AgentState, config: RunnableConfig) -> dict:
         text_preview=text_preview[:200],
         _level=_LogLevel.MILESTONE,
     )
+
+    # Force-set currency_code / currency_symbol in the tool args. The
+    # mobile client decides the user's currency (forwarded on every
+    # request) — the LLM's value is at best redundant and at worst
+    # wrong (DeepSeek-Flash sometimes picks ₽ / ₹ / $ when the user
+    # types Thai money phrases like "เงินเดือน"). Slip lane is NOT
+    # affected — slip_node has its own LLM that legitimately reads
+    # currency off receipts.
+    if tool_calls:
+        for tc in tool_calls:
+            args = tc.get("args") if isinstance(tc, dict) else None
+            if isinstance(args, dict):
+                args["currency_code"] = currency_code
+                args["currency_symbol"] = currency_symbol
+        response = AIMessage(
+            content=getattr(response, "content", "") or "",
+            tool_calls=tool_calls,
+        )
 
     # Defensive recovery: Nova occasionally dumps the tool args as a
     # raw JSON string in `content` instead of invoking the tool API
@@ -360,6 +443,89 @@ async def quick_add_node(state: AgentState, config: RunnableConfig) -> dict:
         "user_id": user_id,
         "current_date": current_date,
     }
+
+
+# Keywords that signal the user wants to edit the active proposal
+# rather than add a new transaction. Match is intentionally narrow —
+# the pre-check is gated by "pending card exists", so false positives
+# are bounded. Anything richer (regex with word boundaries) is overkill
+# for Thai where word boundaries aren't space-delimited.
+#
+# `ยอด` (amount/total) is included because it almost always refers to
+# editing the amount on the pending card — and it also catches the
+# common typo "แค่ยอด..." (autocorrect of "แก้ยอด...").
+_EDIT_KEYWORDS = (
+    "ผิด",
+    "ไม่ใช่",
+    "แก้",
+    "ขอแก้",
+    "เปลี่ยน",
+    "ที่จริง",
+    "ยอด",
+)
+
+
+def _looks_like_edit(text: str) -> bool:
+    """True if the user's latest turn reads like a correction to an
+    already-on-screen card. Gated by `_pending_group_id` returning
+    a non-empty id at the caller site."""
+    if not text:
+        return False
+    return any(kw in text for kw in _EDIT_KEYWORDS)
+
+
+def _latest_user_text(msgs: list) -> str:
+    """Pull the most recent non-marker HumanMessage text."""
+    for m in reversed(msgs):
+        if isinstance(m, HumanMessage):
+            text = _text_preview(m).strip()
+            if text.startswith("[INTENT:"):
+                continue
+            content = getattr(m, "content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                for blk in content:
+                    if isinstance(blk, dict) and blk.get("type") == "text":
+                        return str(blk.get("text", ""))
+            return ""
+    return ""
+
+
+def _pending_group_id(msgs: list) -> str:
+    """Return the `group_id` of a still-pending proposal, or "" if
+    no proposal is pending.
+
+    A proposal is "still pending" when there is an `AIMessage` with
+    `tool_calls` AND no subsequent `[INTENT:...]` marker (the marker
+    only appears after mobile fires /chat/intent on Save / Discard).
+    The id is read from the trailing `ToolMessage`'s content
+    (`(proposal dispatched, group_id=<uuid>)`), backfilled by
+    `propose_validation_node`.
+    """
+    last_tool_idx = -1
+    for i, m in enumerate(msgs):
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+            last_tool_idx = i
+
+    if last_tool_idx < 0:
+        return ""
+
+    for j in range(last_tool_idx + 1, len(msgs)):
+        m = msgs[j]
+        if isinstance(m, HumanMessage):
+            text = _text_preview(m).strip()
+            if text.startswith("[INTENT:"):
+                return ""  # session closed by Save / Discard
+        elif isinstance(m, ToolMessage):
+            content = getattr(m, "content", "") or ""
+            if isinstance(content, str) and "group_id=" in content:
+                marker = "group_id="
+                idx = content.find(marker)
+                tail = content[idx + len(marker):].strip()
+                return tail.rstrip(")").split()[0] if tail else ""
+
+    return ""
 
 
 def _recent_dialog(msgs: list, window: int) -> list:
@@ -424,12 +590,16 @@ def _recent_dialog(msgs: list, window: int) -> list:
             text = _text_preview(m).strip()
             tool_calls = getattr(m, "tool_calls", None) or []
             if tool_calls:
-                # Preserve the pending proposal so the LLM can detect
-                # a correction. Strip text content (Nova sometimes
-                # bundles a "ดูข้อมูลในการ์ด..." sentence here) to
-                # keep the prompt focused on the tool-call args.
+                # Quick-add no longer chains corrections in chat — the
+                # pre-check at the top of `quick_add_node` intercepts
+                # edits and dispatches an `open_edit_sheet` event
+                # instead. So the LLM doesn't need to see the prior
+                # tool_call args. We DO replace it with a short text
+                # ack though: an `AIMessage(content="")` makes
+                # DeepSeek-Flash blank on its next response, which
+                # silently drops new add intents.
                 filtered.append(
-                    AIMessage(content="", tool_calls=tool_calls)
+                    AIMessage(content="(เสนอรายการก่อนหน้าแล้ว — รอผู้ใช้กดบันทึก)")
                 )
             elif text:
                 filtered.append(AIMessage(content=text))
@@ -477,37 +647,58 @@ _REQUIRED_RECOVERY_FIELDS = ("amount",)
 # strips those.
 _JSON_OBJECT_RE = re.compile(r"\{[\s\S]*\}")
 
+# Match `propose_transaction(...)` Python-style call. DeepSeek-Flash
+# occasionally writes the tool call as pseudo-code in the content
+# instead of invoking the tool API — particularly on multi-turn
+# corrections after we inject the pending args. Capture group 1 holds
+# the inner argument list so the parser below can split key=value pairs.
+_PY_CALL_RE = re.compile(
+    r"propose_transaction\s*\(\s*([\s\S]*?)\s*\)", re.IGNORECASE
+)
+
 
 def _recover_tool_args_from_text(text: str) -> dict | None:
     """Try to parse a propose_transaction args dict out of free text.
 
-    Returns the args dict on success, None when no recoverable JSON
-    is present. The defender lives here so the rest of the graph
-    can stay tool-call-only.
+    Returns the args dict on success, None when no recoverable payload
+    is present. Two shapes are recovered:
+      1. JSON dict (Nova's failure mode)
+      2. Python call syntax (DeepSeek's failure mode on corrections)
+
+    The defender lives here so the rest of the graph can stay
+    tool-call-only.
     """
     if not text:
         return None
     stripped = text.strip()
-    if not stripped or "{" not in stripped:
+    if not stripped:
         return None
 
-    candidates: list[str] = []
-    if stripped.startswith("{"):
-        candidates.append(stripped)
-    match = _JSON_OBJECT_RE.search(stripped)
-    if match and match.group(0) not in candidates:
-        candidates.append(match.group(0))
+    candidates: list[dict] = []
 
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(parsed, dict):
-            continue
-        # Treat `amount` as the gatekeeper — without it the tool
-        # call is meaningless and we'd rather fall through to the
-        # generic ask-back than fabricate a bad proposal.
+    # ── JSON dict path ─────────────────────────────────────────
+    if "{" in stripped:
+        json_candidates: list[str] = []
+        if stripped.startswith("{"):
+            json_candidates.append(stripped)
+        match = _JSON_OBJECT_RE.search(stripped)
+        if match and match.group(0) not in json_candidates:
+            json_candidates.append(match.group(0))
+        for candidate in json_candidates:
+            try:
+                parsed = json.loads(candidate)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(parsed, dict):
+                candidates.append(parsed)
+
+    # ── Python call syntax path ────────────────────────────────
+    for m in _PY_CALL_RE.finditer(stripped):
+        parsed = _parse_python_call_args(m.group(1))
+        if parsed:
+            candidates.append(parsed)
+
+    for parsed in candidates:
         amount = parsed.get("amount")
         if not isinstance(amount, (int, float)) or amount <= 0:
             continue
@@ -515,3 +706,51 @@ def _recover_tool_args_from_text(text: str) -> dict | None:
             continue
         return parsed
     return None
+
+
+# `key=value` pair parser for the Python-call recovery path. Handles
+# the conservative subset DeepSeek emits: bare numbers (int/float),
+# bools (`True`/`False`/`true`/`false`), `None`/`null`, and quoted
+# strings (single or double quotes). Anything fancier (nested dicts,
+# expressions) is intentionally unsupported — we'd rather fall through
+# to ask-back than parse arbitrary Python.
+_KV_RE = re.compile(
+    r"""(?P<key>[a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?P<val>"[^"]*"|'[^']*'|[-\d.]+|[A-Za-z_][A-Za-z0-9_]*)\s*,?""",
+)
+
+
+def _parse_python_call_args(arg_text: str) -> dict | None:
+    """Parse `k1="v1", k2=2, k3=true, k4=None` into a dict.
+
+    Returns None when nothing parseable was found. Permissive on
+    extras (we just skip pairs we can't decode rather than failing
+    the whole recovery).
+    """
+    if not arg_text or not arg_text.strip():
+        return None
+    out: dict = {}
+    for m in _KV_RE.finditer(arg_text):
+        key = m.group("key")
+        raw = m.group("val")
+        out[key] = _coerce_py_value(raw)
+    return out or None
+
+
+def _coerce_py_value(raw: str) -> Any:
+    if (raw.startswith('"') and raw.endswith('"')) or (
+        raw.startswith("'") and raw.endswith("'")
+    ):
+        return raw[1:-1]
+    lowered = raw.lower()
+    if lowered in ("true",):
+        return True
+    if lowered in ("false",):
+        return False
+    if lowered in ("none", "null"):
+        return None
+    try:
+        if "." in raw:
+            return float(raw)
+        return int(raw)
+    except ValueError:
+        return raw

@@ -4,11 +4,13 @@ every OpenRouter LLM call.
 Usage from `llm.py`:
 
     from src.billing.callbacks import BillingCallback
+    from src.llm_openrouter import ChatOpenRouterREST
 
-    return ChatOpenRouter(
-        ...,
+    return ChatOpenRouterREST(
+        model=...,
+        base_url=settings.<feature>_base_url,   # OpenRouter REST endpoint
+        fallback_models=[...],
         callbacks=[BillingCallback(feature='chat')],
-        model_kwargs={'usage': {'include': True}, ...},
     )
 
 What it does:
@@ -22,11 +24,11 @@ What it does:
   (`user_context.current_user_id`). When None, the callback skips the
   report and warns once — better than guessing the user.
 
-The callback is INERT for non-OpenRouter calls: ChatOpenAI/Typhoon
-also fire `on_llm_end` but their response.usage block doesn't carry a
-`cost` field, and we don't have a fallback price for the Typhoon
-endpoint, so we'd just log a "missing cost" warning. Today we attach
-this only on OpenRouter constructors (`_make_openrouter_llm`).
+The callback is INERT for non-OpenRouter calls: ChatOpenAI on the
+Typhoon endpoint also fires `on_llm_end` but its `token_usage` block
+doesn't carry a `cost` field, and we don't have a fallback price for
+the Typhoon endpoint, so we'd just log a "missing cost" warning. Today
+we attach this only on OpenRouter constructors (`_make_openrouter_llm`).
 """
 
 from __future__ import annotations
@@ -49,7 +51,7 @@ class BillingCallback(AsyncCallbackHandler):
 
     # AsyncCallbackHandler doesn't define __slots__ on its base; we
     # add ours to keep memory tight when the callback is attached to
-    # every LLM call (one instance per ChatOpenRouter object).
+    # every LLM call (one instance per ChatOpenAI object).
     __slots__ = ("_feature", "_model_hint")
 
     def __init__(self, feature: str = "chat", *, model_hint: str | None = None) -> None:
@@ -59,6 +61,13 @@ class BillingCallback(AsyncCallbackHandler):
         # metadata even though it's known at construction time. We
         # store it as a hint to fall back on.
         self._model_hint = model_hint
+
+    async def on_chat_model_start(self, *args: Any, **kwargs: Any) -> None:
+        # AsyncCallbackHandler's default raises NotImplementedError to push
+        # the framework toward on_llm_start. ChatOpenAI fires the chat
+        # variant though, and we only care about the end event — silence
+        # the start-side noise by accepting the call.
+        return None
 
     async def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
         user_id = current_user_id()

@@ -1,30 +1,31 @@
 """Integration tests for the quick-add (text → propose_transaction) flow.
 
-Two intents are exercised:
+Chat is **add-only**. Editing a still-pending proposal is delegated
+to the mobile in-app editor: when the user types an edit-style
+phrase while a card is on screen, the server dispatches an
+`open_edit_sheet` SSE event (no LLM call) and mobile opens its
+existing transaction editor pre-filled with the proposal. This
+keeps the chat lane small and reliable.
 
-1. **Add transaction** — user types a journal entry ("กินกาแฟ 100 บาท") and
-   the agent must call `propose_transaction`, producing a
-   `propose_transaction_group` SSE payload with `corrects_group_id == None`.
-2. **Edit last transaction** — user corrects a still-pending proposal in the
-   same thread ("ไม่ใช่ 100 เป็น 200", "แก้ category อาหาร -> shopping",
-   etc.) and the agent must emit a NEW proposal whose `corrects_group_id`
-   equals the prior proposal's `group_id`.
+Coverage:
 
-Scenarios S1-S4 mirror the user's hand-drawn pending-state spec:
+1. **Add transaction** — user types "กินกาแฟ 100 บาท" → server
+   emits a `propose_transaction_group` SSE payload with a fresh
+   `group_id`. Asserts every field of the payload against the live
+   catalog so wallet_id / category_id can't drift.
 
-    S1: t1 add → t2 propose → t3 SAVE
-    S2: t1 add → t2 propose → t3 add → t4 propose (both pending)
-    S3: S2 + SAVE t2 → t4 propose is the lone pending proposal
-    S4: t1 add → t2 propose → t3 "ไม่ใช่ 100 เป็น 200" → t4 propose with
-        corrects_group_id == t2.group_id  (edit, not add)
+2. **Pending-state** — multiple un-confirmed adds coexist as
+   independent cards (S2), and saving one doesn't poison the next
+   (S3). Dismissed cards are closed (no carry-over).
 
-Edit-field coverage (E1-E6) covers amount, category, note, merchant,
-wallet, and date — every field the user might correct on the card.
+3. **Open-edit-sheet redirect** — when a pending card is on screen
+   and the user types an edit-style phrase, the server fires an
+   `open_edit_sheet` event carrying the pending `group_id`. No new
+   proposal is generated.
 
 Tests require a live LangGraph server at `STUDIO_URL` (defaults to
-http://localhost:8080) and a test user with at least one general wallet +
-one expense category. Tests that need a second wallet auto-skip when the
-catalog only has one.
+http://localhost:8000) and a test user with at least one general
+wallet + one expense category.
 
 Run:
     pytest mint_agentic/evaluation/integration/test_quick_add_flow.py -m live -v
@@ -35,7 +36,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 import httpx
@@ -57,16 +58,20 @@ async def _send_message(
     *,
     currency_code: str = "THB",
     currency_symbol: str = "฿",
-) -> list[dict[str, Any]]:
-    """POST /chat/stream and return all `propose_transaction_group` payloads
-    that arrived on the SSE stream, in order.
+) -> dict[str, list[dict[str, Any]]]:
+    """POST /chat/stream and bucket the structured-data events that arrive.
 
-    Each entry is the inner `data` block (already unwrapped from
-    `{"type": "propose_transaction_group", "data": {...}}`), so tests can
-    read `payload["group_id"]`, `payload["transactions"]`,
-    `payload["corrects_group_id"]` directly.
+    Returns a dict keyed by payload `type`:
+      - `propose_transaction_group`: fresh add cards
+      - `open_edit_sheet`: edit-redirect events (mobile opens its
+        in-app editor for the listed `group_id`)
+
+    Each value is a list of the inner `data` blocks in arrival order.
     """
-    groups: list[dict[str, Any]] = []
+    buckets: dict[str, list[dict[str, Any]]] = {
+        "propose_transaction_group": [],
+        "open_edit_sheet": [],
+    }
     body = {
         "user_id": user_id,
         "thread_id": thread_id,
@@ -88,9 +93,25 @@ async def _send_message(
             if event.get("type") != "data":
                 continue
             payload = event.get("payload") or {}
-            if payload.get("type") == "propose_transaction_group":
-                groups.append(payload["data"])
-    return groups
+            ptype = payload.get("type")
+            if ptype in buckets:
+                buckets[ptype].append(payload.get("data") or {})
+    return buckets
+
+
+async def _send_message_groups(
+    client: httpx.AsyncClient,
+    studio_url: str,
+    user_id: str,
+    thread_id: str,
+    message: str,
+) -> list[dict[str, Any]]:
+    """Shortcut for tests that only care about `propose_transaction_group`
+    payloads — keeps the test bodies readable."""
+    buckets = await _send_message(
+        client, studio_url, user_id, thread_id, message
+    )
+    return buckets["propose_transaction_group"]
 
 
 async def _send_intent(
@@ -201,7 +222,6 @@ def _assert_full_payload(
     expected_amount: float,
     expected_type: str,
     catalog: dict[str, Any],
-    expected_corrects_group_id: str | None,
     expected_currency_code: str = "THB",
     expected_currency_symbol: str = "฿",
     note_contains: str | None = None,
@@ -218,7 +238,6 @@ def _assert_full_payload(
       - `total` lines up with the single line item's amount
       - exactly one transaction (quick-add is single-line by design)
       - every transaction field is present and consistent
-      - `corrects_group_id` matches expectation (None for fresh, UUID for edit)
     """
     # group-level
     assert "group_id" in group and group["group_id"], "missing group_id"
@@ -230,17 +249,6 @@ def _assert_full_payload(
     )
     assert group.get("currency_code") == expected_currency_code
     assert group.get("currency_symbol") == expected_currency_symbol
-
-    if expected_corrects_group_id is None:
-        assert group.get("corrects_group_id") in (None, ""), (
-            f"expected fresh proposal, got corrects_group_id="
-            f"{group.get('corrects_group_id')!r}"
-        )
-    else:
-        assert group.get("corrects_group_id") == expected_corrects_group_id, (
-            f"expected corrects_group_id={expected_corrects_group_id!r}, "
-            f"got {group.get('corrects_group_id')!r}"
-        )
 
     # Quick-add ALWAYS emits exactly one line item.
     txs = group.get("transactions") or []
@@ -365,8 +373,8 @@ class TestAddTransactionIntent:
         thread_id: str,
         live_catalog: dict[str, Any],
     ):
-        """S1: add → propose → save. Single proposal, no correction."""
-        groups = await _send_message(
+        """S1: add → propose → save. Single fresh proposal."""
+        groups = await _send_message_groups(
             http_client, studio_url, default_user_id, thread_id,
             "กินกาแฟ 100 บาท",
         )
@@ -376,7 +384,6 @@ class TestAddTransactionIntent:
             expected_amount=100.0,
             expected_type="expense",
             catalog=live_catalog,
-            expected_corrects_group_id=None,
             note_contains="กาแฟ",
             expected_date=date.today().isoformat(),
         )
@@ -396,7 +403,7 @@ class TestAddTransactionIntent:
         live_catalog: dict[str, Any],
     ):
         """Income keywords (เงินเดือน) → type=income."""
-        groups = await _send_message(
+        groups = await _send_message_groups(
             http_client, studio_url, default_user_id, thread_id,
             "เงินเดือนเข้า 30000",
         )
@@ -406,7 +413,6 @@ class TestAddTransactionIntent:
             expected_amount=30000.0,
             expected_type="income",
             catalog=live_catalog,
-            expected_corrects_group_id=None,
             note_contains="เงินเดือน",
         )
 
@@ -419,7 +425,7 @@ class TestAddTransactionIntent:
         live_catalog: dict[str, Any],
     ):
         """Merchant name in prompt → propagated to merchant_name."""
-        groups = await _send_message(
+        groups = await _send_message_groups(
             http_client, studio_url, default_user_id, thread_id,
             "กินข้าว ที่ KFC 150 บาท",
         )
@@ -429,7 +435,6 @@ class TestAddTransactionIntent:
             expected_amount=150.0,
             expected_type="expense",
             catalog=live_catalog,
-            expected_corrects_group_id=None,
             note_contains="ข้าว",
             merchant_contains="KFC",
         )
@@ -439,8 +444,8 @@ class TestAddTransactionIntent:
 
 
 class TestPendingProposals:
-    """A still-unconfirmed proposal must NOT bleed into the next add turn,
-    but it MUST remain visible to the LLM in case the user corrects it."""
+    """Multiple un-confirmed cards may coexist; saving / dismissing one
+    must not contaminate the next."""
 
     async def test_S2_two_adds_both_pending(
         self,
@@ -450,10 +455,10 @@ class TestPendingProposals:
         thread_id: str,
         live_catalog: dict[str, Any],
     ):
-        """S2: add coffee 100 → (no save) → add rice 20. Both must be fresh
-        (corrects_group_id=None) — the second add is a new transaction,
-        NOT a correction. Sum-state on mobile = 2 pending cards."""
-        first = await _send_message(
+        """S2: add coffee 100 → (no save) → add rice 20. Each must be
+        an independent card — mobile shows 2 pending. Cards do not
+        cross-reference each other."""
+        first = await _send_message_groups(
             http_client, studio_url, default_user_id, thread_id,
             "กินกาแฟ 100 บาท",
         )
@@ -463,15 +468,15 @@ class TestPendingProposals:
             expected_amount=100.0,
             expected_type="expense",
             catalog=live_catalog,
-            expected_corrects_group_id=None,
             note_contains="กาแฟ",
         )
 
-        # NOTE: deliberately DON'T call /chat/intent. The first card stays
-        # pending — the LLM still sees it in history.
-        second = await _send_message(
+        # NOTE: deliberately DON'T call /chat/intent — the first card
+        # stays pending. Use "เพิ่มรายการ" so the LLM clearly hears
+        # this as a new add, not a clarification of the prior one.
+        second = await _send_message_groups(
             http_client, studio_url, default_user_id, thread_id,
-            "กินข้าว 20",
+            "เพิ่มรายการ กินข้าว 20 บาท",
         )
         assert len(second) == 1
         _assert_full_payload(
@@ -479,7 +484,6 @@ class TestPendingProposals:
             expected_amount=20.0,
             expected_type="expense",
             catalog=live_catalog,
-            expected_corrects_group_id=None,  # NEW, not correction
             note_contains="ข้าว",
         )
         assert second[0]["group_id"] != first[0]["group_id"], (
@@ -494,9 +498,8 @@ class TestPendingProposals:
         thread_id: str,
         live_catalog: dict[str, Any],
     ):
-        """S3: add → save → add. Second proposal is also fresh; saving the
-        first one must NOT cause the second to reference it."""
-        first = await _send_message(
+        """S3: add → save → add. Second proposal is a fresh card."""
+        first = await _send_message_groups(
             http_client, studio_url, default_user_id, thread_id,
             "กินกาแฟ 100 บาท",
         )
@@ -507,7 +510,7 @@ class TestPendingProposals:
             "transaction_saved", first[0]["group_id"],
         )
 
-        second = await _send_message(
+        second = await _send_message_groups(
             http_client, studio_url, default_user_id, thread_id,
             "กินข้าว 20 บาท",
         )
@@ -517,20 +520,10 @@ class TestPendingProposals:
             expected_amount=20.0,
             expected_type="expense",
             catalog=live_catalog,
-            expected_corrects_group_id=None,
             note_contains="ข้าว",
         )
 
-
-# ── Edit / correction intent (S4 + E1-E6) ────────────────────────────────────
-
-
-class TestEditLastTransaction:
-    """User corrects the most-recent still-pending proposal. The new
-    proposal must carry `corrects_group_id` so mobile auto-discards the
-    stale card. Covers every field a user might change on the card."""
-
-    async def test_S4_correct_amount(
+    async def test_dismissed_proposal_clears_state(
         self,
         http_client: httpx.AsyncClient,
         studio_url: str,
@@ -538,212 +531,8 @@ class TestEditLastTransaction:
         thread_id: str,
         live_catalog: dict[str, Any],
     ):
-        """S4 / E1: 'ฉันบอกผิด ไม่ใช่ 100 แต่เป็น 200' → new proposal
-        with corrects_group_id = first.group_id, amount=200."""
-        first = await _send_message(
-            http_client, studio_url, default_user_id, thread_id,
-            "กินกาแฟ 100 บาท",
-        )
-        assert len(first) == 1
-
-        second = await _send_message(
-            http_client, studio_url, default_user_id, thread_id,
-            "ฉันบอกผิด ไม่ใช่ 100 แต่เป็น 200",
-        )
-        assert len(second) == 1
-        _assert_full_payload(
-            second[0],
-            expected_amount=200.0,
-            expected_type="expense",
-            catalog=live_catalog,
-            expected_corrects_group_id=first[0]["group_id"],
-            note_contains="กาแฟ",
-        )
-
-    async def test_E2_correct_category(
-        self,
-        http_client: httpx.AsyncClient,
-        studio_url: str,
-        default_user_id: str,
-        thread_id: str,
-        live_catalog: dict[str, Any],
-    ):
-        """E2: change category. The new proposal must use a different
-        category_id (still valid in the catalog) and keep amount unchanged."""
-        first = await _send_message(
-            http_client, studio_url, default_user_id, thread_id,
-            "ซื้ออาหาร 200 บาท",
-        )
-        assert len(first) == 1
-        first_cat = first[0]["transactions"][0]["category_id"]
-
-        second = await _send_message(
-            http_client, studio_url, default_user_id, thread_id,
-            "ขอแก้ category จากอาหารเป็น shopping",
-        )
-        assert len(second) == 1
-        _assert_full_payload(
-            second[0],
-            expected_amount=200.0,
-            expected_type="expense",
-            catalog=live_catalog,
-            expected_corrects_group_id=first[0]["group_id"],
-        )
-        new_cat = second[0]["transactions"][0]["category_id"]
-        assert new_cat != first_cat, (
-            f"category_id should change after correction; both are {new_cat}"
-        )
-
-    async def test_E3_correct_note(
-        self,
-        http_client: httpx.AsyncClient,
-        studio_url: str,
-        default_user_id: str,
-        thread_id: str,
-        live_catalog: dict[str, Any],
-    ):
-        """E3: change note/name only. Amount + category unchanged, note
-        reflects the new value."""
-        first = await _send_message(
-            http_client, studio_url, default_user_id, thread_id,
-            "กินกาแฟ 100 บาท",
-        )
-        assert len(first) == 1
-
-        second = await _send_message(
-            http_client, studio_url, default_user_id, thread_id,
-            "แก้ note เป็น กาแฟลาเต้",
-        )
-        assert len(second) == 1
-        _assert_full_payload(
-            second[0],
-            expected_amount=100.0,
-            expected_type="expense",
-            catalog=live_catalog,
-            expected_corrects_group_id=first[0]["group_id"],
-            note_contains="ลาเต้",
-        )
-
-    async def test_E4_add_merchant(
-        self,
-        http_client: httpx.AsyncClient,
-        studio_url: str,
-        default_user_id: str,
-        thread_id: str,
-        live_catalog: dict[str, Any],
-    ):
-        """E4: add a merchant the original message didn't have."""
-        first = await _send_message(
-            http_client, studio_url, default_user_id, thread_id,
-            "กินกาแฟ 100 บาท",
-        )
-        assert len(first) == 1
-
-        second = await _send_message(
-            http_client, studio_url, default_user_id, thread_id,
-            "ขอแก้ merchant เป็น Starbucks",
-        )
-        assert len(second) == 1
-        _assert_full_payload(
-            second[0],
-            expected_amount=100.0,
-            expected_type="expense",
-            catalog=live_catalog,
-            expected_corrects_group_id=first[0]["group_id"],
-            merchant_contains="Starbucks",
-        )
-
-    async def test_E5_correct_wallet(
-        self,
-        http_client: httpx.AsyncClient,
-        studio_url: str,
-        default_user_id: str,
-        thread_id: str,
-        live_catalog: dict[str, Any],
-    ):
-        """E5: switch wallet. Requires ≥2 general wallets — auto-skip
-        otherwise. The new wallet_id must be different and still belong to
-        the catalog."""
-        wallets = live_catalog["wallets"]
-        if len(wallets) < 2:
-            pytest.skip(
-                f"test user has {len(wallets)} general wallet(s); need ≥2"
-            )
-        first_wallet = wallets[0]
-        second_wallet = wallets[1]
-
-        first = await _send_message(
-            http_client, studio_url, default_user_id, thread_id,
-            f"กินกาแฟ 100 จาก {first_wallet['name']}",
-        )
-        assert len(first) == 1
-        assert first[0]["wallet_id"] == first_wallet["sync_id"], (
-            f"expected first proposal on wallet {first_wallet['name']}, "
-            f"got {first[0]['wallet_id']}"
-        )
-
-        second = await _send_message(
-            http_client, studio_url, default_user_id, thread_id,
-            f"ขอแก้เป็นจาก {second_wallet['name']} แทน",
-        )
-        assert len(second) == 1
-        _assert_full_payload(
-            second[0],
-            expected_amount=100.0,
-            expected_type="expense",
-            catalog=live_catalog,
-            expected_corrects_group_id=first[0]["group_id"],
-        )
-        assert second[0]["wallet_id"] == second_wallet["sync_id"], (
-            f"expected wallet switch to {second_wallet['name']}, "
-            f"got {second[0]['wallet_id']}"
-        )
-
-    async def test_E6_correct_date(
-        self,
-        http_client: httpx.AsyncClient,
-        studio_url: str,
-        default_user_id: str,
-        thread_id: str,
-        live_catalog: dict[str, Any],
-    ):
-        """E6: back-date a transaction to yesterday."""
-        first = await _send_message(
-            http_client, studio_url, default_user_id, thread_id,
-            "กินกาแฟ 100 บาท",
-        )
-        assert len(first) == 1
-        assert first[0]["transactions"][0]["date"].startswith(
-            date.today().isoformat()
-        ), "first proposal should be today by default"
-
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
-        second = await _send_message(
-            http_client, studio_url, default_user_id, thread_id,
-            "เมื่อวานนะ ไม่ใช่วันนี้",
-        )
-        assert len(second) == 1
-        _assert_full_payload(
-            second[0],
-            expected_amount=100.0,
-            expected_type="expense",
-            catalog=live_catalog,
-            expected_corrects_group_id=first[0]["group_id"],
-            expected_date=yesterday,
-        )
-
-    async def test_dismissed_proposal_is_not_corrected(
-        self,
-        http_client: httpx.AsyncClient,
-        studio_url: str,
-        default_user_id: str,
-        thread_id: str,
-        live_catalog: dict[str, Any],
-    ):
-        """Edge case: user dismisses the first card, then types a NEW
-        entry. The new proposal must be fresh (corrects_group_id=None) —
-        a dismissed proposal is closed, not editable."""
-        first = await _send_message(
+        """Dismissed card is closed — next add is a normal fresh proposal."""
+        first = await _send_message_groups(
             http_client, studio_url, default_user_id, thread_id,
             "กินกาแฟ 100 บาท",
         )
@@ -754,7 +543,7 @@ class TestEditLastTransaction:
             "transaction_dismissed", first[0]["group_id"],
         )
 
-        second = await _send_message(
+        second = await _send_message_groups(
             http_client, studio_url, default_user_id, thread_id,
             "กินข้าว 50 บาท",
         )
@@ -764,6 +553,105 @@ class TestEditLastTransaction:
             expected_amount=50.0,
             expected_type="expense",
             catalog=live_catalog,
-            expected_corrects_group_id=None,
             note_contains="ข้าว",
+        )
+
+
+# ── Edit redirect (chat-edit is delegated to mobile) ─────────────────────────
+
+
+class TestEditOpensEditSheet:
+    """When a proposal card is on screen and the user types an edit-style
+    phrase, the server must dispatch an `open_edit_sheet` SSE event
+    carrying the pending `group_id` — no new proposal, no LLM call.
+    Mobile responds by opening its in-app transaction editor."""
+
+    async def test_edit_amount_phrasing_opens_edit_sheet(
+        self,
+        http_client: httpx.AsyncClient,
+        studio_url: str,
+        default_user_id: str,
+        thread_id: str,
+        live_catalog: dict[str, Any],
+    ):
+        """'แก้ยอดจาก 100 เป็น 300' while pending → open_edit_sheet event,
+        no new propose_transaction_group."""
+        first = await _send_message_groups(
+            http_client, studio_url, default_user_id, thread_id,
+            "กินกาแฟ 100 บาท",
+        )
+        assert len(first) == 1
+        first_group_id = first[0]["group_id"]
+
+        buckets = await _send_message(
+            http_client, studio_url, default_user_id, thread_id,
+            "แก้ยอดจาก 100 เป็น 300",
+        )
+        assert buckets["propose_transaction_group"] == [], (
+            f"expected NO new proposal, got "
+            f"{len(buckets['propose_transaction_group'])}"
+        )
+        edits = buckets["open_edit_sheet"]
+        assert len(edits) == 1, (
+            f"expected 1 open_edit_sheet event, got {len(edits)}"
+        )
+        assert edits[0].get("group_id") == first_group_id, (
+            f"open_edit_sheet must reference the pending card; "
+            f"expected {first_group_id}, got {edits[0].get('group_id')}"
+        )
+
+    @pytest.mark.parametrize("phrase", [
+        "ขอแก้ category เป็น shopping",
+        "ผิดแล้ว เป็น 200 ต่างหาก",
+        "เปลี่ยน wallet เป็น kbank",
+        "ไม่ใช่ 100 เป็น 200",
+        "ที่จริงเป็น 200",
+    ])
+    async def test_other_edit_phrasings_also_redirect(
+        self,
+        http_client: httpx.AsyncClient,
+        studio_url: str,
+        default_user_id: str,
+        thread_id: str,
+        live_catalog: dict[str, Any],
+        phrase: str,
+    ):
+        """All correction keywords must trigger the open_edit_sheet
+        redirect, not a new proposal — the LLM is bypassed entirely."""
+        first = await _send_message_groups(
+            http_client, studio_url, default_user_id, thread_id,
+            "กินกาแฟ 100 บาท",
+        )
+        assert len(first) == 1
+
+        buckets = await _send_message(
+            http_client, studio_url, default_user_id, thread_id,
+            phrase,
+        )
+        assert buckets["propose_transaction_group"] == [], (
+            f"phrase {phrase!r} produced an unexpected new proposal"
+        )
+        assert len(buckets["open_edit_sheet"]) == 1, (
+            f"phrase {phrase!r} did not trigger open_edit_sheet"
+        )
+        assert buckets["open_edit_sheet"][0].get("group_id") == first[0]["group_id"]
+
+    async def test_edit_phrasing_without_pending_card_still_adds(
+        self,
+        http_client: httpx.AsyncClient,
+        studio_url: str,
+        default_user_id: str,
+        thread_id: str,
+        live_catalog: dict[str, Any],
+    ):
+        """Sanity: when there's NO pending card, an 'edit-ish' message
+        shouldn't open an edit sheet — it should either be a normal add
+        (or a normal ask-back). The redirect is gated on a real pending
+        proposal."""
+        buckets = await _send_message(
+            http_client, studio_url, default_user_id, thread_id,
+            "แก้ยอดเป็น 300 บาท",
+        )
+        assert buckets["open_edit_sheet"] == [], (
+            "open_edit_sheet must not fire without a pending card"
         )

@@ -1,12 +1,23 @@
 """LLM setup for ReAct and CodeAct agents.
 
-OpenRouter models use ChatOpenRouter (native SDK, cost tracking, clean fallback).
-Typhoon models use ChatOpenAI (OpenAI-compatible endpoint, no fallback support).
+OpenRouter models go through `ChatOpenRouterREST` — our own
+`BaseChatModel` subclass that POSTs directly to OpenRouter's REST
+endpoint (see `llm_openrouter.py`). The direct path gives us full
+control over the request body (`usage.include`, `models` fallback list,
+`cache_control` content blocks) without fighting an SDK that doesn't
+recognise OpenRouter-specific fields. The langchain-openrouter wrapper
+was dropped after PoC (2026-05-17) confirmed its underlying openrouter
+SDK rejects every escape hatch needed for cost surfacing.
+
+Typhoon models still use `ChatOpenAI` — Typhoon is plain OpenAI-compat
+with no cost field or fallback list, so the off-the-shelf wrapper fits.
 """
 
 from langchain_openai import ChatOpenAI
 
+from src.billing.callbacks import BillingCallback
 from src.config import settings
+from src.llm_openrouter import ChatOpenRouterREST
 
 
 # Hard per-call timeout. Without this the SDKs wait forever on a stalled
@@ -19,21 +30,31 @@ def _is_openrouter(base_url: str) -> bool:
     return "openrouter" in base_url
 
 
-def _make_openrouter_llm(model: str, fallback_models: list[str], temperature: float):
-    from langchain_openrouter import ChatOpenRouter  # noqa: PLC0415
-
-    model_kwargs: dict = {}
-    if fallback_models:
-        model_kwargs["models"] = [model, *fallback_models]
-
-    # ChatOpenRouter takes `timeout` in **milliseconds** (maps to SDK timeout_ms).
-    return ChatOpenRouter(
+def _make_openrouter_llm(
+    model: str,
+    fallback_models: list[str],
+    temperature: float,
+    *,
+    base_url: str,
+    feature: str = "chat",
+    provider_order: list[str] | None = None,
+    provider_allow_fallbacks: bool | None = None,
+) -> ChatOpenRouterREST:
+    return ChatOpenRouterREST(
         model=model,
         api_key=settings.openrouter_api_key,
+        base_url=base_url,
+        fallback_models=list(fallback_models),
+        provider_order=list(provider_order or []),
+        provider_allow_fallbacks=provider_allow_fallbacks,
         temperature=temperature,
-        timeout=LLM_TIMEOUT_SEC * 1000,
+        timeout=LLM_TIMEOUT_SEC,
         max_retries=2,
-        model_kwargs=model_kwargs,
+        # BillingCallback reads the per-request user_id from a
+        # ContextVar set by server.py, extracts the cost from the
+        # response, and fires a fire-and-forget POST to the Go backend.
+        # See src/billing/__init__.py for the full pipeline.
+        callbacks=[BillingCallback(feature=feature, model_hint=model)],
     )
 
 
@@ -53,7 +74,13 @@ def create_react_llm():
     """ReAct reasoning LLM. Fallback active only when using OpenRouter."""
     if _is_openrouter(settings.react_base_url):
         return _make_openrouter_llm(
-            settings.react_model, settings.react_fallback_models, temperature=0.3
+            settings.react_model,
+            settings.react_fallback_models,
+            temperature=0.3,
+            base_url=settings.react_base_url,
+            feature="chat",
+            provider_order=settings.react_provider_order,
+            provider_allow_fallbacks=settings.react_provider_allow_fallbacks,
         )
     return _make_typhoon_llm(settings.react_model, settings.react_base_url, temperature=0.3)
 
@@ -62,15 +89,33 @@ def create_codeact_llm():
     """CodeAct sandbox LLM. Fallback active only when using OpenRouter."""
     if _is_openrouter(settings.codeact_base_url):
         return _make_openrouter_llm(
-            settings.codeact_model, settings.codeact_fallback_models, temperature=0.3
+            settings.codeact_model,
+            settings.codeact_fallback_models,
+            temperature=0.3,
+            base_url=settings.codeact_base_url,
+            feature="chat",
+            provider_order=settings.codeact_provider_order,
+            provider_allow_fallbacks=settings.codeact_provider_allow_fallbacks,
         )
     return _make_typhoon_llm(settings.codeact_model, settings.codeact_base_url, temperature=0.3)
 
 
 def create_vision_llm():
-    """Multimodal LLM for slip-to-transaction subgraph."""
+    """Multimodal LLM for slip-to-transaction subgraph.
+
+    Fallback active only when on OpenRouter — see .env for which
+    models are known to fail on slip OCR (do NOT add them).
+    """
     if _is_openrouter(settings.vision_base_url):
-        return _make_openrouter_llm(settings.vision_model, [], temperature=0.1)
+        return _make_openrouter_llm(
+            settings.vision_model,
+            settings.vision_fallback_models,
+            temperature=0.1,
+            base_url=settings.vision_base_url,
+            feature="vision",
+            provider_order=settings.vision_provider_order,
+            provider_allow_fallbacks=settings.vision_provider_allow_fallbacks,
+        )
     return _make_typhoon_llm(settings.vision_model, settings.vision_base_url, temperature=0.1)
 
 
@@ -84,7 +129,15 @@ def create_stt_llm():
     Gemini 2.0 Flash Lite accepts audio inputs via OpenRouter's
     OpenAI-compatible `input_audio` content block (see `stt_node.py`).
     """
-    return _make_openrouter_llm(settings.stt_model, [], temperature=0.0)
+    return _make_openrouter_llm(
+        settings.stt_model,
+        settings.stt_fallback_models,
+        temperature=0.0,
+        base_url=settings.stt_base_url,
+        feature="stt",
+        provider_order=settings.stt_provider_order,
+        provider_allow_fallbacks=settings.stt_provider_allow_fallbacks,
+    )
 
 
 def create_intent_classifier_llm():
@@ -92,38 +145,23 @@ def create_intent_classifier_llm():
 
     Temperature pinned to 0 — classification is a discrete decision, not
     a creative task; randomness only adds variance to the routing.
+
+    Fallback active only when on OpenRouter — Typhoon's OpenAI-compat
+    endpoint doesn't support the `models` array.
     """
     if _is_openrouter(settings.intent_classifier_base_url):
         return _make_openrouter_llm(
-            settings.intent_classifier_model, [], temperature=0.0
+            settings.intent_classifier_model,
+            settings.intent_classifier_fallback_models,
+            temperature=0.0,
+            base_url=settings.intent_classifier_base_url,
+            feature="chat",
+            provider_order=settings.intent_classifier_provider_order,
+            provider_allow_fallbacks=settings.intent_classifier_provider_allow_fallbacks,
         )
     return _make_typhoon_llm(
         settings.intent_classifier_model,
         settings.intent_classifier_base_url,
-        temperature=0.0,
-    )
-
-
-def create_intent_classifier_fallback_llm():
-    """Optional fallback LLM for the intent classifier.
-
-    Returns None when no fallback model is configured — caller treats
-    that as "no fallback available" and short-circuits to the existing
-    `intent='other'` default. We keep this opt-in to avoid silently
-    doubling per-classification cost (most workloads won't need it).
-
-    When configured, the fallback should be a DIFFERENT provider than
-    the primary so they don't share a single point of failure (one
-    OpenRouter region down, one model deprecation, etc.).
-    """
-    model = (settings.intent_classifier_fallback_model or "").strip()
-    if not model:
-        return None
-    if _is_openrouter(settings.intent_classifier_fallback_base_url):
-        return _make_openrouter_llm(model, [], temperature=0.0)
-    return _make_typhoon_llm(
-        model,
-        settings.intent_classifier_fallback_base_url,
         temperature=0.0,
     )
 
@@ -182,7 +220,13 @@ def create_transaction_llm():
     """
     if _is_openrouter(settings.transaction_llm_base_url):
         return _make_openrouter_llm(
-            settings.transaction_llm_model, [], temperature=0.1
+            settings.transaction_llm_model,
+            settings.transaction_llm_fallback_models,
+            temperature=0.1,
+            base_url=settings.transaction_llm_base_url,
+            feature="chat",
+            provider_order=settings.transaction_llm_provider_order,
+            provider_allow_fallbacks=settings.transaction_llm_provider_allow_fallbacks,
         )
     return _make_typhoon_llm(
         settings.transaction_llm_model,
@@ -196,7 +240,5 @@ llm = create_react_llm()
 codeact_llm = create_codeact_llm()
 vision_llm = create_vision_llm()
 intent_classifier_llm = create_intent_classifier_llm()
-# May be None — caller (classify_intent_node) checks before retry.
-intent_classifier_fallback_llm = create_intent_classifier_fallback_llm()
 stt_llm = create_stt_llm()
 transaction_llm = create_transaction_llm()
