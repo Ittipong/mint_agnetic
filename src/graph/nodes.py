@@ -499,9 +499,63 @@ When you write a reply:
    markdown formatting, no quotation marks inside the items.
 
    Format (exact):
-       <suggestions>["ค่าใช้จ่ายหมวดไหนเยอะสุด", "งบประมาณเดือนนี้เหลือเท่าไร", "เปรียบเทียบกับเดือนที่แล้ว"]</suggestions>
+       <suggestions>["งบค่าอาหารเหลือ 800 พอถึงสิ้นเดือนไหม", "หมวดไหนใช้เยอะสุดเดือนนี้", "เทียบกับเดือนที่แล้วเป็นไง"]</suggestions>
 
-   Rules:
+   ## Composition — 1 SPECIFIC + 2 GENERIC (hybrid)
+   The 3 chips MUST follow this mix:
+   - **Slot 1 — SPECIFIC**: References a real number / wallet name /
+     category name / date / period that appeared in THIS turn (from the
+     user's question, your answer, or tool output). It must read like a
+     direct follow-up — tapping it should land the user on a question
+     where the agent already knows the context. Examples:
+       - "งบค่าอาหารเหลือ 800 พอถึงสิ้นเดือนไหม"
+       - "ค่าน้ำค่าไฟ 2,000 จ่ายยังไงดี"
+       - "บัตร KBank ใช้ไป 12,000 ปลอดภัยอยู่ไหม"
+     Specific does NOT mean "rephrase the user's question with their number".
+     It means "the next question that becomes natural BECAUSE we now know
+     that number". A user who just heard "เหลือ 800" wouldn't ask
+     "งบค่าอาหารเหลือเท่าไร" again — they would ask whether 800 is enough.
+   - **Slots 2 & 3 — GENERIC**: No numbers / wallet names / category
+     names. Plain phrasing like the user would type fresh. Examples:
+       - "หมวดไหนใช้เยอะสุดเดือนนี้"
+       - "เทียบกับเดือนที่แล้วเป็นไง"
+       - "งบแต่ละหมวดเหลือเท่าไร"
+
+   ## Category buckets — mix freely based on context
+   You decide which buckets the 3 chips come from. There is no fixed
+   formula like "always 1 awareness + 1 risk". Pick the mix that makes
+   the user most likely to want to tap. Buckets to draw from:
+
+   - **Add transaction** — invite the user to log another entry.
+     ALWAYS phrased generically (no specific amounts/merchants):
+     "บันทึกค่าอาหารกลางวันด้วย", "เพิ่มค่าเดินทางวันนี้",
+     "บันทึก subscription รายเดือน". Use this when context suggests the
+     user is in logging mode (e.g. they were asking about a category they
+     might still owe entries to).
+   - **Awareness / Visibility** — help the user see their state:
+     "เงินจะพอไหม", "ใช้อะไรเยอะสุด", "เดือนนี้ดีขึ้นไหม".
+   - **Risk / Alert** — surface concerns:
+     "บัตรเครดิตเริ่มอันตรายไหม", "เงินใกล้หมดก่อนสิ้นเดือนหรือยัง",
+     "ค่าใช้จ่ายผิดปกติไหม".
+   - **Planning / Decision** — help the user act:
+     "ลดค่าอะไรได้ก่อน", "ควรเก็บเดือนละเท่าไหร่", "ปรับงบยังไงดี".
+   - **Coaching / Companion** — friendly check-in:
+     "ตอนนี้ฉันโอเคไหม", "วันนี้ควรทำอะไรกับเงิน", "ช่วยวางแผนให้หน่อย".
+   - **Operational / Utility** — basic features:
+     "สรุปรายจ่ายวันนี้", "ดู report เดือนนี้", "ตรวจ recurring bill".
+
+   ## Onboarding fallback — when there is no real data to be specific about
+   If the user is a new account with no transactions / wallets / budget /
+   credit card / goal yet (tool returns empty, or the question doesn't
+   require a tool call AND no prior context exists), DO NOT force a
+   specific chip with invented numbers. Instead emit 3 onboarding chips
+   that invite the user to add data. Examples:
+       <suggestions>["เพิ่ม wallet แรก", "เพิ่มบัตรเครดิต", "ตั้งงบประมาณรายเดือน"]</suggestions>
+   Pick chips that fit the conversation — if the user asked about
+   savings, prefer "ตั้งเป้าหมายการออม"; if they asked about debt,
+   prefer "เพิ่มบัตรเครดิต"; etc. Always 3 chips, always actionable.
+
+   ## Universal rules
    - The tag MUST be on its own paragraph at the very end of the message —
      nothing after it.
    - The payload MUST be a valid JSON array of exactly 3 strings.
@@ -510,7 +564,12 @@ When you write a reply:
    - Do NOT also write the same questions as a numbered list in the prose —
      the tag is the ONLY place suggestions appear. The prose should NOT
      include a "คำถามที่อยากแนะนำ" or "คำถามถัดไป" section anymore.
-   - Always include the tag, even for short conversational replies.
+   - Always include the tag, even for short conversational replies
+     (except for the explicit no-tag turns listed under the slip / quick-add
+     instructions elsewhere in this prompt).
+   - NEVER invent numbers for the specific chip. If you don't have a real
+     figure from this turn, drop to onboarding chips or use a generic chip
+     in slot 1 instead — fabricated specifics destroy user trust.
 
 **Output formatting — ALWAYS use lists, not prose, for tabular data:**
 When the tool returns multiple rows under `Breakdown:` or `breakdown:`, render
@@ -619,13 +678,10 @@ transaction lists. The insight + suggestions section can still be prose.
   `Summary by wallet:` block (it auto-aggregates for list-style results),
   copy those numbers — never re-derive from the row list
 
-**Suggested next questions (choose 3 that are relevant to the conversation):**
-- "ค่าใช้จ่ายหมวดไหนเยอะสุด" (which category is highest)
-- "มีเงินเหลือเท่าไร" (remaining balance)
-- "งบประมาณเดือนนี้เหลือเท่าไร" (budget remaining)
-- "เก็บเงินได้เท่าไรแล้ว" (savings progress)
-- "รายได้เดือนนี้เท่าไร" (monthly income)
-- "หนี้ทั้งหมดเท่าไร" (total debt)
+_(See rule 6 above for the full follow-up suggestions contract — hybrid
+1 specific + 2 generic, mixed across awareness / risk / planning /
+coaching / utility / add-transaction buckets, with the onboarding
+fallback for empty-data turns.)_
 
 ---
 

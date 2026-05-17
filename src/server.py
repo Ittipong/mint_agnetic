@@ -688,6 +688,16 @@ async def _stream_graph(
     # Strip <thinking>...</thinking> blocks BEFORE suggestions parsing
     # so the inner content (model reasoning) never reaches the chat UI.
     thinking_filter = _ThinkingFilter()
+    # quick_add JSON-dump guard. Nova occasionally streams the tool args
+    # as a raw JSON object instead of invoking the tool API; the node's
+    # defensive recovery converts that into a real tool call, but the
+    # tokens have already been emitted to the SSE stream by the time
+    # the node sees them. This filter buffers quick_add tokens until
+    # it can tell the shape, suppresses the entire stream when the
+    # leading non-whitespace char is `{`, and flushes normally otherwise.
+    quick_add_buffer = ""
+    quick_add_suppress = False
+    quick_add_decided = False
     # `on_tool_start` → start ts; popped on `on_tool_end` to compute
     # duration. Keyed by LangChain run_id so concurrent tool calls
     # (e.g., parallel `get_financial_advice` invocations) don't collide.
@@ -709,6 +719,25 @@ async def _stream_graph(
         "thread_id": thread_id,
         "model": settings.react_model,
     })
+    # [DEBUG-XX-VOICE] confirm we exit the meta yield and enter the
+    # astream_events loop. If this log shows but no per-event logs
+    # follow, the LangGraph iterator never produced its first event.
+    _debug_log(
+        "DEBUG-XX-VOICE",
+        "after meta yielded, entering astream_events loop",
+        thread_id=thread_id,
+        has_audio=bool(audio_data),
+        audio_bytes=(len(audio_data) if audio_data else 0),
+    )
+    # [DEBUG-XX-VOICE] per-kind counter for the loop body. We tally
+    # every event the iterator yields so we can tell whether the
+    # stream truly went silent (counter frozen) or the graph emitted
+    # events we are not forwarding to SSE (counter climbing, no
+    # client-visible output).
+    debug_voice_event_counts: dict[str, int] = {}
+    debug_voice_last_kind: str | None = None
+    debug_voice_last_node: str | None = None
+    debug_voice_total_events: int = 0
 
     # Manual iteration so we can interleave SSE heartbeats during quiet
     # stretches and bail out hard if the graph wedges. The previous
@@ -779,6 +808,25 @@ async def _stream_graph(
             last_real_event = time.monotonic()
             kind = event["event"]
             node = (event.get("metadata") or {}).get("langgraph_node")
+            # [DEBUG-XX-VOICE] tally each event kind/node we observe so
+            # we can correlate the stream timeline with what LangGraph
+            # actually emitted. Logged at DETAIL to avoid blowing up
+            # the milestone log on long runs.
+            debug_voice_total_events += 1
+            debug_voice_last_kind = kind
+            debug_voice_last_node = node
+            debug_voice_event_counts[kind] = (
+                debug_voice_event_counts.get(kind, 0) + 1
+            )
+            _debug_log(
+                "DEBUG-XX-VOICE",
+                "loop event",
+                kind=kind,
+                node=node or "-",
+                name=event.get("name") or "-",
+                seq=debug_voice_total_events,
+                _level=LogLevel.DETAIL,
+            )
 
             # === Status: thinking (on first reason entry) ===
             # === Status: calculating (on first act/analyze entry) ===
@@ -827,9 +875,36 @@ async def _stream_graph(
                 if not no_thinking:
                     continue
                 visible = suggestions_filter.feed(no_thinking)
-                if visible:
-                    assistant_reply_chunks.append(visible)
-                    yield _sse({"type": "token", "content": visible})
+                if not visible:
+                    continue
+
+                # quick_add JSON-dump guard. Hold the first few chars
+                # until we can tell whether Nova is calling the tool
+                # via the API (good — no tokens) or dumping the args
+                # as JSON text (bad — suppress entirely). The decision
+                # happens on the first non-whitespace char.
+                if node == "quick_add" and not quick_add_decided:
+                    quick_add_buffer += visible
+                    stripped = quick_add_buffer.lstrip()
+                    if not stripped:
+                        # All whitespace so far — wait for real content.
+                        continue
+                    quick_add_decided = True
+                    if stripped[0] == "{":
+                        quick_add_suppress = True
+                        quick_add_buffer = ""
+                        continue
+                    # Flush the buffer as one chunk so the user doesn't
+                    # see a tiny delay on the first ask-back char.
+                    assistant_reply_chunks.append(quick_add_buffer)
+                    yield _sse({"type": "token", "content": quick_add_buffer})
+                    quick_add_buffer = ""
+                    continue
+                if node == "quick_add" and quick_add_suppress:
+                    continue
+
+                assistant_reply_chunks.append(visible)
+                yield _sse({"type": "token", "content": visible})
 
             elif kind == "on_tool_start":
                 run_id = str(event.get("run_id") or "")
@@ -958,6 +1033,21 @@ async def _stream_graph(
     except Exception as exc:
         _debug_log("STREAM", "Error", error=str(exc), user_id=user_id)
         yield _sse({"type": "error", "message": str(exc)})
+    finally:
+        # [DEBUG-XX-VOICE] stream-close summary — last line written
+        # regardless of how the generator exits (clean done, error,
+        # client disconnect). Compare `total_events` against the
+        # per-kind counts to spot stuck-iterator vs no-forward bugs.
+        _debug_log(
+            "DEBUG-XX-VOICE",
+            "stream closing",
+            thread_id=thread_id,
+            total_events=debug_voice_total_events,
+            last_kind=debug_voice_last_kind or "-",
+            last_node=debug_voice_last_node or "-",
+            event_counts=debug_voice_event_counts,
+            aborted=stream_aborted,
+        )
 
 
 
