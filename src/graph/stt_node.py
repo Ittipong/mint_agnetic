@@ -124,6 +124,18 @@ async def stt_node(state: AgentState, config: RunnableConfig) -> dict:
     audio_mime = state.get("audio_mime")
     msgs = state.get("messages") or []
 
+    # [DEBUG-XX-VOICE] entry probe — confirms the graph router routed
+    # the turn into the STT lane and what shape the bytes came in.
+    _stt_log(
+        "DEBUG-XX-VOICE",
+        "stt_node entered",
+        has_audio_data=bool(audio_data),
+        audio_bytes=(len(audio_data) if audio_data else 0),
+        has_audio_mime=bool(audio_mime),
+        audio_mime=audio_mime or "",
+        msg_count=len(msgs),
+    )
+
     if not audio_data:
         # Should never happen — the entry router only sends us here when
         # audio_data is truthy. Treat as a programmer error in dev; in
@@ -248,6 +260,15 @@ async def stt_node(state: AgentState, config: RunnableConfig) -> dict:
     if not replaced:
         new_messages.append(HumanMessage(content=transcript))
 
+    # [DEBUG-XX-VOICE] returning success — transcript will replace
+    # the placeholder HumanMessage and downstream nodes will run.
+    _stt_log(
+        "DEBUG-XX-VOICE",
+        "stt_node returning (success)",
+        transcript_len=len(transcript),
+        replaced=replaced,
+        new_message_count=len(new_messages),
+    )
     return {
         "messages": new_messages,
         "transcript": transcript,
@@ -313,6 +334,14 @@ async def _dispatch_and_terminate(reason: str, **fields) -> dict:
     """
     _stt_log("STT", "dispatching stt_error_event", reason=reason, **fields)
     await adispatch_custom_event("stt_error_event", {"reason": reason})
+    # [DEBUG-XX-VOICE] returning via error path — graph will land on
+    # stt_error_node and END without invoking reason / quick_add.
+    _stt_log(
+        "DEBUG-XX-VOICE",
+        "stt_node returning (error)",
+        reason=reason,
+        **fields,
+    )
     return {
         "stt_error": reason,
         "audio_data": None,

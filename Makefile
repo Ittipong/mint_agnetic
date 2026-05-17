@@ -130,6 +130,10 @@ eval-langsmith: ## Run evaluation and log to LangSmith
 test: ## Run pytest
 	$(UV) run pytest
 
+test-add-transaction: ## Run quick-add (add/edit transaction) integration tests against live server (SERVER_PORT, TEST_USER_ID)
+	STUDIO_URL=http://localhost:$(SERVER_PORT) TEST_USER_ID=$(TEST_USER_ID) \
+		$(UV) run pytest evaluation/integration/test_quick_add_flow.py -m live -v
+
 lint: ## Run ruff linter
 	$(UV) run ruff check src/
 
