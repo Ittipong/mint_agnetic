@@ -169,6 +169,31 @@ async def update_after_message(
             )
 
 
+async def update_after_marker(
+    pool: AsyncConnectionPool,
+    thread_id: str,
+    marker_preview: str,
+) -> None:
+    """Update preview + counters after a single marker append.
+
+    Used by `POST /chat/intent` which persists ONLY a HumanMessage
+    marker (no ack AIMessage), so the count bumps by 1 — not 2.
+    """
+    preview = _truncate(marker_preview, _PREVIEW_LIMIT)
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                UPDATE chat_threads
+                SET last_message_preview = %s,
+                    message_count = message_count + 1,
+                    updated_at = NOW()
+                WHERE thread_id = %s
+                """,
+                (preview, thread_id),
+            )
+
+
 async def delete_thread_cascade(
     pool: AsyncConnectionPool,
     thread_id: str,

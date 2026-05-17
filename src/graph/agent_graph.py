@@ -4,8 +4,9 @@ quick-add lane for text journal entries.
 
 Architecture:
   START
-    ├─ images?  → slip → [slip_tool] → cleanup → END           (vision flow)
-    └─ no image → classify_intent
+    ├─ audio?   → stt → (classify_intent | stt_error)            (voice flow)
+    ├─ images?  → slip → [slip_tool] → cleanup → END             (vision flow)
+    └─ text     → classify_intent
                     ├─ add_transaction → quick_add → propose_validation → cleanup → END
                     └─ other           → reason → [act|tool|respond] → ↶   (ReAct loop)
 
@@ -18,6 +19,11 @@ ReAct Loop:
 Slip + quick_add are intentionally NOT loops — single LLM hop, optionally
 fires propose_transaction, then we terminate. Failures throw to the
 FastAPI stream layer (no silent fallback to text reply).
+
+Note: the save / dismiss acknowledgement for a proposal card is NOT a
+graph lane anymore. Mobile renders its own Thai template ack locally
+and POSTs `/chat/intent` to append marker + ack to the checkpoint
+without invoking the graph (no LLM round-trip).
 """
 
 from langgraph.graph import StateGraph, START, END
@@ -30,10 +36,6 @@ from src.graph.nodes import (
     ANALYZE_TOOL_NAMES,
 )
 from src.graph.compute_subgraph import act_node
-from src.graph.confirmation_node import (
-    confirmation_node,
-    is_confirmation_marker,
-)
 from src.graph.intent_classifier import classify_intent_node
 from src.graph.quick_add_node import quick_add_node
 from src.graph.slip_node import (
@@ -43,40 +45,23 @@ from src.graph.slip_node import (
 )
 from src.graph.stt_node import stt_node, stt_error_node
 
-from langchain_core.messages import HumanMessage as _HumanMessage
-
 
 def _route_by_input(state: AgentState) -> str:
-    """Entry router: audio turn → stt; image turn → slip; save/dismiss
-    marker → confirmation; everything else → classifier.
+    """Entry router: audio turn → stt; image turn → slip;
+    everything else → classifier.
 
     Audio takes priority over images so a future "voice + slip" turn
     can be handled by chaining (stt → slip) once the spec lands;
     today the voice endpoint never sends images so the order is moot.
+
+    Save / dismiss intents from a proposal card no longer route through
+    the graph — they are appended directly to the checkpoint by
+    `POST /chat/intent` without invoking any node.
     """
     if state.get("audio_data"):
         return "stt"
     if state.get("images"):
         return "slip"
-    # Latest HumanMessage may be a system marker from mobile after
-    # the user saved or dismissed a transaction card. Route those to
-    # the dedicated confirmation node so they bypass intent
-    # classification and quick_add entirely.
-    msgs = state.get("messages") or []
-    for m in reversed(msgs):
-        if isinstance(m, _HumanMessage):
-            content = m.content
-            text = ""
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, list):
-                for blk in content:
-                    if isinstance(blk, dict) and blk.get("type") == "text":
-                        text = str(blk.get("text", ""))
-                        break
-            if is_confirmation_marker(text):
-                return "confirmation"
-            break
     return "classify_intent"
 
 
@@ -125,31 +110,14 @@ def _should_route(state: AgentState) -> str:
 
 
 def _route_after_stt(state: AgentState) -> str:
-    """After stt_node: short-circuit on error, otherwise fall back to
-    the regular text entry (intent classifier + confirmation marker).
+    """After stt_node: short-circuit on error, otherwise rejoin the
+    text flow at the intent classifier.
 
-    Mirrors `_route_by_input` for the non-audio branches so a future
-    feature like "send a save/dismiss marker by voice" still routes
-    through `confirmation`. Today the mobile client only uses voice
-    for free-form chat, so the practical path is stt → classify_intent.
+    Voice is free-form chat only — proposal save / dismiss markers
+    travel via `POST /chat/intent` and never enter the graph.
     """
     if state.get("stt_error"):
         return "stt_error"
-    msgs = state.get("messages") or []
-    for m in reversed(msgs):
-        if isinstance(m, _HumanMessage):
-            content = m.content
-            text = ""
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, list):
-                for blk in content:
-                    if isinstance(blk, dict) and blk.get("type") == "text":
-                        text = str(blk.get("text", ""))
-                        break
-            if is_confirmation_marker(text):
-                return "confirmation"
-            break
     return "classify_intent"
 
 
@@ -188,40 +156,33 @@ def _build_builder() -> StateGraph:
     # same id-validation + SSE dispatch contract as the slip lane.
     builder.add_node("quick_add_tool", propose_validation_node)
 
-    # Confirmation node — reacts to mobile's save/dismiss marker by
-    # generating a short Thai acknowledgement that references the
-    # actual transaction the user just acted on.
-    builder.add_node("confirmation", confirmation_node)
-
     # ReAct loop nodes
     builder.add_node("reason", reason_node)
     builder.add_node("act", act_node)
     builder.add_node("tool", ToolNode(REGULAR_TOOLS))
 
-    # Entry: audio turns → stt, image turns → slip, save/dismiss
-    # markers → confirmation, text turns → classifier.
+    # Entry: audio turns → stt, image turns → slip, text turns →
+    # classifier. Save / dismiss intents bypass the graph entirely
+    # via `POST /chat/intent`.
     builder.add_conditional_edges(
         START,
         _route_by_input,
         {
             "stt": "stt",
             "slip": "slip",
-            "confirmation": "confirmation",
             "classify_intent": "classify_intent",
         },
     )
-    builder.add_edge("confirmation", END)
 
-    # Voice lane: stt → (error|classify|confirmation). The error node
-    # is the only terminal — successful transcription rejoins the
-    # standard text flow at classify_intent.
+    # Voice lane: stt → (error|classify). The error node is the only
+    # terminal — successful transcription rejoins the standard text
+    # flow at classify_intent.
     builder.add_conditional_edges(
         "stt",
         _route_after_stt,
         {
             "stt_error": "stt_error",
             "classify_intent": "classify_intent",
-            "confirmation": "confirmation",
         },
     )
     builder.add_edge("stt_error", END)

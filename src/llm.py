@@ -128,6 +128,47 @@ def create_intent_classifier_fallback_llm():
     )
 
 
+# ── Prompt caching helper ─────────────────────────────────────────────────────
+
+# Models that benefit from explicit Anthropic-style cache_control via
+# OpenRouter. DeepSeek and Gemini auto-cache by prefix without markers, so
+# we don't wrap their messages (extra structured content blocks can confuse
+# providers that don't honor cache_control).
+_CACHE_CONTROL_MODELS = (
+    "anthropic/",
+    "amazon/nova",  # Nova models support cache_control via Bedrock
+    "claude-",
+)
+
+
+def supports_cache_control(model: str | None) -> bool:
+    """True when wrapping a SystemMessage with cache_control reduces cost."""
+    if not model:
+        return False
+    m = model.lower()
+    return any(m.startswith(p) or p in m for p in _CACHE_CONTROL_MODELS)
+
+
+def cached_system_content(text: str, model: str | None) -> str | list[dict]:
+    """Return the right SystemMessage content shape for the target model.
+
+    Plain string for DeepSeek/Gemini (auto prefix-cached by OpenRouter), or
+    a structured content list with `cache_control={"type": "ephemeral"}` for
+    models that require explicit caching markers (Anthropic, Nova). The list
+    form is what `langchain_openai` forwards verbatim to OpenRouter, which
+    passes the marker through to the upstream provider.
+    """
+    if not supports_cache_control(model):
+        return text
+    return [
+        {
+            "type": "text",
+            "text": text,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
 def create_transaction_llm():
     """LLM for the propose_transaction lanes (`quick_add` + `confirmation`).
 

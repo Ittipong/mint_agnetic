@@ -13,14 +13,23 @@ split a receipt they should use the slip flow.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
+import uuid
 from datetime import date
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import RunnableConfig
 
+from src.config import settings
 from src.debug_log import LogLevel as _LogLevel, log as _log
 from src.entity_catalog import (
     fetch_categories_by_wallet,
@@ -28,7 +37,7 @@ from src.entity_catalog import (
     render_for_slip,
 )
 from src.graph.state import AgentState
-from src.llm import transaction_llm
+from src.llm import cached_system_content, transaction_llm
 from src.tools.transaction import propose_transaction
 
 _logger = logging.getLogger(__name__)
@@ -56,6 +65,19 @@ def _build_quick_add_prompt(
     return f"""You are a quick-add agent inside Mint Money.
 
 **Today's date:** {current_date}
+
+## OUTPUT FORMAT — CRITICAL
+
+You have ONLY two valid response shapes:
+1. **Tool call** — invoke `propose_transaction` via the tool-calling API.
+   Do not echo its arguments in assistant text.
+2. **Plain Thai text** — a short ask-back sentence when a required
+   field is missing. No JSON, no braces, no key/value pairs.
+
+NEVER write JSON, dict syntax, or anything that starts with `{{` in
+the assistant content. If you find yourself about to type `{{"date"`
+or `{{"note"`, STOP — you wanted to call the tool. Call it via the
+tool-calling API instead.
 
 The user is logging a single spending/income event through chat.
 This may take ONE turn ("กิน kfc 100บาท" → done) or MULTIPLE turns
@@ -174,12 +196,28 @@ window — merge prior turns with the current reply), call
 - `currency_code` = "{currency_code}"   (see "Currency defaults")
 - `currency_symbol` = "{currency_symbol}"   (see "Currency defaults")
 - `include_in_report` = true
+- `corrects_group_id` = see "Correction detection" below — usually null
 
 After the tool call, reply with exactly this Thai sentence:
 "ดูข้อมูลในการ์ดด้านบนได้เลยครับ — กดบันทึกถ้าถูกต้อง"
 
 Do NOT restate the transaction details. Do NOT emit a `<suggestions>`
 tag. Do NOT call any other tool.
+
+## Correction detection (`corrects_group_id`)
+
+Default: **null**. Only set it when correcting a prior proposal in
+this same conversation.
+
+How to detect a correction: the user's current message uses words like
+"ผิด", "ไม่ใช่", "แก้เป็น" + a new amount, AND the history above shows
+a recent `ToolMessage` with `(proposal dispatched, group_id=<uuid>)`.
+Copy that `<uuid>` into `corrects_group_id`.
+
+Additions like "อีกอัน 200", "เพิ่ม 200", "แล้วก็ 200" are NEW
+transactions, not corrections — leave null.
+
+When in doubt → null.
 """
 
 
@@ -219,12 +257,19 @@ async def quick_add_node(state: AgentState, config: RunnableConfig) -> dict:
     current_date = date.today().isoformat()
     currency_code = (state.get("default_currency_code") or "THB").strip() or "THB"
     currency_symbol = (state.get("default_currency_symbol") or "฿").strip() or "฿"
+    # Wrap with cache_control so Nova (the configured transaction model)
+    # only pays full price for the first turn of a session. The wrapper
+    # is a no-op for auto-caching providers (DeepSeek/Gemini), so swapping
+    # the model later doesn't break anything.
     system_msg = SystemMessage(
-        content=_build_quick_add_prompt(
-            current_date,
-            wallet_category_map,
-            currency_code,
-            currency_symbol,
+        content=cached_system_content(
+            _build_quick_add_prompt(
+                current_date,
+                wallet_category_map,
+                currency_code,
+                currency_symbol,
+            ),
+            settings.transaction_llm_model,
         )
     )
 
@@ -267,6 +312,32 @@ async def quick_add_node(state: AgentState, config: RunnableConfig) -> dict:
         _level=_LogLevel.MILESTONE,
     )
 
+    # Defensive recovery: Nova occasionally dumps the tool args as a
+    # raw JSON string in `content` instead of invoking the tool API
+    # (especially when the prompt grows in size). Detect that shape
+    # and synthesize the tool_call so downstream graph nodes don't
+    # have to deal with it — mobile would otherwise render the JSON
+    # as a plain text bubble.
+    if not tool_calls:
+        recovered_args = _recover_tool_args_from_text(_full_text(response))
+        if recovered_args is not None:
+            response = AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "propose_transaction",
+                    "args": recovered_args,
+                    "id": f"recovered_{uuid.uuid4().hex[:8]}",
+                    "type": "tool_call",
+                }],
+            )
+            tool_calls = response.tool_calls
+            _qa_log(
+                "QUICK_ADD",
+                "recovered tool_call from JSON text",
+                args_keys=sorted(recovered_args.keys()),
+                _level=_LogLevel.MILESTONE,
+            )
+
     # No tool_call = ask-back. Persist the AIMessage so the next user
     # turn has it as context for the classifier + this node. Empty
     # text is a model glitch — surface a generic Thai ask so the user
@@ -288,24 +359,49 @@ def _recent_dialog(msgs: list, window: int) -> list:
     session only.
 
     A previous AIMessage carrying `tool_calls` marks the moment a
-    transaction card was dispatched to mobile — the user has saved or
-    rejected it on the mobile UI by now and that conversation is
-    closed. Anything before that boundary must NOT bleed into the
-    new session: a user typing "เที่ยว" after a saved "กิน kfc 100"
-    must NOT have "kfc" merged into their next transaction.
+    transaction card was dispatched to mobile. Two cases:
 
-    Algorithm: drop everything up to and including the last AIMessage
-    with tool_calls; from what remains, keep only Human/AI text
-    messages (Tool messages and empty AI messages are routing
-    artifacts that confuse the LLM). Also drop `[INTENT:...]` markers
-    from mobile — those are system signals, not conversational text.
+    1. **Closed proposal** — a later `[INTENT:transaction_saved]` /
+       `[INTENT:transaction_dismissed]` HumanMessage follows the
+       tool-call AIMessage. The user has acted on the card; the
+       conversation is closed and must NOT bleed into the next
+       session (a user typing "เที่ยว" after a saved "กิน kfc 100"
+       must NOT have "kfc" merged into their new transaction).
+    2. **Still pending** — NO intent marker follows. The user is
+       likely correcting the just-dispatched proposal ("ผิด ไม่ใช่
+       100 แต่ 200"). We must KEEP the pending proposal in context
+       so the LLM can read its `group_id` from the trailing
+       ToolMessage and pass it back as `corrects_group_id`, which
+       lets mobile auto-discard the stale card.
+
+    Algorithm: scan for the last AIMessage with tool_calls. If a
+    following HumanMessage with `[INTENT:...]` exists, treat the
+    block as closed and cut everything up to and including it.
+    Otherwise keep the block intact (including its trailing
+    ToolMessages, which carry the resolved group_id). From what
+    remains, keep Human/AI text messages PLUS the still-pending
+    proposal's AIMessage(tool_calls) + ToolMessage so the LLM can
+    reason about a correction.
     """
-    # Find the index of the most recent AIMessage with tool_calls —
-    # that's the session boundary. Anything ≤ this index is closed.
-    cutoff = -1
+    # Find the index of the most recent AIMessage with tool_calls.
+    last_tool_idx = -1
     for i, m in enumerate(msgs):
         if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
-            cutoff = i
+            last_tool_idx = i
+
+    cutoff = -1
+    if last_tool_idx >= 0:
+        # Look for a `[INTENT:...]` marker AFTER the tool call. If we
+        # find one, that proposal is closed — cut up to and including
+        # the marker. If we don't, leave `cutoff = -1` so the entire
+        # history (including the still-pending proposal block) stays.
+        for j in range(last_tool_idx + 1, len(msgs)):
+            m = msgs[j]
+            if isinstance(m, HumanMessage):
+                text = _text_preview(m).strip()
+                if text.startswith("[INTENT:"):
+                    cutoff = j
+                    break
     relevant = msgs[cutoff + 1:] if cutoff >= 0 else msgs
 
     filtered = []
@@ -318,10 +414,24 @@ def _recent_dialog(msgs: list, window: int) -> list:
             filtered.append(m)
         elif isinstance(m, AIMessage):
             text = _text_preview(m).strip()
-            if text:
-                # Strip tool_calls before re-sending so the model isn't
-                # tempted to "complete" a stale, partial tool chain.
+            tool_calls = getattr(m, "tool_calls", None) or []
+            if tool_calls:
+                # Preserve the pending proposal so the LLM can detect
+                # a correction. Strip text content (Nova sometimes
+                # bundles a "ดูข้อมูลในการ์ด..." sentence here) to
+                # keep the prompt focused on the tool-call args.
+                filtered.append(
+                    AIMessage(content="", tool_calls=tool_calls)
+                )
+            elif text:
                 filtered.append(AIMessage(content=text))
+        elif isinstance(m, ToolMessage):
+            # Carries `group_id=<uuid>` substring — required reading
+            # for the LLM to populate `corrects_group_id` on a
+            # follow-up correction. Skip empty ones (routing noise).
+            content = getattr(m, "content", "") or ""
+            if isinstance(content, str) and content.strip():
+                filtered.append(m)
     return filtered[-window:]
 
 
@@ -334,3 +444,66 @@ def _text_preview(response: Any) -> str:
             if isinstance(blk, dict) and blk.get("type") == "text":
                 return str(blk.get("text", ""))[:200].replace("\n", " ")
     return ""
+
+
+def _full_text(response: Any) -> str:
+    """Full assistant text (not truncated like _text_preview)."""
+    content = getattr(response, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for blk in content:
+            if isinstance(blk, dict) and blk.get("type") == "text":
+                parts.append(str(blk.get("text", "")))
+        return "".join(parts)
+    return ""
+
+
+# Required fields a recovered payload must carry to be usable as a
+# tool call. Optional fields fall back to the tool's own defaults.
+_REQUIRED_RECOVERY_FIELDS = ("amount",)
+
+# Match the first balanced-looking JSON object in a blob. Nova
+# sometimes wraps the JSON in code fences or chats around it; this
+# strips those.
+_JSON_OBJECT_RE = re.compile(r"\{[\s\S]*\}")
+
+
+def _recover_tool_args_from_text(text: str) -> dict | None:
+    """Try to parse a propose_transaction args dict out of free text.
+
+    Returns the args dict on success, None when no recoverable JSON
+    is present. The defender lives here so the rest of the graph
+    can stay tool-call-only.
+    """
+    if not text:
+        return None
+    stripped = text.strip()
+    if not stripped or "{" not in stripped:
+        return None
+
+    candidates: list[str] = []
+    if stripped.startswith("{"):
+        candidates.append(stripped)
+    match = _JSON_OBJECT_RE.search(stripped)
+    if match and match.group(0) not in candidates:
+        candidates.append(match.group(0))
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        # Treat `amount` as the gatekeeper — without it the tool
+        # call is meaningless and we'd rather fall through to the
+        # generic ask-back than fabricate a bad proposal.
+        amount = parsed.get("amount")
+        if not isinstance(amount, (int, float)) or amount <= 0:
+            continue
+        if not all(field in parsed for field in _REQUIRED_RECOVERY_FIELDS):
+            continue
+        return parsed
+    return None

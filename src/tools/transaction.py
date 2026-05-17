@@ -32,6 +32,7 @@ async def propose_transaction(
     currency_code: str = "THB",
     currency_symbol: str = "฿",
     include_in_report: bool = True,
+    corrects_group_id: str | None = None,
 ) -> str:
     """Propose a transaction extracted from a slip image.
 
@@ -75,6 +76,14 @@ async def propose_transaction(
                            income/expense reports. Default true. Set
                            to **false** for discount lines so they
                            don't inflate the user's income totals.
+        corrects_group_id: If the user is correcting a transaction they
+                           proposed earlier in this conversation, set
+                           this to the `group_id` of the prior proposal
+                           that should be auto-discarded. Leave null
+                           (the default) for fresh proposals — slip
+                           turns ALWAYS leave this null since the LLM
+                           does not have a prior in-conversation
+                           proposal to reference.
 
     Returns:
         A short status string. The validation node intercepts the

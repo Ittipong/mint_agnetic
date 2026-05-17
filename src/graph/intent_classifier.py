@@ -25,9 +25,14 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from src.config import settings
 from src.debug_log import LogLevel as _LogLevel, log as _log
 from src.graph.state import AgentState
-from src.llm import intent_classifier_fallback_llm, intent_classifier_llm
+from src.llm import (
+    cached_system_content,
+    intent_classifier_fallback_llm,
+    intent_classifier_llm,
+)
 
 
 def _ic_log(tag: str, msg: str, **kwargs: Any) -> None:
@@ -60,6 +65,22 @@ A turn qualifies if ANY of these hold:
    merchant, etc.) for a transaction the user just started, treat
    the current user turn as the continuation. Even a bare number
    like "200" or "100 บาท" counts here.
+4. **Explicit save/record command** — user directly tells the app to
+   record/save something, even without any item/amount detail. The
+   quick-add lane will follow up by asking what to record. Cover the
+   obvious verbs AND semantically-similar paraphrases:
+   - Thai: "บันทึก", "บันทึกรายการ", "บันทึกรายจ่าย",
+     "บันทึกรายได้", "บันทึก transaction", "จด", "จดให้หน่อย",
+     "ลงรายการ", "เพิ่มรายการ", "เก็บรายการ", "เซฟ", "เซฟไว้",
+     "อัพเดทรายจ่าย", "อัพเดทรายได้".
+   - English: "save", "save transaction", "record", "log", "add".
+   - Synonyms / casual paraphrases that mean the same thing (e.g.
+     "ช่วยจดทีนะ", "เก็บข้อมูลให้หน่อย", "ลงให้หน่อย") also count.
+
+   CRITICAL: it must be the **verb / imperative form** ("please
+   record"). If "บันทึก" appears as a **noun referring to past
+   records** ("ดูบันทึก" = view records, "บันทึกของเดือนที่แล้ว"
+   = last month's records) it is a QUERY → "other".
 
 ## other
 Everything else: analytics questions, advice requests, chit-chat,
@@ -77,6 +98,14 @@ Examples (→ add_transaction):
 - "200" (after assistant asked "จำนวนเงินเท่าไหร่ครับ?")  (rule 3)
 - "100 บาท" (after assistant asked for amount)             (rule 3)
 - "kbank" (after assistant asked which wallet)             (rule 3)
+- "บันทึกให้ฉันหน่อย"           (rule 4 — explicit save command)
+- "บันทึกรายการ"                (rule 4)
+- "บันทึกรายจ่าย"               (rule 4)
+- "save transaction"            (rule 4 — English)
+- "ช่วยจดทีนะ"                   (rule 4 — synonym for record)
+- "เซฟไว้หน่อย"                  (rule 4 — semantic paraphrase)
+- "อัพเดทรายจ่ายให้"            (rule 4 — semantic paraphrase)
+- "ลงรายการให้หน่อย"            (rule 4)
 
 Examples (→ other):
 - "เดือนนี้ใช้เงินไปเท่าไหร่"
@@ -89,10 +118,15 @@ Examples (→ other):
 - "อยากกิน kfc"         (future intent, not a recorded event)
 - "200" (with NO prior assistant question asking for amount)
 - "เที่ยวที่ไหนดี"      (question word "ที่ไหน")
+- "ดูบันทึกย้อนหลัง"   (noun form — query past records, not save)
+- "บันทึกของเดือนที่แล้วเท่าไหร่"  (noun + question — query)
 
 When in doubt → "other". The cost of misclassifying an analytics
 question as add_transaction is much higher (wrong card shown) than
-misclassifying an add as analytics (user re-types).
+misclassifying an add as analytics (user re-types). EXCEPTION: when
+the user gives an explicit save command (rule 4), default to
+add_transaction — the quick-add lane will gracefully ask for the
+missing detail.
 
 ## Input format
 You will receive the conversation context as JSON in the user message:
@@ -146,8 +180,17 @@ async def classify_intent_node(
         ensure_ascii=False,
     )
 
+    # The system prompt is multi-KB and 100% static — cache it on every
+    # turn so Nova (which doesn't auto-cache like DeepSeek) only pays full
+    # price on the first turn of a thread. `cached_system_content` returns
+    # plain text for providers that ignore the marker, so this is safe to
+    # apply unconditionally.
     messages = [
-        SystemMessage(content=_SYSTEM_PROMPT),
+        SystemMessage(
+            content=cached_system_content(
+                _SYSTEM_PROMPT, settings.intent_classifier_model
+            )
+        ),
         HumanMessage(content=context_payload),
     ]
 

@@ -25,6 +25,7 @@ from typing import Any
 
 from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.messages import (
+    AIMessage,
     HumanMessage,
     RemoveMessage,
     SystemMessage,
@@ -809,6 +810,14 @@ async def propose_validation_node(
     fallback_wallet_id: str | None = (
         general_wallets[0].sync_id if general_wallets else None
     )
+    # sync_id → display-name lookup. Sent alongside the id so mobile can
+    # render a fallback label when its local DB doesn't have the wallet
+    # cached yet (cold-start race / wallet pruned out of sync window).
+    # Mobile contract: prefer its own DB-resolved name; only fall back
+    # to this if the lookup misses.
+    wallet_name_by_id: dict[str, str] = {
+        w.sync_id: w.name for w in general_wallets
+    }
 
     # Build the wallet → categories map BEFORE iterating tool_calls so
     # we can validate `category_id` against the matched wallet's
@@ -826,12 +835,25 @@ async def propose_validation_node(
     # multiple events would produce N stacked cards instead of a group.
     group_transactions: list[dict[str, Any]] = []
     group_wallet_id: str | None = None
+    # Quick-add can flag the new proposal as a correction of a still-
+    # pending prior card. First non-null value across the tool calls
+    # wins (slip never sets this — only quick_add does). Forwarded
+    # into the SSE payload so mobile can auto-discard the stale card.
+    corrects_group_id: str | None = None
     for tc in tool_calls:
         name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
         if name != "propose_transaction":
             continue
         args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
         args = dict(args or {})
+
+        # Capture correction signal — first non-null wins. The schema
+        # accepts a str; coerce empty string to None so the SSE
+        # payload stays clean.
+        if corrects_group_id is None:
+            raw_corrects = args.get("corrects_group_id")
+            if isinstance(raw_corrects, str) and raw_corrects.strip():
+                corrects_group_id = raw_corrects.strip()
 
         # ── id validation with never-null fallback ──────────────
         # Spec: wallet_id / category_id must ALWAYS hold a real value.
@@ -926,13 +948,26 @@ async def propose_validation_node(
                     category_id = wallet_cats[0]["sync_id"]
 
         include_in_report = bool(args.get("include_in_report", True))
+        # Resolve display names from the catalog — sent as a fallback
+        # for mobile when its local DB doesn't have the entity cached.
+        # Mobile is contractually required to prefer its own DB lookup;
+        # these are belt-and-braces for sync-race edge cases.
+        wallet_name = wallet_name_by_id.get(wallet_id) if wallet_id else None
+        category_name: str | None = None
+        if category_id and wallet_id:
+            for c in by_wallet.get(wallet_id, []):
+                if c.get("sync_id") == category_id:
+                    category_name = c.get("name")
+                    break
         item = {
             "sync_id": str(uuid.uuid4()),
             "type": txn_type,
             "amount": float(args.get("amount") or 0),
             "date": args.get("date"),
             "wallet_id": wallet_id,
+            "wallet_name": wallet_name,
             "category_id": category_id,
+            "category_name": category_name,
             "note": final_note,
             "currency_code": args.get("currency_code") or default_currency_code,
             "currency_symbol": args.get("currency_symbol") or default_currency_symbol,
@@ -953,6 +988,13 @@ async def propose_validation_node(
         tc_id = (
             tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "tc-0")
         )
+        # Carry forward the resolved id so the next turn (if it's a
+        # correction like "ผิด ไม่ใช่ 100 แต่ 200") can pass it back
+        # into `corrects_group_id` for auto-discard. The id we attach
+        # here is the per-item sync_id; the LLM only needs to set
+        # `corrects_group_id` to the group-level id, which we patch in
+        # after the loop once `group_payload["data"]["group_id"]` is
+        # known.
         tool_messages.append(
             ToolMessage(
                 content="(proposal dispatched)",
@@ -982,6 +1024,12 @@ async def propose_validation_node(
             "data": {
                 "group_id": str(uuid.uuid4()),
                 "wallet_id": group_wallet_id,
+                # Display fallback (see wallet_name_by_id comment above).
+                "wallet_name": (
+                    wallet_name_by_id.get(group_wallet_id)
+                    if group_wallet_id
+                    else None
+                ),
                 "currency_code": (
                     group_transactions[0].get("currency_code") or default_currency_code
                 ),
@@ -990,6 +1038,12 @@ async def propose_validation_node(
                 ),
                 "total": total,
                 "transactions": group_transactions,
+                # Group_id of a STILL-PENDING prior proposal that this
+                # new proposal corrects. Mobile auto-discards the stale
+                # card when set. null on fresh proposals (the common
+                # case) — passed through unconditionally so mobile can
+                # do a single shape check.
+                "corrects_group_id": corrects_group_id,
             },
         }
         _slip_log(
@@ -999,9 +1053,23 @@ async def propose_validation_node(
             wallet_id=group_wallet_id,
             item_count=len(group_transactions),
             total=total,
+            corrects_group_id=corrects_group_id or "-",
         )
         await adispatch_custom_event("structured_data", group_payload)
         _slip_log("PROPOSE", "dispatched group OK")
+
+        # Backfill the group_id into every ToolMessage's content so the
+        # NEXT quick_add turn (a potential correction) can read it from
+        # message history and pass it back via `corrects_group_id`. We
+        # do this AFTER the dispatch because `group_id` is generated
+        # alongside the payload above. Format is parseable by humans
+        # AND machines (`group_id=<uuid>`); the LLM is taught to look
+        # for that exact substring in the quick_add prompt.
+        group_id_str = group_payload["data"]["group_id"]
+        for tm in tool_messages:
+            tm.content = (
+                f"(proposal dispatched, group_id={group_id_str})"
+            )
 
     return {"messages": tool_messages}
 
@@ -1009,26 +1077,24 @@ async def propose_validation_node(
 async def slip_cleanup_node(
     state: AgentState, config: RunnableConfig
 ) -> dict:
-    """Terminal step of the slip flow — strip every message added during
-    this turn so the checkpoint has no trace of the slip exchange.
+    """Terminal step of the slip flow — strip the heavy slip artifacts
+    from the checkpoint while preserving the final natural-language
+    AI reply (if any) so follow-up turns can reference "the slip I
+    just sent".
 
-    Slip turns produce three artifacts that are useless once the
-    proposal SSE event has been emitted to the mobile client:
-        1. `HumanMessage("[INTENT:parse_transaction_from_slip]")` — the
-           routing marker from mobile; the image content blocks attached
-           to it bloat the checkpoint with base64 payloads
+    Slip turns produce up to four artifacts:
+        1. `HumanMessage("[INTENT:parse_transaction_from_slip]")` —
+           the routing marker; carries base64 image blocks
         2. `AIMessage(tool_calls=[propose_transaction(...)])` — vision
            LLM output; not user-facing
         3. `ToolMessage("(proposal dispatched)")` — placeholder from
            `propose_validation_node`
+        4. `AIMessage(content="ดูข้อมูล...")` — optional final text
+           reply that user-facing chat shows alongside the proposal
 
-    Removing them here means:
-      • No orphan markers in chat history reloads (no need for mobile
-        client to filter — the data simply isn't there)
-      • ReAct turns that follow can't reference "the slip I just sent",
-        but that's acceptable: the mobile UI keeps the proposal card
-        in its own state and the user interacts with it directly
-      • Checkpoint stays lean — base64 image blocks aren't persisted
+    We strip 1–3 (heavy, redundant once the SSE event was emitted) but
+    keep 4 so follow-up references like "อันเมื่อกี้ยอดเท่าไหร่"
+    can land in the LLM's context on the next turn.
     """
     msgs = state.get("messages") or []
     if not msgs:
@@ -1043,19 +1109,30 @@ async def slip_cleanup_node(
             break
     if start < 0:
         return {"images": []}
+    # Locate the final natural-language reply (AIMessage without
+    # tool_calls) — that's the only artifact worth keeping for
+    # follow-up turn references. Walk back from the tail so we catch
+    # the most recent text reply if the vision LLM emitted multiple.
+    preserved_id = None
+    for m in reversed(msgs[start:]):
+        if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None):
+            preserved_id = getattr(m, "id", None)
+            break
     removals: list[RemoveMessage] = []
     for m in msgs[start:]:
         mid = getattr(m, "id", None)
-        if mid:
+        if mid and mid != preserved_id:
             removals.append(RemoveMessage(id=mid))
     _logger.info(
-        "slip_cleanup_node: removing %d messages from current turn",
+        "slip_cleanup_node: removing %d messages from current turn (preserved=%s)",
         len(removals),
+        preserved_id or "none",
     )
     _slip_log(
         "CLEANUP",
         "removing slip turn",
         removal_count=len(removals),
         total_msgs=len(msgs),
+        preserved_reply=bool(preserved_id),
     )
     return {"messages": removals, "images": []}

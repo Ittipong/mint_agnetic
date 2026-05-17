@@ -15,6 +15,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from src.llm import llm
 from src.graph.state import AgentState
+from src.tools.entity_lookup import lookup_entity
 from src.tools.financial_info import get_financial_advice
 from src.graph.compute_subgraph import ANALYZE_TOOL_NAME
 
@@ -58,6 +59,7 @@ async def analyze_user_finances(task: str) -> str:
 ALL_TOOLS = [
     analyze_user_finances,
     get_financial_advice,
+    lookup_entity,
 ]
 
 # Tool names handled by act_node (analyze subgraph) instead of the
@@ -110,13 +112,22 @@ def _render_slip_context(catalog: EntityCatalog | None) -> str:
     return "\n".join(lines)
 
 
+# How many wallets/categories to render verbatim in the ReAct system
+# prompt. Users with >20 entries see only the top-N by usage; the rest
+# are reachable via the `lookup_entity` tool. Keeps the per-turn input
+# under ~1KB for the entity section even for power users.
+_CATALOG_TOP_N = 20
+
+
 def build_system_prompt(
     user_id: str,
     current_date: str,
     catalog: EntityCatalog | None = None,
+    *,
+    top_n: int = _CATALOG_TOP_N,
 ) -> str:
     catalog_section = (
-        catalog.render_for_prompt()
+        catalog.render_for_prompt_truncated(top_n=top_n)
         if catalog is not None
         else "(catalog unavailable)"
     )
@@ -441,7 +452,9 @@ comparison itself — do not split into multiple calls. Examples:
 
 **ENTITY NAME LOCK (very important):**
 The user's wallets, categories and tags are listed below in the
-**Entity Catalog**. When you write a reply:
+**Entity Catalog**. The catalog only shows the TOP 20 most-used wallets
+and categories — long-tail entries are hidden to keep the prompt small.
+When you write a reply:
 
 1. NEVER paraphrase, normalize, translate, or "correct" any of these names —
    copy them character-for-character including spelling quirks
@@ -455,6 +468,15 @@ The user's wallets, categories and tags are listed below in the
    Do NOT add `#` to a tag that doesn't have one. Do NOT strip `#` from a
    tag that does. The user might write either way — always normalize to
    what the catalog says.
+5. **Long-tail lookups — call `lookup_entity` FIRST.** If the user names a
+   wallet / category / tag that does NOT appear in the catalog below, you
+   MUST call the `lookup_entity` tool to fetch its `sync_id` before doing
+   anything else. Do NOT guess a sync_id, do NOT skip the entity, do NOT
+   substitute a different name. Example flow:
+     - User: "wallet KKP เหลือเท่าไหร่" (KKP not in top 20)
+     - You: call `lookup_entity(entity_type='wallet', name_query='KKP')`
+     - Tool returns: `sync_id=\`abc-123\` name=\`KKP\``
+     - You: now call `analyze_user_finances` with the correct name.
 
 **How to respond:**
 1. ALWAYS open the answer by stating the time period the numbers cover —
@@ -634,10 +656,14 @@ def _debug_log(tag: str, msg: str, **kwargs):
 
 # ── History compression ──────────────────────────────────────────────────────
 
-# Approximate input-token budget per turn after compression. Each Claude
-# Sonnet input token costs ~$3 / 1M, so this caps a single turn around
-# $0.018 of input regardless of how long the thread has been running.
-_HISTORY_TOKEN_BUDGET = 6000
+# Approximate input-token budget per turn after compression. Past turns
+# are already reduced to Human + final AI text in `_compress_and_trim_history`,
+# so real usage usually sits at ~2–3K tokens; 4K is a safe upper bound that
+# still leaves headroom for the system prompt + tool schemas in the same call.
+# Anything that would push the trimmed history past ~3500 tokens triggers the
+# LLM-summarization fallback (see `_compress_and_trim_history`).
+_HISTORY_TOKEN_BUDGET = 4000
+_SUMMARIZE_FALLBACK_THRESHOLD = 3500
 
 
 def _approx_token_count(messages: list[AnyMessage]) -> int:
@@ -654,18 +680,84 @@ def _approx_token_count(messages: list[AnyMessage]) -> int:
     return total
 
 
+def _summarize_tool_message(m: ToolMessage) -> str | None:
+    """Extract a 1-line summary from a CodeAct ToolMessage payload.
+
+    The compute subgraph returns Markdown-ish text with sections like
+    `Result:`, `Total:`, `Breakdown:`. We grab the first ~240 chars of
+    meaningful content so the next turn can still reference what the
+    analysis said ("เมื่อกี้ขึ้นมาเท่าไหร่นะ") without paying for the
+    full rows again. Returns None if we can't extract anything useful
+    so the caller falls back to dropping the message.
+    """
+    content = m.content if isinstance(m.content, str) else str(m.content)
+    text = content.strip()
+    if not text:
+        return None
+    # Prefer the first non-empty line that looks like a result summary
+    # (starts with "Result:", "Total:", "Summary:", a number, or a
+    # currency symbol). Falls back to the first line if nothing matches.
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        lower = s.lower()
+        if (
+            lower.startswith(("result", "total", "summary", "answer"))
+            or s[0].isdigit()
+            or s[0] in "฿$€£¥"
+        ):
+            return s[:240]
+    # Fallback: first 240 chars of the whole content.
+    first = text.replace("\n", " ").strip()
+    return first[:240] if first else None
+
+
+async def _llm_summarize_past(past_text: str) -> str | None:
+    """Optional: collapse a long past-turn block into 3–5 lines using
+    the cheap intent classifier LLM. Returns None on any failure so the
+    caller keeps the original (already-trimmed) history.
+    """
+    if not past_text.strip():
+        return None
+    try:
+        from src.llm import intent_classifier_llm  # noqa: PLC0415
+
+        prompt = (
+            "Summarize this prior chat between a user and a Thai personal "
+            "finance assistant in 3–5 short Thai bullet points. Keep "
+            "wallet/category/tag names VERBATIM. Keep amounts and dates. "
+            "Output bullets only, no preamble.\n\n"
+            f"---\n{past_text[:8000]}\n---"
+        )
+        response = await intent_classifier_llm.ainvoke(
+            [HumanMessage(content=prompt)]
+        )
+        summary = (getattr(response, "content", "") or "").strip()
+        return summary or None
+    except Exception:
+        # Summarization is a cost optimization — never let it block the
+        # actual ReAct call.
+        return None
+
+
 def _compress_and_trim_history(messages: list[AnyMessage]) -> list[AnyMessage]:
     """Compress past turns then trim to the input-token budget.
 
-    Past turns (everything before the last HumanMessage) are reduced to
-    user prompts + the LLM's final text replies — intermediate
-    `AIMessage(tool_calls=...)` + `ToolMessage` pairs are dropped because
-    the final reply already paraphrased them. The current turn (from the
-    last HumanMessage onward) is kept verbatim so any in-flight tool-call
-    chain stays valid.
+    Past turns (everything before the last HumanMessage) are reduced to:
+      - HumanMessages (user prompts — always kept)
+      - Final natural-language AIMessages (the turn's user-facing reply)
+      - A 1-line `[tool-summary]` SystemMessage for each dropped CodeAct
+        ToolMessage so the LLM can still reference past analysis results
+        ("เมื่อกี้ขึ้นมาเท่าไหร่นะ") without re-fetching.
 
-    The compressed list is then passed through `trim_messages` with a
-    token budget so very long threads still fit in the LLM input.
+    The current turn (from the last HumanMessage onward) is kept verbatim
+    so any in-flight tool-call chain stays valid.
+
+    The compressed list is passed through `trim_messages` with a token
+    budget so very long threads still fit. If the trimmed result is still
+    above `_SUMMARIZE_FALLBACK_THRESHOLD`, an optional async LLM pass
+    collapses the past block into a single summary SystemMessage.
     """
     if not messages:
         return messages
@@ -690,7 +782,17 @@ def _compress_and_trim_history(messages: list[AnyMessage]) -> list[AnyMessage]:
             elif isinstance(m, AIMessage) and not getattr(m, "tool_calls", None):
                 # Final natural-language reply — keep as the turn's summary.
                 kept_past.append(m)
-            # else: AIMessage(tool_calls=...) or ToolMessage — drop.
+            elif isinstance(m, ToolMessage):
+                # Rule-based extraction: a one-liner is much cheaper than
+                # carrying the full ToolMessage payload but still gives the
+                # LLM something to point at on follow-up questions.
+                summary = _summarize_tool_message(m)
+                if summary:
+                    kept_past.append(
+                        SystemMessage(content=f"[tool-summary] {summary}")
+                    )
+            # else: AIMessage(tool_calls=...) — drop (the paired
+            # ToolMessage above produced the summary already).
         compressed = kept_past + current
 
     trimmed = trim_messages(
@@ -703,6 +805,50 @@ def _compress_and_trim_history(messages: list[AnyMessage]) -> list[AnyMessage]:
         include_system=False,
     )
     return trimmed
+
+
+async def _compress_and_trim_history_async(
+    messages: list[AnyMessage],
+) -> list[AnyMessage]:
+    """Async variant that adds the LLM-summarization fallback on top of
+    the sync compression. Kept separate so existing sync callers (tests,
+    debug tools) don't pay the import/await overhead.
+    """
+    trimmed = _compress_and_trim_history(messages)
+    if _approx_token_count(trimmed) <= _SUMMARIZE_FALLBACK_THRESHOLD:
+        return trimmed
+
+    # Locate current-turn boundary again on the trimmed result so we only
+    # collapse the past block (never the in-flight tool-call chain).
+    last_human_idx = -1
+    for i in range(len(trimmed) - 1, -1, -1):
+        if isinstance(trimmed[i], HumanMessage):
+            last_human_idx = i
+            break
+    if last_human_idx <= 0:
+        return trimmed
+
+    past = trimmed[:last_human_idx]
+    current = trimmed[last_human_idx:]
+
+    # Build a compact transcript for the summarizer.
+    transcript_lines: list[str] = []
+    for m in past:
+        role = (
+            "User"
+            if isinstance(m, HumanMessage)
+            else "Assistant"
+            if isinstance(m, AIMessage)
+            else "Note"
+        )
+        text = m.content if isinstance(m.content, str) else str(m.content)
+        if text.strip():
+            transcript_lines.append(f"{role}: {text.strip()}")
+    summary = await _llm_summarize_past("\n".join(transcript_lines))
+    if not summary:
+        return trimmed
+
+    return [SystemMessage(content=f"[prior-conversation-summary]\n{summary}"), *current]
 
 
 # ── Reason node ───────────────────────────────────────────────────────────────
@@ -765,15 +911,15 @@ async def reason_node(state: AgentState, config: RunnableConfig) -> dict:
 
     _debug_log("REASON", "Calling LLM with tools", thread_id=thread_id, user_id=user_id, msg_count=len(raw_messages))
 
-    # ── History compression (B2 strategy) ────────────────────────────────
-    # Past turns: keep only HumanMessage + final AIMessage text (drop the
-    # AIMessage(tool_calls) + ToolMessage pairs — the final AI reply
-    # already summarized those tool outputs in natural language).
+    # ── History compression ─────────────────────────────────────────────
+    # Past turns: keep HumanMessage + final AIMessage text + a 1-line
+    # `[tool-summary]` for each dropped ToolMessage (so the LLM can still
+    # reference past analysis results on follow-up turns).
     # Current turn: keep the full chain intact so in-flight tool-call
-    # references survive (breaking the chain throws OpenAI/Anthropic errors).
-    # Then trim the compressed list to ~6K input tokens so context cost
-    # stays bounded regardless of conversation length.
-    raw_messages = _compress_and_trim_history(raw_messages)
+    # references survive (breaking the chain throws provider errors).
+    # Trim to ~4K input tokens; if still over threshold, an async LLM
+    # summarization pass collapses the past block into a single summary.
+    raw_messages = await _compress_and_trim_history_async(raw_messages)
     _debug_log("REASON", "history compressed", thread_id=thread_id, msg_count_after=len(raw_messages))
 
     current_date = date.today().isoformat()

@@ -70,10 +70,12 @@ class Settings(BaseSettings):
     intent_classifier_fallback_model: str = ""
     intent_classifier_fallback_base_url: str = ""
 
-    # ── 5. Transaction (quick_add + confirmation) ────────────────────
+    # ── 5. Transaction (quick_add) ───────────────────────────────────
     # Must support tool/function calling AND Thai text output. Used by
-    # `quick_add_node` (propose_transaction tool call) and
-    # `confirmation_node` (save/dismiss acknowledgement).
+    # `quick_add_node` to emit the `propose_transaction` tool call from
+    # a free-form text journal entry. (The proposal save / dismiss ack
+    # used to live here too but now ships from mobile via a local
+    # template — see `POST /chat/intent`.)
     transaction_llm_model: str = ""
     transaction_llm_base_url: str = ""
 

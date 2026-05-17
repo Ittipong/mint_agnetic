@@ -30,6 +30,10 @@ class WalletEntry:
     cached_balance: float | None = None
     ai_message: str | None = None
     icon: str | None = None
+    # Usage signal — drives top-N truncation in render_for_prompt_truncated.
+    # Null when the SQL didn't surface it (e.g. legacy fetch path).
+    usage_count: int = 0
+    last_used_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +43,8 @@ class CategoryEntry:
     type: str  # 'income' | 'expense' | other
     parent_id: str | None = None  # parent category sync_id for hierarchy
     keywords: list[str] | None = None  # synonyms / related terms for semantic matching
+    usage_count: int = 0
+    last_used_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -100,17 +106,56 @@ class EntityCatalog:
         }
 
     def render_for_prompt(self) -> str:
-        """Markdown rendering — used inside system/user prompts.
+        """Full markdown rendering — used by slip/quick-add prompts that
+        need EVERY name available (no lookup_entity tool there)."""
+        return self._render(wallets=self.wallets, categories=self.categories)
 
-        Names are wrapped in backticks so the LLM is biased to copy them
-        verbatim (the tokenizer treats backticked spans as single units more
-        often than not).
+    def render_for_prompt_truncated(self, top_n: int = 20) -> str:
+        """Truncated rendering for the ReAct system prompt.
+
+        Wallets and categories are pre-sorted by `usage_count DESC` in the
+        SQL fetch, so slicing `[:top_n]` keeps the most-used ones the user
+        is likely to mention. Tags/budgets/goals are usually small so we
+        render them in full.
+
+        Adds a footer pointing the LLM to `lookup_entity` for anything not
+        in the visible top-N — without this the LLM would either guess a
+        sync_id or refuse to answer when the user mentions a long-tail
+        wallet/category.
+        """
+        top_wallets = self.wallets[:top_n] if top_n > 0 else self.wallets
+        # Categories are grouped by income/expense downstream; truncating
+        # the flat list before splitting keeps both groups balanced toward
+        # the most-used ones.
+        top_categories = (
+            self.categories[:top_n] if top_n > 0 else self.categories
+        )
+        rendered = self._render(wallets=top_wallets, categories=top_categories)
+        omitted_w = max(0, len(self.wallets) - len(top_wallets))
+        omitted_c = max(0, len(self.categories) - len(top_categories))
+        if omitted_w or omitted_c:
+            rendered += (
+                f"\n\n_แสดง top {top_n} โดยการใช้งานล่าสุด. "
+                f"อีก {omitted_w} wallet + {omitted_c} category ที่ใช้น้อยกว่า"
+                " ถ้า user พูดถึงให้เรียก tool `lookup_entity` เพื่อค้นหา"
+                " sync_id (อย่าเดาเอง)._"
+            )
+        return rendered
+
+    def _render(
+        self,
+        *,
+        wallets: list[WalletEntry],
+        categories: list[CategoryEntry],
+    ) -> str:
+        """Shared markdown renderer — called by both full and truncated
+        variants with the desired subset.
         """
         lines = []
 
-        if self.wallets:
+        if wallets:
             lines.append("### Wallets")
-            for w in self.wallets:
+            for w in wallets:
                 parts = [f"`{w.name}`"]
                 parts.append(f"type: {w.wallet_type}")
                 parts.append(f"currency: {w.currency}")
@@ -124,12 +169,12 @@ class EntityCatalog:
         else:
             lines.append("### Wallets\n(no wallets)")
 
-        if self.categories:
+        if categories:
             lines.append("\n### Categories")
             # Group by type so the planner can pick income vs expense more easily
-            income = [c for c in self.categories if c.type == "income"]
-            expense = [c for c in self.categories if c.type == "expense"]
-            other = [c for c in self.categories if c.type not in {"income", "expense"}]
+            income = [c for c in categories if c.type == "income"]
+            expense = [c for c in categories if c.type == "expense"]
+            other = [c for c in categories if c.type not in {"income", "expense"}]
             if income:
                 lines.append("Income:")
                 lines.extend(f"- `{c.name}`" for c in income)
@@ -164,52 +209,106 @@ class EntityCatalog:
 
 
 _WALLETS_SQL = (
+    # Transactions table has no user_id column — ownership comes from
+    # joining the wallet tables. We aggregate per wallet_sync_id which
+    # is already the join key.
+    "WITH owned_wallet_ids AS ( "
+    "  SELECT sync_id::text AS sync_id FROM general_wallets "
+    "  WHERE user_id = $1 AND deleted_at IS NULL "
+    "  UNION ALL "
+    "  SELECT sync_id::text FROM creditcard_wallets "
+    "  WHERE user_id = $1 AND deleted_at IS NULL "
+    "  UNION ALL "
+    "  SELECT sync_id::text FROM goal_wallets "
+    "  WHERE user_id = $1 AND deleted_at IS NULL "
+    "), "
+    "usage AS ( "
+    "  SELECT t.wallet_sync_id, "
+    "         COUNT(*)::int AS usage_count, "
+    "         MAX(t.date)::text AS last_used_at "
+    "  FROM transactions t "
+    "  JOIN owned_wallet_ids o ON o.sync_id = t.wallet_sync_id "
+    "  WHERE t.is_deleted = false "
+    "  GROUP BY t.wallet_sync_id "
+    ") "
     "SELECT "
-    "  sync_id::text AS sync_id, "
-    "  name, "
-    "  currency, "
-    "  'general' AS wallet_type, "
-    "  initial_balance::float, "
-    "  wallet_category, "
-    "  cached_balance::float, "
-    "  ai_message, "
-    "  icon "
-    "FROM general_wallets "
-    "WHERE user_id = $1 AND deleted_at IS NULL "
-    "UNION ALL "
-    "SELECT "
-    "  sync_id::text AS sync_id, "
-    "  name, "
-    "  currency, "
-    "  'creditcard' AS wallet_type, "
-    "  NULL::float AS initial_balance, "
-    "  NULL::text AS wallet_category, "
-    "  cached_used_amount::float AS cached_balance, "
-    "  ai_message, "
-    "  icon "
-    "FROM creditcard_wallets "
-    "WHERE user_id = $1 AND deleted_at IS NULL "
-    "UNION ALL "
-    "SELECT "
-    "  sync_id::text AS sync_id, "
-    "  name, "
-    "  currency, "
-    "  'goal' AS wallet_type, "
-    "  NULL::float AS initial_balance, "
-    "  NULL::text AS wallet_category, "
-    "  NULL::float AS cached_balance, "
-    "  NULL::text AS ai_message, "
-    "  NULL::text AS icon "
-    "FROM goal_wallets "
-    "WHERE user_id = $1 AND deleted_at IS NULL "
-    "ORDER BY name"
+    "  w.sync_id, w.name, w.currency, w.wallet_type, "
+    "  w.initial_balance, w.wallet_category, w.cached_balance, "
+    "  w.ai_message, w.icon, "
+    "  COALESCE(u.usage_count, 0) AS usage_count, "
+    "  u.last_used_at "
+    "FROM ( "
+    "  SELECT "
+    "    sync_id::text AS sync_id, "
+    "    name, "
+    "    currency, "
+    "    'general' AS wallet_type, "
+    "    initial_balance::float AS initial_balance, "
+    "    wallet_category, "
+    "    cached_balance::float AS cached_balance, "
+    "    ai_message, "
+    "    icon "
+    "  FROM general_wallets "
+    "  WHERE user_id = $1 AND deleted_at IS NULL "
+    "  UNION ALL "
+    "  SELECT "
+    "    sync_id::text AS sync_id, "
+    "    name, "
+    "    currency, "
+    "    'creditcard' AS wallet_type, "
+    "    NULL::float AS initial_balance, "
+    "    NULL::text AS wallet_category, "
+    "    cached_used_amount::float AS cached_balance, "
+    "    ai_message, "
+    "    icon "
+    "  FROM creditcard_wallets "
+    "  WHERE user_id = $1 AND deleted_at IS NULL "
+    "  UNION ALL "
+    "  SELECT "
+    "    sync_id::text AS sync_id, "
+    "    name, "
+    "    currency, "
+    "    'goal' AS wallet_type, "
+    "    NULL::float AS initial_balance, "
+    "    NULL::text AS wallet_category, "
+    "    NULL::float AS cached_balance, "
+    "    NULL::text AS ai_message, "
+    "    NULL::text AS icon "
+    "  FROM goal_wallets "
+    "  WHERE user_id = $1 AND deleted_at IS NULL "
+    ") w "
+    "LEFT JOIN usage u ON u.wallet_sync_id = w.sync_id "
+    "ORDER BY usage_count DESC, last_used_at DESC NULLS LAST, w.name"
 )
 
 _CATEGORIES_SQL = (
-    "SELECT sync_id, name, type, parent_sync_id "
-    "FROM categories "
-    "WHERE (user_id = $1 OR user_id IS NULL) "
-    "ORDER BY display_order"
+    "WITH owned_wallet_ids AS ( "
+    "  SELECT sync_id::text AS sync_id FROM general_wallets "
+    "  WHERE user_id = $1 AND deleted_at IS NULL "
+    "  UNION ALL "
+    "  SELECT sync_id::text FROM creditcard_wallets "
+    "  WHERE user_id = $1 AND deleted_at IS NULL "
+    "  UNION ALL "
+    "  SELECT sync_id::text FROM goal_wallets "
+    "  WHERE user_id = $1 AND deleted_at IS NULL "
+    "), "
+    "usage AS ( "
+    "  SELECT t.category_sync_id, "
+    "         COUNT(*)::int AS usage_count, "
+    "         MAX(t.date)::text AS last_used_at "
+    "  FROM transactions t "
+    "  JOIN owned_wallet_ids o ON o.sync_id = t.wallet_sync_id "
+    "  WHERE t.is_deleted = false "
+    "    AND t.category_sync_id IS NOT NULL "
+    "  GROUP BY t.category_sync_id "
+    ") "
+    "SELECT c.sync_id, c.name, c.type, c.parent_sync_id, "
+    "       COALESCE(u.usage_count, 0) AS usage_count, "
+    "       u.last_used_at "
+    "FROM categories c "
+    "LEFT JOIN usage u ON u.category_sync_id = c.sync_id::text "
+    "WHERE (c.user_id = $1 OR c.user_id IS NULL) "
+    "ORDER BY c.display_order"
 )
 
 _TAGS_SQL = (
@@ -346,13 +445,38 @@ async def fetch_user_catalog(user_id: str) -> EntityCatalog:
     # system categories (so "อาหาร" appears 6× for a 6-wallet user). For the
     # planner/resolver/responder, only the display name matters — the SQL
     # builder filters by `transactions.category_name` (denormalized).
-    seen: set[tuple[str, str]] = set()
+    # Dedup categories by (name, type) while accumulating usage across
+    # duplicates (each wallet has its own copy of system categories — a
+    # 6-wallet user has 6× "อาหาร" rows, and usage_count must sum).
+    seen: dict[tuple[str, str], int] = {}
     deduped_categories: list[CategoryEntry] = []
     for r in categories_rows:
         key = (r["name"], r["type"])
+        u = int(r["usage_count"] or 0)
+        last = r["last_used_at"]
         if key in seen:
+            idx = seen[key]
+            existing = deduped_categories[idx]
+            merged_last = (
+                existing.last_used_at
+                if last is None
+                else (
+                    last
+                    if existing.last_used_at is None
+                    else max(existing.last_used_at, last)
+                )
+            )
+            deduped_categories[idx] = CategoryEntry(
+                sync_id=existing.sync_id,
+                name=existing.name,
+                type=existing.type,
+                parent_id=existing.parent_id,
+                keywords=existing.keywords,
+                usage_count=existing.usage_count + u,
+                last_used_at=merged_last,
+            )
             continue
-        seen.add(key)
+        seen[key] = len(deduped_categories)
         deduped_categories.append(
             CategoryEntry(
                 sync_id=str(r["sync_id"]),
@@ -360,6 +484,8 @@ async def fetch_user_catalog(user_id: str) -> EntityCatalog:
                 type=r["type"],
                 parent_id=str(r["parent_sync_id"]) if r["parent_sync_id"] else None,
                 keywords=None,  # not available in DB schema
+                usage_count=u,
+                last_used_at=last,
             )
         )
 
@@ -388,6 +514,8 @@ async def fetch_user_catalog(user_id: str) -> EntityCatalog:
                 name=r["name"],
                 currency=r["currency"],
                 wallet_type=r["wallet_type"],
+                usage_count=int(r["usage_count"] or 0),
+                last_used_at=r["last_used_at"],
             )
             for r in wallets_rows
         ],

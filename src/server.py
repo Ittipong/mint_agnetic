@@ -16,7 +16,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -114,6 +114,16 @@ row in `chat_threads` (title = first 40 chars of the user message).
 List, rename, and delete threads via the `/threads` endpoints.
 `DELETE /threads/{id}` hard-deletes the thread plus all LangGraph
 checkpoints in one transaction.
+
+### Proposal save / dismiss intents
+
+When the user taps Save or Discard on a transaction proposal card,
+mobile collapses the card in place — there is **no** separate chat
+ack bubble. The mobile client fires **`POST /chat/intent`** which
+appends ONLY a marker `HumanMessage` to the LangGraph checkpoint
+silently (no LLM round-trip, no `AIMessage`). This used to flow
+through `/chat/stream`'s in-graph `confirmation` lane and used to
+also persist an ack; both behaviours have been removed.
 """
 
 TAGS_METADATA = [
@@ -261,6 +271,39 @@ class RenameThreadRequest(BaseModel):
     )
 
 
+class IntentRequest(BaseModel):
+    """Payload for `POST /chat/intent`.
+
+    Sent by mobile (fire-and-forget) when the user taps Save or Discard
+    on a ProposedTransactionGroupCard. The server appends ONLY a marker
+    `HumanMessage` to the checkpoint WITHOUT running the graph, calling
+    the LLM, or persisting any AIMessage ack. Mobile's "collapsed card"
+    UX is itself the acknowledgement — no separate chat bubble.
+    """
+
+    user_id: str = Field(..., description="Owner user UUID")
+    thread_id: str = Field(..., description="Thread the proposal lives in")
+    action: Literal["transaction_saved", "transaction_dismissed"] = Field(
+        ...,
+        description="Which button the user tapped on the proposal card.",
+    )
+    group_id: str = Field(
+        ...,
+        description="Identifier of the proposal group the user acted on.",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "user_id": _EXAMPLE_USER_ID,
+                "thread_id": _EXAMPLE_THREAD_ID,
+                "action": "transaction_saved",
+                "group_id": "group-2026-05-17-001",
+            }
+        }
+    )
+
+
 # ── Response schemas ──────────────────────────────────────────────────────────
 
 class ThreadOut(BaseModel):
@@ -303,6 +346,20 @@ class DeleteThreadOut(BaseModel):
     status: str = Field(..., examples=["deleted"])
     thread_id: str
     found: bool = Field(..., description="True if a row was deleted, False if the thread_id did not exist.")
+
+
+class IntentOut(BaseModel):
+    """Response for `POST /chat/intent` — confirms the marker landed."""
+
+    thread_id: str
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "thread_id": _EXAMPLE_THREAD_ID,
+            }
+        }
+    )
 
 
 class HistoryMessage(BaseModel):
@@ -590,7 +647,10 @@ async def _stream_graph(
         except Exception as exc:
             _debug_log("THREAD", "Upsert failed", error=str(exc), thread_id=thread_id)
 
-    config = {"configurable": {"thread_id": thread_id}}
+    # `user_id` is forwarded into `configurable` so tools executed by
+    # LangGraph's ToolNode (e.g. `lookup_entity`) can access it via
+    # injected `RunnableConfig` — state isn't reachable from there.
+    config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
     # For voice turns the message starts empty — stt_node replaces the
     # latest HumanMessage with the transcript before any downstream
     # node looks at it. Always include a placeholder so LangGraph has
@@ -744,12 +804,12 @@ async def _stream_graph(
                     yield _status_event("writing")
 
             elif kind == "on_chat_model_stream":
-                # Stream tokens from user-facing nodes only. `quick_add`
-                # streams its ask-back text; `confirmation` streams the
-                # post-save / post-dismiss acknowledgement that
-                # references the actual transaction the user just acted
-                # on.
-                if node not in ("reason", "quick_add", "confirmation"):
+                # Stream tokens from user-facing nodes only. `reason`
+                # streams the ReAct final answer; `quick_add` streams
+                # its ask-back text. Proposal save / dismiss acks are
+                # NOT streamed here — they land via `POST /chat/intent`
+                # and never run through the graph.
+                if node not in ("reason", "quick_add"):
                     continue
                 chunk = event["data"]["chunk"]
                 if not chunk.content:
@@ -1080,6 +1140,109 @@ async def chat_voice(
             "Connection": "keep-alive",
         },
     )
+
+
+_VALID_INTENT_ACTIONS = {"transaction_saved", "transaction_dismissed"}
+
+
+@app.post(
+    "/chat/intent",
+    tags=["Chat"],
+    summary="Persist a save/dismiss proposal intent (silent — no LLM)",
+    description=(
+        "Fire-and-forget endpoint for the mobile client. When the user "
+        "taps Save or Discard on a `ProposedTransactionGroupCard`, mobile "
+        "collapses the card in place — there is no separate chat ack "
+        "bubble. The server appends ONLY a marker `HumanMessage` "
+        "(`[INTENT:<action>] group_id=<id>`) to the LangGraph checkpoint "
+        "via `aupdate_state` — the graph is NEVER invoked, NO LLM call "
+        "is made, and NO `AIMessage` ack is persisted. This replaces the "
+        "previous in-graph `confirmation` lane that routed the same "
+        "markers through `/chat/stream` and burned a full LLM round-trip "
+        "on a UI action that doesn't need one."
+    ),
+    response_model=IntentOut,
+    responses={
+        400: {"model": ErrorOut, "description": "Unknown action (non-production only)."},
+        503: {"model": ErrorOut, "description": "Graph not ready."},
+    },
+)
+async def chat_intent(req: IntentRequest, request: Request):
+    if _graph is None:
+        raise HTTPException(status_code=503, detail="Graph not ready")
+
+    # `action` is already constrained by the `Literal[...]` on the
+    # request model, so pydantic rejects unknown values before we ever
+    # get here in any environment. The explicit re-check below is a
+    # belt-and-braces guard for the (rare) case where a future change
+    # widens the field — production should soak the bad value into a
+    # safe fallback per Postel's Law; dev/staging/test must fail fast
+    # so the bug is caught before shipping.
+    if req.action not in _VALID_INTENT_ACTIONS:
+        if settings.is_production:
+            _debug_log(
+                "HTTP",
+                "POST /chat/intent — unknown action, falling back to dismissed",
+                thread_id=req.thread_id,
+                action=req.action,
+                group_id=req.group_id,
+            )
+            req = req.model_copy(update={"action": "transaction_dismissed"})
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"unknown action '{req.action}' "
+                    "(strict in non-production)"
+                ),
+            )
+
+    client = request.client
+    marker = f"[INTENT:{req.action}] group_id={req.group_id}"
+
+    _debug_log(
+        "HTTP",
+        "POST /chat/intent",
+        client=f"{client.host}:{client.port}" if client else "unknown",
+        thread_id=req.thread_id,
+        user_id=req.user_id,
+        action=req.action,
+        group_id=req.group_id,
+        marker_preview=marker[:80],
+    )
+
+    config: dict[str, Any] = {"configurable": {"thread_id": req.thread_id}}
+
+    # Single-message append. We no longer persist an ack AIMessage —
+    # mobile's "collapsed card" UX is itself the acknowledgement, so a
+    # chat-bubble ack would be visual duplication. Surface failures —
+    # do NOT fall back to running the graph, the whole point is to
+    # skip the LLM.
+    await _graph.aupdate_state(
+        config,
+        {"messages": [HumanMessage(content=marker)]},
+    )
+
+    # Bump preview + counters mirroring the post-run update in
+    # `/chat/stream`. We assume the thread row already exists (mobile
+    # only fires this intent after a proposal turn, which itself ran
+    # through `/chat/stream` and called `upsert_on_first_message`).
+    # `update_after_marker` bumps `message_count` by exactly 1 — only
+    # the marker HumanMessage was appended.
+    if _pool is not None:
+        try:
+            await threads_repo.update_after_marker(
+                _pool, req.thread_id, marker[:80],
+            )
+        except Exception as exc:
+            _debug_log(
+                "THREAD",
+                "Intent preview update failed",
+                error=str(exc),
+                thread_id=req.thread_id,
+            )
+
+    return IntentOut(thread_id=req.thread_id)
 
 
 @app.post(
