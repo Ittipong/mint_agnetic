@@ -58,3 +58,10 @@ logs/
 *.pem
 *.key
 secrets/
+
+# Backup / local env files (never commit — secret-bearing)
+.env.bak
+.env.bak2
+.env.test
+*.bak
+**/.mcp.json
