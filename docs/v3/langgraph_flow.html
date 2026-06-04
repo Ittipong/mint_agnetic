@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>mint_agentic_v3 — LangGraph Flow</title>
+<!--
+  PURPOSE (the "why"):
+    เจาะเฉพาะ "กราฟ" ของ LangGraph — โครงสร้าง node/edge จริง, ReAct loop ภายใน,
+    post_model_hook (validator + tool-error guard), conditional edges, และ
+    state channels + reducers. เปิดไฟล์เดียวจบ ไม่มี dependency.
+
+  MA mapping (โค้ดเปลี่ยน → แก้ section ไหน):
+    - node/edge ของ outer graph  → graph.py::build_graph()
+    - ReAct loop + post_model_hook→ langgraph.prebuilt.create_react_agent (graph.py) + validators/numerical.py
+    - state channels / reducer    → state.py::AgentState, append_reducer
+    - emission_guard routing      → graph.py::_emission_guard, _route_after_emission_guard
+-->
+<style>
+  :root{
+    --bg:#0f1117; --panel:#181b24; --panel-2:#1f2430; --line:#2c3340;
+    --text:#e6e9ef; --muted:#9aa3b2;
+    --accent:#5b8cff; --green:#34d399; --amber:#fbbf24; --pink:#f472b6;
+    --purple:#a78bfa; --red:#f87171; --cyan:#22d3ee;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:"Sarabun",-apple-system,"Segoe UI",system-ui,sans-serif;line-height:1.55;padding:0 0 80px;}
+  header{padding:26px 32px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#161a23,#0f1117);position:sticky;top:0;z-index:20;backdrop-filter:blur(6px);}
+  header h1{margin:0;font-size:21px;}
+  header p{margin:6px 0 0;color:var(--muted);font-size:14px;}
+  nav{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;}
+  nav a{color:var(--text);text-decoration:none;font-size:13px;background:var(--panel-2);
+    border:1px solid var(--line);padding:5px 11px;border-radius:999px;transition:.15s;}
+  nav a:hover{border-color:var(--accent);color:var(--accent);}
+  main{max-width:1080px;margin:0 auto;padding:0 24px;}
+  section{margin-top:42px;}
+  h2{font-size:18px;margin:0 0 4px;display:flex;align-items:center;gap:10px;}
+  h2 .num{background:var(--purple);color:#0b0e14;width:26px;height:26px;border-radius:7px;
+    display:inline-grid;place-items:center;font-size:14px;font-weight:700;flex:none;}
+  .src{font-size:12px;color:var(--muted);margin:0 0 16px 36px;font-family:ui-monospace,Menlo,monospace;}
+  .src code{color:var(--cyan);}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;color:var(--cyan);font-size:12.5px;}
+
+  .flow{display:flex;flex-direction:column;align-items:center;gap:0;}
+  .node{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--accent);
+    border-radius:10px;padding:12px 16px;min-width:240px;box-shadow:0 2px 8px rgba(0,0,0,.25);}
+  .node .t{font-weight:700;font-size:14px;}
+  .node .d{font-size:12.5px;color:var(--muted);margin-top:4px;}
+  .node.accent{border-left-color:var(--accent);} .node.green{border-left-color:var(--green);}
+  .node.amber{border-left-color:var(--amber);} .node.pink{border-left-color:var(--pink);}
+  .node.purple{border-left-color:var(--purple);} .node.red{border-left-color:var(--red);}
+  .node.cyan{border-left-color:var(--cyan);}
+  .terminal{background:var(--panel-2);border:2px solid var(--accent);color:var(--accent);
+    border-radius:999px;padding:7px 26px;font-weight:700;font-size:14px;}
+  .terminal.end{border-color:var(--green);color:var(--green);}
+  .arrow{text-align:center;color:var(--muted);font-size:20px;line-height:1;padding:6px 0;user-select:none;}
+  .arrow small{display:block;font-size:11px;color:var(--muted);margin-top:2px;}
+  .arrow .lbl{font-size:11px;color:var(--amber);font-family:ui-monospace,Menlo,monospace;}
+  .decision{background:var(--panel-2);border:1px dashed var(--amber);color:var(--amber);
+    padding:9px 16px;border-radius:8px;font-weight:700;font-size:13px;text-align:center;}
+
+  /* subgraph wrapper */
+  .subgraph{border:2px dashed var(--purple);border-radius:14px;padding:18px;background:rgba(167,139,250,.05);
+    width:100%;max-width:620px;}
+  .subgraph .sg-head{font-weight:700;font-size:13px;color:var(--purple);margin-bottom:14px;
+    display:flex;align-items:center;gap:8px;}
+  .pill{font-size:11px;padding:2px 8px;border-radius:999px;background:var(--panel);
+    border:1px solid var(--line);color:var(--muted);}
+
+  /* loop back visual */
+  .loopwrap{display:flex;align-items:stretch;gap:14px;justify-content:center;}
+  .loopback{display:flex;flex-direction:column;align-items:center;justify-content:center;
+    color:var(--amber);font-size:12px;border:1px dashed var(--amber);border-radius:10px;padding:8px;min-width:120px;text-align:center;}
+
+  .note{margin-top:12px;font-size:12.5px;color:var(--muted);background:var(--panel);
+    border:1px solid var(--line);border-left:3px solid var(--purple);border-radius:8px;padding:10px 13px;}
+  .note b{color:var(--text);}
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px;}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top;}
+  th{background:var(--panel-2);color:var(--text);font-weight:700;}
+  td code{font-size:11.5px;}
+  .tag{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:5px;font-weight:700;}
+  .tag.persist{background:rgba(52,211,153,.15);color:var(--green);}
+  .tag.transient{background:rgba(251,191,36,.15);color:var(--amber);}
+
+  .legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;}
+  .legend .item{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted);}
+  .swatch{width:14px;height:14px;border-radius:4px;flex:none;}
+  footer{max-width:1080px;margin:50px auto 0;padding:18px 24px;border-top:1px solid var(--line);
+    color:var(--muted);font-size:12px;}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🕸 mint_agentic_v3 — LangGraph Flow</h1>
+  <p>โครงสร้างกราฟจริง: outer <code>StateGraph</code> ห่อ prebuilt <code>create_react_agent</code> · checkpointer = AsyncPostgresSaver (schema v3)</p>
+  <nav>
+    <a href="#topology">1 · Graph topology</a>
+    <a href="#react">2 · ReAct subgraph</a>
+    <a href="#hook">3 · post_model_hook</a>
+    <a href="#guard">4 · emission_guard</a>
+    <a href="#state">5 · State channels</a>
+  </nav>
+</header>
+
+<main>
+
+  <!-- ════════════════════ 1. TOPOLOGY ════════════════════ -->
+  <section id="topology">
+    <h2><span class="num">1</span> Graph topology — outer StateGraph</h2>
+    <p class="src">source: <code>graph.py::build_graph()</code> · <code>builder = StateGraph(AgentState)</code></p>
+    <div class="flow">
+      <div class="terminal">START</div>
+      <div class="arrow">▼</div>
+      <div class="node purple"><div class="t">pre_turn</div>
+        <div class="d"><code>_pre_turn_hook</code> — reset scratch channels (<code>["__RESET__"]</code>), inject <code>__repo__</code></div></div>
+      <div class="arrow">▼<small>add_edge</small></div>
+
+      <!-- react subgraph -->
+      <div class="subgraph">
+        <div class="sg-head"><span class="swatch" style="background:var(--purple)"></span> react <span class="pill">create_react_agent (compiled subgraph)</span></div>
+        <div class="flow">
+          <div class="node accent"><div class="t">🧠 agent (LLM)</div>
+            <div class="d">ChatOpenAI→OpenRouter · prompt callable inject <code>{today,user_id}</code> + windowed msgs · post_model_hook ↓</div></div>
+          <div class="arrow">▼<span class="lbl">tools_condition</span></div>
+          <div class="loopwrap">
+            <div class="node pink"><div class="t">🛠 tools (ToolNode)</div>
+              <div class="d">7 tools · เขียน <code>tool_outputs_this_turn</code> / <code>emitted_blocks_this_turn</code></div></div>
+            <div class="loopback">↺<br>ToolMessage<br>กลับเข้า agent</div>
+          </div>
+          <div class="arrow">▼<small>ไม่มี tool_calls = final → ออกจาก subgraph</small></div>
+        </div>
+      </div>
+
+      <div class="arrow">▼<small>add_edge react → emission_guard</small></div>
+      <div class="node amber"><div class="t">emission_guard</div>
+        <div class="d"><code>_emission_guard</code> — Fix A: claim "บันทึกแล้ว" แต่ไม่เรียก propose_transaction?</div></div>
+      <div class="arrow">▼<span class="lbl">conditional_edges · _route_after_emission_guard</span></div>
+      <div class="loopwrap">
+        <div class="decision"><code>__add_guard_action__</code></div>
+        <div class="loopback" style="border-color:var(--red)">"retry"<br>↺ react<br>(บังคับเรียก tool)</div>
+      </div>
+      <div class="arrow">▼<small>"" / "fallback" → post_turn</small></div>
+      <div class="node purple"><div class="t">post_turn</div>
+        <div class="d"><code>_post_turn_hook</code> — finalize <code>last_txn</code> + <code>onboarding_stage</code></div></div>
+      <div class="arrow">▼</div>
+      <div class="terminal end">END</div>
+    </div>
+    <div class="note">
+      <b>edges จริง (5 เส้น):</b>
+      <code>START→pre_turn</code> · <code>pre_turn→react</code> · <code>react→emission_guard</code> ·
+      <code>emission_guard→{react|post_turn}</code> (conditional) · <code>post_turn→END</code>.
+      checkpointer + store ผูกตอน <code>builder.compile(checkpointer, store)</code> — inner react inherit จาก parent.
+    </div>
+  </section>
+
+  <!-- ════════════════════ 2. REACT SUBGRAPH ════════════════════ -->
+  <section id="react">
+    <h2><span class="num">2</span> ReAct subgraph — loop ภายใน (prebuilt)</h2>
+    <p class="src">source: <code>langgraph.prebuilt.create_react_agent(model, tools=ALL_TOOLS, prompt=_make_prompt, post_model_hook=validator_hook, store)</code></p>
+    <div class="legend">
+      <div class="item"><span class="swatch" style="background:var(--accent)"></span> LLM step</div>
+      <div class="item"><span class="swatch" style="background:var(--pink)"></span> ToolNode</div>
+      <div class="item"><span class="swatch" style="background:var(--amber)"></span> hook / condition</div>
+    </div>
+    <div class="flow" style="margin-top:14px">
+      <div class="node accent"><div class="t">agent</div>
+        <div class="d">เรียก LLM ด้วย messages ปัจจุบัน (system + windowed 16 turns) → ได้ AIMessage</div></div>
+      <div class="arrow">▼<small>post_model_hook รัน "หลังทุก LLM step" (ดู §3)</small></div>
+      <div class="decision">AIMessage มี <code>tool_calls</code> ?</div>
+      <div class="loopwrap" style="margin-top:12px">
+        <div class="node pink"><div class="t">yes → tools</div>
+          <div class="d">รัน tool(s) → คืน ToolMessage(s) ต่อท้าย messages</div></div>
+        <div class="loopback">↺ กลับเข้า agent<br>(จนกว่าจะ final<br>หรือ recursion_limit=25)</div>
+      </div>
+      <div class="arrow">▼<small>no (final answer)</small></div>
+      <div class="node green"><div class="t">ออกจาก subgraph → emission_guard</div>
+        <div class="d">content = คำตอบจริง (ไม่มี tool_calls)</div></div>
+    </div>
+    <div class="note">
+      <b>2 ตัวคุม loop:</b> <code>remaining_steps</code> (soft counter ของ prebuilt agent, ใน state) +
+      <code>recursion_limit=25</code> (hard bound จาก config). Advisor 4-step chain + validator retry ยังต่ำกว่า 25 มาก.
+    </div>
+  </section>
+
+  <!-- ════════════════════ 3. POST_MODEL_HOOK ════════════════════ -->
+  <section id="hook">
+    <h2><span class="num">3</span> post_model_hook — numerical validator + tool-error guard</h2>
+    <p class="src">source: <code>validators/numerical.py::make_validator_post_model_hook()</code> — รันหลังทุก LLM step ใน react</p>
+    <div class="flow">
+      <div class="node accent"><div class="t">hook(state) เริ่ม</div>
+        <div class="d">ดู message ล่าสุด</div></div>
+      <div class="arrow">▼</div>
+      <div class="decision">มี <code>tool_calls</code> ? (intermediate)</div>
+      <div class="arrow">▼<small>yes → no-op (return {}) ปล่อย ReAct เดินต่อ</small></div>
+      <div class="decision">turn นี้มี tool error ที่ยังไม่ recover ?</div>
+      <div class="arrow">▼</div>
+      <div class="node amber"><div class="t">Tool-error guard</div>
+        <div class="d">retry &lt; <code>_TOOL_ERROR_RETRY_MAX (2)</code> → inject <code>[TOOL_ERROR_RETRY n/2]</code> ใน ToolMessage payload → บังคับ LLM retry · เกินโควต้า → ปล่อย Thai fallback (R10)</div></div>
+      <div class="arrow">▼<small>ไม่มี error → ตรวจตัวเลข</small></div>
+      <div class="node cyan"><div class="t">Numerical validate (final answer เท่านั้น)</div>
+        <div class="d">ดึงเลขเงินจากคำตอบ → cross-check กับเลขใน <code>tool_outputs_this_turn</code> (rel_tol 1%)</div></div>
+      <div class="arrow">▼</div>
+      <div class="decision">เลขทุกตัว ground ?</div>
+      <div class="loopwrap" style="margin-top:12px">
+        <div class="node green"><div class="t">✅ pass</div><div class="d">return {} — คำตอบผ่าน</div></div>
+        <div class="node amber"><div class="t">❌ fail ครั้งที่ 1</div>
+          <div class="d">inject <code>[VALIDATOR_RETRY]</code>, <code>__validator_retries__=1</code>, emit status (Q2) → ReAct ตอบใหม่</div></div>
+        <div class="node red"><div class="t">❌ fail ครั้งที่ 2</div>
+          <div class="d"><code>__validator_failed__=True</code> → SSE adapter แทนด้วยข้อความ "ยืนยันตัวเลขไม่ได้"</div></div>
+      </div>
+    </div>
+    <div class="note">
+      <b>ทำไม guard นี้อยู่ "ใน loop":</b> มันแก้ได้เฉพาะกรณี LLM ตอบ <i>หลังเรียก tool</i> (มี ToolMessage tail).
+      เคสที่ LLM ตอบ text-only โดยไม่เรียก tool เลย → จับใน loop ไม่ได้ ต้องไปจับที่ <b>§4 emission_guard</b> (outer graph) แทน.
+      markers ทั้งหมด (<code>[VALIDATOR_RETRY] [TOOL_ERROR_RETRY] [ADD_EMISSION_RETRY]</code>) ถูก strip ใน SSE adapter ไม่ให้หลุดถึง user.
+    </div>
+  </section>
+
+  <!-- ════════════════════ 4. EMISSION GUARD ════════════════════ -->
+  <section id="guard">
+    <h2><span class="num">4</span> emission_guard — outer-graph safety net (Fix A)</h2>
+    <p class="src">source: <code>graph.py::_emission_guard</code> + <code>_route_after_emission_guard</code></p>
+    <div class="note" style="margin-top:0;margin-bottom:14px">
+      <b>ปัญหา (trace 8e2887b2):</b> thread ยาวที่ analyst ครอบงำ → LLM เลียนแบบ ตอบ "บันทึก… ยืนยันด้านบน" เป็น text เฉย ๆ
+      โดยไม่เรียก <code>propose_transaction</code> → ไม่มีการ์ดถึง mobile. validator จับไม่ได้ (เช็คแค่เลข), in-loop hook ก็จับไม่ได้ (ไม่มี ToolMessage tail).
+    </div>
+    <div class="flow">
+      <div class="node accent"><div class="t">_claims_add_without_block(state)</div>
+        <div class="d">final AIMessage + regex <code>ยืนยันด้านบน|กดยืนยัน|บันทึก…บาท…แล้ว</code> + <b>ไม่</b>เจอ propose_transaction ใน turn นี้</div></div>
+      <div class="arrow">▼</div>
+      <div class="decision">claims save แต่ไม่มี proposal ?</div>
+      <div class="loopwrap" style="margin-top:12px">
+        <div class="node green"><div class="t">no →ผ่าน</div><div class="d"><code>action=""</code> → route ไป post_turn</div></div>
+        <div class="node amber"><div class="t">yes + retry &lt; 1</div>
+          <div class="d">RemoveMessage(คำตอบลวง) + inject forcing SystemMessage <code>[ADD_EMISSION_RETRY]</code> + emit status → <code>action="retry"</code> → ↺ react</div></div>
+        <div class="node red"><div class="t">yes + retry หมด</div>
+          <div class="d">RemoveMessage + AIMessage honest fallback ("ยังบันทึกไม่สำเร็จ…") → <code>action="fallback"</code> → post_turn</div></div>
+      </div>
+    </div>
+    <div class="note">
+      <b>ทำไมเช็คผ่าน <code>messages</code> ไม่ใช่ <code>emitted_blocks_this_turn</code>:</b>
+      LangGraph 1.x ไม่ merge per-turn append-channel ของ subgraph เข้า parent state ให้ node ปลายน้ำอ่าน —
+      outer node จะเห็น channel นั้นว่างเสมอ (จะ fire ทุก ADD). channel <code>messages</code> เท่านั้นที่ข้าม boundary ได้น่าเชื่อถือ.
+    </div>
+  </section>
+
+  <!-- ════════════════════ 5. STATE CHANNELS ════════════════════ -->
+  <section id="state">
+    <h2><span class="num">5</span> State channels & reducers</h2>
+    <p class="src">source: <code>state.py::AgentState</code> · <code>append_reducer</code></p>
+    <table>
+      <thead><tr><th>Channel</th><th>Reducer</th><th>Lifetime</th><th>หมายเหตุ</th></tr></thead>
+      <tbody>
+        <tr><td><code>messages</code></td><td><code>add_messages</code></td><td><span class="tag persist">persist</span></td><td>working memory ของ ReAct (LLM เห็นแค่ window 16 turns แต่เก็บครบ)</td></tr>
+        <tr><td><code>remaining_steps</code></td><td><code>RemainingSteps</code></td><td><span class="tag transient">managed</span></td><td>soft counter ของ prebuilt agent — จำเป็นต้องมี</td></tr>
+        <tr><td><code>proposals</code></td><td>replace (default)</td><td><span class="tag persist">persist</span></td><td>pending/confirmed/cancelled/discarded — confirm/cancel แก้ที่นี่</td></tr>
+        <tr><td><code>pending_clarification</code></td><td>replace</td><td><span class="tag persist">persist</span></td><td>known_slots แยกจาก proposal (clarification loop)</td></tr>
+        <tr><td><code>user_context</code></td><td>replace</td><td><span class="tag transient">transient</span></td><td>cache catalog ต่อ turn — pre_turn reset = None</td></tr>
+        <tr><td><code>tool_outputs_this_turn</code></td><td><code>append_reducer</code></td><td><span class="tag transient">transient</span></td><td>validator อ่านเพื่อ ground เลข · reset ด้วย <code>["__RESET__"]</code></td></tr>
+        <tr><td><code>emitted_blocks_this_turn</code></td><td><code>append_reducer</code></td><td><span class="tag transient">transient</span></td><td>SSE adapter drain เป็น <code>event:block</code></td></tr>
+        <tr><td><code>last_txn / last_query</code></td><td>replace</td><td><span class="tag persist">persist</span></td><td>short-term memory ข้าม turn (follow-up "แก้…")</td></tr>
+        <tr><td><code>__validator_* / __add_guard_*</code></td><td>replace</td><td><span class="tag transient">transient</span></td><td>scratch ของ guard — pre_turn reset ทุก turn</td></tr>
+        <tr><td><code>onboarding_stage</code></td><td>replace</td><td><span class="tag persist">persist</span></td><td>no_wallet / no_transaction / done</td></tr>
+      </tbody>
+    </table>
+    <div class="note">
+      <b>หัวใจ reducer (<code>append_reducer</code>):</b> per-turn list ต้องถูก "wipe" ตอนต้น turn แต่ tool ภายใน turn ต้อง "append".
+      naive <code>list+list</code> reset ไม่ได้ → ใช้ sentinel: <code>right == ["__RESET__"]</code> = clear, อื่น ๆ = concat.
+      pre_turn ส่ง sentinel, tool ส่ง <code>Command(update=[block])</code>.
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  สรุปจาก source จริง: <code>graph.py</code> · <code>state.py</code> · <code>validators/numerical.py</code> ·
+  <code>langgraph.prebuilt.create_react_agent</code> · ดูภาพรวมทั้งระบบที่ <code>agentic_v3_flow.html</code>
+</footer>
+
+</body>
+</html>

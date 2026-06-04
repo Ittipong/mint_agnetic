@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>mint_agentic_v3 — System Flow</title>
+<!--
+  PURPOSE (the "why"):
+    เอกสาร flow ของ mint_agentic_v3 (pure ReAct + CodeAct) แบบเปิดไฟล์เดียวจบ
+    ไม่มี dependency ภายนอก เพื่อให้ MA ง่าย — แก้ flow = แก้ section ที่ตรงกัน
+    แต่ละ section ผูกกับไฟล์ source จริง (ระบุไว้ที่หัว section) เวลาโค้ดเปลี่ยน
+    ให้ตามไปอัปเดต section นั้น ๆ
+
+  โครงสร้าง (1 section = 1 มุมมองของ flow):
+    0. Legend            — สี/รูปทรงที่ใช้
+    1. Request overview  — server.py  (entry → text/slip/voice)
+    2. Text + Fast-path  — server.py _text_graph_stream + fast_path.py
+    3. Outer graph       — graph.py   (pre → react → emission_guard → post)
+    4. CodeAct run_python— tools/codeact/*
+    5. SSE adapter       — streaming/sse_adapter.py
+    6. Confirm / Cancel  — server.py _finalize_proposal_in_state
+-->
+<style>
+  :root {
+    --bg:        #0f1117;
+    --panel:     #181b24;
+    --panel-2:   #1f2430;
+    --line:      #2c3340;
+    --text:      #e6e9ef;
+    --muted:     #9aa3b2;
+    --accent:    #5b8cff;   /* flow / entry            */
+    --green:     #34d399;   /* success / final answer  */
+    --amber:     #fbbf24;   /* guard / validator       */
+    --pink:      #f472b6;   /* tools                    */
+    --purple:    #a78bfa;   /* graph nodes              */
+    --red:       #f87171;   /* error / refuse           */
+    --cyan:      #22d3ee;   /* data / DB                */
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Sarabun", -apple-system, "Segoe UI", system-ui, sans-serif;
+    line-height: 1.55; padding: 0 0 80px;
+  }
+  header {
+    padding: 28px 32px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #161a23, #0f1117);
+    position: sticky; top: 0; z-index: 20; backdrop-filter: blur(6px);
+  }
+  header h1 { margin: 0; font-size: 22px; letter-spacing: .3px; }
+  header p  { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
+  nav { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+  nav a {
+    color: var(--text); text-decoration: none; font-size: 13px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    padding: 5px 11px; border-radius: 999px; transition: .15s;
+  }
+  nav a:hover { border-color: var(--accent); color: var(--accent); }
+
+  main { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  section { margin-top: 44px; }
+  h2 {
+    font-size: 18px; margin: 0 0 4px; display: flex; align-items: center; gap: 10px;
+  }
+  h2 .num {
+    background: var(--accent); color: #0b0e14; width: 26px; height: 26px;
+    border-radius: 7px; display: inline-grid; place-items: center;
+    font-size: 14px; font-weight: 700; flex: none;
+  }
+  .src {
+    font-size: 12px; color: var(--muted); margin: 0 0 16px 36px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .src code { color: var(--cyan); }
+
+  /* ---- flow building blocks ---- */
+  .flow { display: flex; flex-direction: column; gap: 0; align-items: stretch; }
+  .row  { display: flex; gap: 14px; align-items: stretch; justify-content: center; flex-wrap: wrap; }
+  .node {
+    background: var(--panel); border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    border-radius: 10px; padding: 12px 16px; min-width: 200px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.25);
+  }
+  .node .t { font-weight: 700; font-size: 14px; }
+  .node .d { font-size: 12.5px; color: var(--muted); margin-top: 4px; }
+  .node code { color: var(--cyan); font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .node.accent  { border-left-color: var(--accent); }
+  .node.green   { border-left-color: var(--green);  }
+  .node.amber   { border-left-color: var(--amber);  }
+  .node.pink    { border-left-color: var(--pink);   }
+  .node.purple  { border-left-color: var(--purple); }
+  .node.red     { border-left-color: var(--red);    }
+  .node.cyan    { border-left-color: var(--cyan);   }
+
+  .arrow {
+    text-align: center; color: var(--muted); font-size: 20px; line-height: 1;
+    padding: 6px 0; user-select: none;
+  }
+  .arrow small { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  /* decision diamond */
+  .decision {
+    align-self: center; background: var(--panel-2);
+    border: 1px dashed var(--amber); color: var(--amber);
+    padding: 9px 16px; border-radius: 8px; font-weight: 700; font-size: 13px;
+    text-align: center;
+  }
+
+  /* a branch box that holds several stacked nodes */
+  .branch {
+    flex: 1 1 320px; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 12px; padding: 14px; min-width: 300px;
+  }
+  .branch > .head {
+    font-weight: 700; font-size: 13.5px; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .pill {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    background: var(--panel); border: 1px solid var(--line); color: var(--muted);
+  }
+  .stack { display: flex; flex-direction: column; gap: 8px; }
+  .step {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 9px 12px; font-size: 12.5px;
+  }
+  .step b { color: var(--text); }
+  .step .k { color: var(--pink); font-weight: 700; }
+  .step.ok   { border-left: 3px solid var(--green); }
+  .step.warn { border-left: 3px solid var(--amber); }
+  .step.fail { border-left: 3px solid var(--red);   }
+  .step code, .branch code { color: var(--cyan); font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+
+  .note {
+    margin-top: 12px; font-size: 12.5px; color: var(--muted);
+    background: var(--panel); border: 1px solid var(--line);
+    border-left: 3px solid var(--purple); border-radius: 8px; padding: 10px 13px;
+  }
+  .note b { color: var(--text); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; }
+  .legend .item { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+  .swatch { width: 14px; height: 14px; border-radius: 4px; flex: none; }
+
+  .tools-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+
+  footer { max-width: 1080px; margin: 56px auto 0; padding: 18px 24px;
+    border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+  kbd {
+    background: var(--panel-2); border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 5px; padding: 1px 6px; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--text);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🌿 mint_agentic_v3 — System Flow</h1>
+  <p>Pure ReAct + CodeAct chat agent · FastAPI :2026 · OpenRouter · LangGraph · Postgres (schema <code>v3</code>)</p>
+  <nav>
+    <a href="#legend">0 · Legend</a>
+    <a href="#overview">1 · Request overview</a>
+    <a href="#fastpath">2 · Text + Fast-path</a>
+    <a href="#graph">3 · Outer graph</a>
+    <a href="#codeact">4 · CodeAct</a>
+    <a href="#sse">5 · SSE adapter</a>
+    <a href="#confirm">6 · Confirm/Cancel</a>
+  </nav>
+</header>
+
+<main>
+
+  <!-- ════════════════════════════════ 0. LEGEND ════════════════════════════════ -->
+  <section id="legend">
+    <h2><span class="num">0</span> Legend</h2>
+    <p class="src">วิธีอ่านสี — ใช้ร่วมกันทุก section</p>
+    <div class="legend">
+      <div class="item"><span class="swatch" style="background:var(--accent)"></span> Entry / Flow control</div>
+      <div class="item"><span class="swatch" style="background:var(--purple)"></span> Graph node (LangGraph)</div>
+      <div class="item"><span class="swatch" style="background:var(--pink)"></span> Tool (LLM-callable)</div>
+      <div class="item"><span class="swatch" style="background:var(--cyan)"></span> Data / DB / Catalog</div>
+      <div class="item"><span class="swatch" style="background:var(--amber)"></span> Guard / Validator / Decision</div>
+      <div class="item"><span class="swatch" style="background:var(--green)"></span> Success / Final answer</div>
+      <div class="item"><span class="swatch" style="background:var(--red)"></span> Error / Refuse / Fallback</div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════ 1. REQUEST OVERVIEW ═══════════════════════════ -->
+  <section id="overview">
+    <h2><span class="num">1</span> Request overview — แตก branch ตาม input</h2>
+    <p class="src">source: <code>src/agent/server.py</code> · <code>lifespan()</code>, <code>_chat_stream_generator()</code></p>
+    <div class="flow">
+      <div class="row">
+        <div class="node accent" style="min-width:280px">
+          <div class="t">📱 Mobile (iPhone)</div>
+          <div class="d">Cloudflare → <code>chat.minttechdev.uk</code> → tunnel → :2026</div>
+        </div>
+      </div>
+      <div class="arrow">▼<small>POST /chat/stream (SSE) · /chat/voice · REST</small></div>
+      <div class="row">
+        <div class="node accent" style="min-width:520px">
+          <div class="t">FastAPI lifespan (boot ครั้งเดียว)</div>
+          <div class="d">
+            1) version gate (refuse ถ้า <code>CHAT_AGENT_VERSION≠v3</code>) ·
+            2) validate LLM env ·
+            3) เปิด 2 pools (checkpoint + backend) ·
+            4) idempotent DDL ·
+            5) checkpointer (AsyncPostgresSaver) + memory store ·
+            6) <code>build_graph(repo, store, checkpointer)</code> →
+            stash บน <code>app.state</code>
+          </div>
+        </div>
+      </div>
+      <div class="arrow">▼<small>_chat_stream_generator — เปิด session logger + turn_header</small></div>
+      <div class="decision">มี <code>image_b64s</code> ?</div>
+      <div class="row" style="margin-top:14px">
+        <div class="branch">
+          <div class="head"><span class="swatch" style="background:var(--accent)"></span> TEXT branch <span class="pill">no image</span></div>
+          <div class="stack">
+            <div class="step ok">→ ดู <b>§2 Fast-path</b> → ถ้าไม่ลัด เข้า <b>§3 Outer graph</b></div>
+          </div>
+        </div>
+        <div class="branch">
+          <div class="head"><span class="swatch" style="background:var(--cyan)"></span> SLIP branch <span class="pill">image แนบ</span></div>
+          <div class="stack">
+            <div class="step">ข้าม ReAct ทั้งหมด (decision α)</div>
+            <div class="step">1 vision call → <code>transaction_proposal_group</code> block</div>
+            <div class="step">seed state ด้วย <code>aupdate_state(as_node="finalize")</code></div>
+            <div class="step">dual-write: audit table + checkpoint</div>
+          </div>
+        </div>
+        <div class="branch">
+          <div class="head"><span class="swatch" style="background:var(--pink)"></span> VOICE <span class="pill">/chat/voice</span></div>
+          <div class="stack">
+            <div class="step">multipart audio → STT</div>
+            <div class="step">transcript → เข้า TEXT graph เหมือนพิมพ์</div>
+            <div class="step">persist <code>kind="voice"</code></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note"><b>MA tip:</b> endpoint ทั้งหมดถูก freeze ให้ตรง v2 (0 endpoint/payload changes) — แก้ logic ภายในได้ แต่อย่าเปลี่ยนชื่อ event / ชื่อ field</div>
+  </section>
+
+  <!-- ════════════════════════════ 2. TEXT + FAST-PATH ═══════════════════════════ -->
+  <section id="fastpath">
+    <h2><span class="num">2</span> Text branch — Fast-path ก่อน แล้วค่อย ReAct</h2>
+    <p class="src">source: <code>server.py::_text_graph_stream</code> · <code>fast_path.py</code> · <code>tiny_llm.py</code> · เปิด/ปิด <code>FAST_PATH_ENABLED</code></p>
+    <div class="note" style="margin-top:0;margin-bottom:14px">
+      <b>ทำไมต้องมี fast-path:</b> ADD ง่าย ๆ ("ข้าวเที่ยง 120") ไม่ต้องใช้ LLM เต็ม — ลัดตรงไป <code>propose_transaction</code> ตัดเวลา ~3 วิ/turn. อะไรที่ไม่ใช่ ADD ง่าย ตกลง full ReAct
+    </div>
+    <div class="flow">
+      <div class="row">
+        <div class="branch" style="flex-basis:100%">
+          <div class="head"><span class="swatch" style="background:var(--accent)"></span> FAST PATH (text เท่านั้น)</div>
+          <div class="stack">
+            <div class="step warn"><span class="k">Tier 0</span> · <code>has_obvious_non_add_signal()</code> — เจอสัญญาณ "ไม่ใช่ ADD" → <b>fallback ReAct</b></div>
+            <div class="step ok"><span class="k">Tier 1</span> · <code>route_text_input()</code> regex เป๊ะ → <code>stream_fast_path_add()</code> (ไม่เรียก LLM) ✅ <b>return</b></div>
+            <div class="step"><span class="k">Tier 2</span> · tiny-LLM <code>classify_intent()</code> (เฉพาะตอน heuristic พลาด):
+              <div class="stack" style="margin-top:7px">
+                <div class="step ok">ADD + complete → <code>stream_fast_path_add()</code> ✅ return</div>
+                <div class="step warn">ADD + incomplete → <span class="k">Tier 3b</span> <code>stream_clarification_template()</code> ✅ return</div>
+                <div class="step fail">intent ≠ ADD → fallback ReAct</div>
+              </div>
+            </div>
+            <div class="step fail"><code>FastPathFailure</code> ที่จุดใด ๆ → fallback ReAct (telemetry บันทึก <code>error_kind</code>)</div>
+          </div>
+        </div>
+      </div>
+      <div class="arrow">▼<small>ไม่ลัด → FULL GRAPH</small></div>
+      <div class="row">
+        <div class="branch" style="flex-basis:100%">
+          <div class="head"><span class="swatch" style="background:var(--purple)"></span> FULL GRAPH path</div>
+          <div class="stack">
+            <div class="step">1 · <code>status_token "กำลังคิด..."</code> (stream ทีละคำ)</div>
+            <div class="step">2 · <b>preamble</b> — โมเดลถูก ๆ พูดเกริ่น 1 ประโยค เป็น <code>status_token</code> ชั่วคราว (ไม่มีตัวเลข → ขัดคำตอบจริงไม่ได้)</div>
+            <div class="step">3 · build <code>init_state</code> {user_id, thread_id, messages:[user], default_wallet_sync_id}</div>
+            <div class="step ok">4 · <code>stream_chat(graph, state, config)</code> → <b>§3 + §5</b></div>
+            <div class="step">5 · เก็บ blocks + answer → persist transcript (threads/messages repo, best-effort)</div>
+            <div class="step fail">6 · empty-LLM fallback — ถ้าไม่มี answer/block เลย → ข้อความขออภัยภาษาไทย</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════ 3. OUTER GRAPH ════════════════════════════════ -->
+  <section id="graph">
+    <h2><span class="num">3</span> Outer graph — หัวใจของ agent</h2>
+    <p class="src">source: <code>src/agent/graph.py</code> · <code>build_graph()</code> · state: <code>state.py::AgentState</code></p>
+    <div class="flow">
+      <div class="row"><div class="decision" style="border-color:var(--accent);color:var(--accent)">START</div></div>
+      <div class="arrow">▼</div>
+      <div class="row">
+        <div class="node purple" style="min-width:520px">
+          <div class="t">pre_turn</div>
+          <div class="d">เคลียร์ scratch ต่อ turn ด้วย sentinel <code>["__RESET__"]</code> (append channels), reset validator/guard scratch, inject <code>__repo__</code> (audit table)</div>
+        </div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="row">
+        <div class="branch" style="flex-basis:100%;border-color:var(--purple)">
+          <div class="head"><span class="swatch" style="background:var(--purple)"></span> react · <code>create_react_agent</code> (ReAct loop)</div>
+          <div class="stack">
+            <div class="step">🧠 <b>LLM</b> (ChatOpenAI→OpenRouter, <code>REACT_MODEL</code>, temp 0, fallback chain) — prompt = system + <b>windowed messages (16 turns)</b> กัน context poison</div>
+            <div class="row" style="margin:4px 0">
+              <div class="decision">มี tool_calls ?</div>
+            </div>
+            <div class="step"><b>yes</b> → เรียก <span class="k">TOOLS</span> → ToolMessage → loop กลับเข้า LLM</div>
+            <div class="step ok"><b>no (final)</b> → ออกจาก loop</div>
+            <div class="step warn">⛓ <code>post_model_hook</code> = <b>numerical validator</b> — รันหลังทุก LLM step, เช็คเฉพาะ final answer ว่าเลขเงินทุกตัว ground จาก tool outputs จริง (ไม่ผ่าน → retry / terminal reject)</div>
+          </div>
+        </div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="row">
+        <div class="node amber" style="min-width:520px">
+          <div class="t">emission_guard <span class="pill">Fix A</span></div>
+          <div class="d">
+            ตอบทำนอง "บันทึกแล้ว / ยืนยันด้านบน" แต่ turn นี้ <b>ไม่ได้เรียก</b> <code>propose_transaction</code>?
+            <br>• retry → re-enter react 1 ครั้ง (บังคับเรียก tool)
+            <br>• exhausted → ทิ้งคำตอบลวง ใช้ honest fallback แทน
+          </div>
+        </div>
+      </div>
+      <div class="arrow">▼<small>_route_after_emission_guard → react (retry) | post_turn</small></div>
+      <div class="row">
+        <div class="node purple" style="min-width:520px">
+          <div class="t">post_turn</div>
+          <div class="d">finalize <code>last_txn</code> (จาก proposal ล่าสุด) + <code>onboarding_stage</code> (<code>no_wallet</code> / <code>done</code>)</div>
+        </div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="row"><div class="decision" style="border-color:var(--green);color:var(--green)">END</div></div>
+    </div>
+
+    <h3 style="margin:24px 0 8px;font-size:15px">🛠 7 Tools (<code>ALL_TOOLS</code>)</h3>
+    <div class="tools-grid">
+      <div class="node cyan"><div class="t">get_user_context</div><div class="d">wallet/category/tag queries</div></div>
+      <div class="node cyan"><div class="t">run_python</div><div class="d">CodeAct — คำนวณเงิน, โหลด catalog เอง (§4)</div></div>
+      <div class="node pink"><div class="t">memory_recall</div><div class="d">ดึง long-term memory</div></div>
+      <div class="node green"><div class="t">propose_transaction</div><div class="d">สร้าง proposal block + persist audit</div></div>
+      <div class="node pink"><div class="t">memory_write</div><div class="d">เขียน long-term memory</div></div>
+      <div class="node pink"><div class="t">get_advice_playbook</div><div class="d">framework การเงิน (บ้าน/หนี้/ภาษี/ลงทุน)</div></div>
+      <div class="node pink"><div class="t">get_app_capability</div><div class="d">FAQ: chat ทำ/ไม่ทำอะไรได้</div></div>
+    </div>
+    <div class="note">
+      <b>อย่าเพิ่ม tool พลาด (Q6):</b> ไม่มี <code>clarify_wallet</code> (wallet ambiguity → fallback index-0 ใน propose_transaction).
+      <code>emit_suggestions</code> / <code>wallet_required_cta</code> <b>ไม่ใช่</b> tool ของ LLM — suggestions ทำใน SSE adapter, wallet_required emit in-place. จำนวน 7 ถูกล็อกด้วย <code>UT-T00</code>.
+    </div>
+  </section>
+
+  <!-- ════════════════════════════ 4. CODEACT ════════════════════════════════════ -->
+  <section id="codeact">
+    <h2><span class="num">4</span> CodeAct — <code>run_python</code> (เครื่องคิดเลขที่ ground ตัวเลข)</h2>
+    <p class="src">source: <code>tools/codeact/{__init__,sandbox,namespace}.py</code></p>
+    <div class="flow">
+      <div class="row"><div class="node pink" style="min-width:340px"><div class="t">LLM เรียก <code>run_python(code)</code></div><div class="d">emit status <code>"กำลังคำนวณ..."</code></div></div></div>
+      <div class="arrow">▼</div>
+      <div class="row"><div class="node cyan" style="min-width:340px"><div class="t">load EntityCatalog ของ user</div><div class="d">inline ทุก turn — tool นี้เป็นเจ้าของ dependency เอง ไม่พึ่ง LLM pre-fetch</div></div></div>
+      <div class="arrow">▼</div>
+      <div class="row"><div class="decision">wallets ว่าง ?</div></div>
+      <div class="row" style="margin-top:10px">
+        <div class="node red"><div class="t">yes → wallet_required block</div><div class="d">return ทันที ไม่รัน code (mobile โชว์ create-wallet)</div></div>
+        <div class="node cyan"><div class="t">no → build_namespace()</div><div class="d">query helpers (<code>sum_expense, balance, budget_remaining…</code>) + resolvers + <code>Decimal/date</code></div></div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="row">
+        <div class="node amber" style="min-width:520px">
+          <div class="t">execute(code) ใน sandbox</div>
+          <div class="d">AST validator: ห้าม import/exec/eval/dunder/network · รันบน worker thread · DB query (asyncpg, read-only) ผ่าน <code>run_coroutine_threadsafe</code></div>
+        </div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="row">
+        <div class="node green" style="min-width:520px">
+          <div class="t">บันทึก result + stdout → <code>state.tool_outputs_this_turn</code></div>
+          <div class="d">numerical validator (§3) ใช้ตรงนี้ cross-check เลขใน final answer — กัน hallucination แบบ 1,234.56</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════ 5. SSE ADAPTER ════════════════════════════════ -->
+  <section id="sse">
+    <h2><span class="num">5</span> SSE adapter — LangGraph → wire ของ mobile (v2 format)</h2>
+    <p class="src">source: <code>streaming/sse_adapter.py::stream_chat</code> · decoder: <code>mobile/.../chat_api_datasource.dart</code></p>
+    <div class="note" style="margin-top:0;margin-bottom:14px">
+      <code>graph.astream(stream_mode=["messages","custom","updates"])</code> → แปลงแต่ละ stream เป็น SSE event dict
+    </div>
+    <div class="row">
+      <div class="branch">
+        <div class="head"><span class="swatch" style="background:var(--accent)"></span> messages</div>
+        <div class="stack">
+          <div class="step warn">มี tool_calls → <code>status_token</code> (narration ชั่วคราว)</div>
+          <div class="step ok">ไม่มี tool_call → <code>answer_token</code> (คำตอบจริง → answer block)</div>
+          <div class="step">strip markers <code>[VALIDATOR_RETRY] [TOOL_ERROR_RETRY] [ADD_EMISSION_RETRY]</code></div>
+        </div>
+      </div>
+      <div class="branch">
+        <div class="head"><span class="swatch" style="background:var(--amber)"></span> custom</div>
+        <div class="stack">
+          <div class="step"><code>{status_token}</code> → status_token</div>
+          <div class="step fail"><code>{validator_failed}</code> → เก็บไว้ → ปิดท้ายด้วยข้อความ validator-reject</div>
+        </div>
+      </div>
+      <div class="branch">
+        <div class="head"><span class="swatch" style="background:var(--cyan)"></span> updates</div>
+        <div class="stack">
+          <div class="step">drain <code>emitted_blocks_this_turn</code> (BlockBuffer high-water mark)</div>
+          <div class="step ok"><code>validate_block</code> → <code>event:block</code> (proposal / wallet_required / clarification)</div>
+        </div>
+      </div>
+    </div>
+    <div class="arrow">▼<small>end of graph</small></div>
+    <div class="row">
+      <div class="node green"><div class="t">answer block</div><div class="d"><code>{"type":"answer","text":…}</code></div></div>
+      <div class="node pink"><div class="t">suggestions block</div><div class="d">deterministic (ไม่ใช่ graph node) · ข้ามถ้า ADD/crisis/emotional</div></div>
+      <div class="node accent"><div class="t">done</div><div class="d"><code>{thread_id}</code></div></div>
+      <div class="node red"><div class="t">error</div><div class="d"><code>{code,message}</code> ไม่มี traceback (PII)</div></div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════ 6. CONFIRM / CANCEL ═══════════════════════════ -->
+  <section id="confirm">
+    <h2><span class="num">6</span> Confirm / Cancel — REST แยกจาก stream</h2>
+    <p class="src">source: <code>server.py::_finalize_proposal_in_state</code> · <code>/transactions/confirm</code> · <code>/transactions/cancel</code></p>
+    <div class="flow">
+      <div class="row"><div class="node accent" style="min-width:420px"><div class="t">📱 POST /transactions/confirm</div><div class="d"><code>{proposal_id, thread_id, user_id}</code></div></div></div>
+      <div class="arrow">▼</div>
+      <div class="row">
+        <div class="branch" style="flex-basis:100%">
+          <div class="head"><span class="swatch" style="background:var(--amber)"></span> _finalize_proposal_in_state</div>
+          <div class="stack">
+            <div class="step"><code>aget_state(thread)</code> → หา proposal ใน checkpointer</div>
+            <div class="step fail">ไม่ pending → <code>409 already_finalized</code></div>
+            <div class="step ok">flip status → confirmed/cancelled (+<code>confirmed_at/cancelled_at</code>)</div>
+            <div class="step">confirmed + ADD_TRANSACTION → เขียน <code>last_txn</code> (ให้ turn ถัดไป "แก้..." อ้างได้)</div>
+            <div class="step">cancelled → เคลียร์ <code>last_txn</code> ถ้าชี้ proposal นี้</div>
+            <div class="step"><code>aupdate_state(..., as_node="finalize")</code> — บังคับ (slip/voice seed นอก graph ก็จบที่ node นี้)</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note">
+      <b>สำคัญ:</b> Python <b>ไม่</b>เขียน <code>transactions</code> row จริง — mobile (Drift + sync) เขียนเองด้วย <code>sync_id</code> ที่ฝังใน payload. endpoint นี้แค่ update conversation state.
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  เอกสารนี้สรุปจาก source จริงของ <code>mint_agentic_v3</code> · อัปเดตเมื่อแก้ flow ที่ section ตรงกัน (ดู src path ใต้หัวข้อ) ·
+  รันจริง: <code>CHAT_AGENT_VERSION=v3</code> บน :2026 ผ่าน Cloudflare tunnel
+</footer>
+
+</body>
+</html>
