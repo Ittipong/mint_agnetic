@@ -21,3 +21,7 @@ python-multipart>=0.0.9
 asyncpg>=0.29
 # dateparser: used by codeact/resolvers.py for natural-language date parsing.
 dateparser>=1.2
+# langgraph-cli[inmem]: provides `.venv/bin/langgraph` for `make dev-studio`
+# (LangGraph Studio dev server). Was previously installed manually, so a fresh
+# `make install` produced a venv that couldn't run `make dev`.
+langgraph-cli[inmem]>=0.4
