@@ -25,3 +25,7 @@ dateparser>=1.2
 # (LangGraph Studio dev server). Was previously installed manually, so a fresh
 # `make install` produced a venv that couldn't run `make dev`.
 langgraph-cli[inmem]>=0.4
+# langfuse: LLM tracing/observability (Phase-1 PoC, opt-in via LANGFUSE_ENABLED).
+# The observability.langfuse_tracing handler imports it lazily + degrades to a
+# no-op when absent, so this stays inert until keys are set and the flag is on.
+langfuse>=2.0

@@ -1,0 +1,4 @@
+# Local-only secrets + generated proof artifacts — never commit.
+.env
+langfuse-trace-verified.png
+.playwright-mcp/

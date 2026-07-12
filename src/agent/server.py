@@ -81,6 +81,7 @@ from src.agent.user_preferences import set_preferences_pool
 from src.agent.graph import build_graph
 from src.agent.llm_openrouter import make_llm_call, make_multimodal_call
 from src.agent.messages_repo import MESSAGES_DDL, MessagesRepo
+from src.agent.observability.langfuse_tracing import attach_langfuse
 from src.agent.session_logger import (
     _logging_enabled,
     open_session_logger,
@@ -438,6 +439,12 @@ async def _text_graph_stream(
         "configurable": {"thread_id": body.thread_id},
         "recursion_limit": 25,
     }
+    # Langfuse tracing (PoC, opt-in via LANGFUSE_ENABLED) — trace the whole turn
+    # per user (langfuse_user_id) + conversation (langfuse_session_id=thread_id).
+    # No-op when disabled, so the chat path is unchanged until it's switched on.
+    config = attach_langfuse(
+        config, user_id=body.user_id, session_id=body.thread_id, tags=["chat"]
+    )
 
     # Streaming preamble — "thinking out loud" warm-up that now races the
     # ReAct loop CONCURRENTLY (astream_with_preamble) instead of blocking ahead
