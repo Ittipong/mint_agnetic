@@ -48,8 +48,38 @@ curl -s -H "Authorization: Basic $AUTH" \
   "http://localhost:3100/api/public/traces?userId=poc-user-verify&limit=5"
 ```
 
+## Two projects (chat vs insight)
+
+Traces are split into two Langfuse projects under the same org (`Mint Money`):
+
+| project | service | keys |
+|---|---|---|
+| `mint-agentic-chat` (id `mint-chat`) | chat (mint_agentic) | the `LANGFUSE_INIT_*` fixed keys |
+| `mint-insight` | insight (mint_insight) | minted by `setup_projects.py` |
+
+`LANGFUSE_INIT_*` only seeds ONE project (`mint-chat`) on first boot, and OSS
+Langfuse has no project-provisioning public API — so the second project is
+(re)created by a small stdlib-only script that signs in as the admin user (the
+reproducible `LANGFUSE_INIT_USER_*` creds) and provisions it over the internal
+tRPC endpoints:
+
+```bash
+python docker/langfuse/setup_projects.py     # idempotent; writes keys into mint_insight/.env
+# then reload the insight service (touch a .py under uvicorn --reload, or restart)
+```
+
+It ensures the `mint-insight` project exists, mints an API key (only if the
+insight `.env` doesn't already hold one), and writes LANGFUSE_* into
+`mint_insight/.env`. Re-running is a no-op.
+
 ## Stop / reset
 ```bash
 docker compose -p langfuse-mint down          # stop (keeps data volumes)
 docker compose -p langfuse-mint down -v        # stop + wipe all data
+```
+
+**After a full `down -v` reset**, both projects come back reproducibly:
+```bash
+docker compose -p langfuse-mint up -d          # recreates org + mint-chat (LANGFUSE_INIT)
+python docker/langfuse/setup_projects.py       # recreates mint-insight + rewires insight .env
 ```
