@@ -379,6 +379,10 @@ class ChatStreamRequest(BaseModel):
     image_b64s: Optional[list[str]] = None
     default_currency_code: Optional[str] = None
     default_currency_symbol: Optional[str] = None
+    # Where the message came from, e.g. "starter:log" when the user tapped a
+    # /chat/starters chip — logged so each chip signal's tap rate can be
+    # measured. Optional; older clients never send it.
+    origin: Optional[str] = None
 
 
 class ConfirmRequest(BaseModel):
@@ -749,7 +753,7 @@ async def _chat_stream_generator(
     set_session_logger(session_logger)
     session_logger.turn_header(
         body.user_id, body.message, body.wallet_id,
-        extra={"thread": body.thread_id},
+        extra={"thread": body.thread_id, **({"origin": body.origin} if body.origin else {})},
     )
     _turn_start = time.monotonic()
     try:
@@ -889,6 +893,21 @@ async def chat_voice(
 # ---------------------------------------------------------------------------
 # Threads CRUD — v1 contract (thread_id / updated_at / etc.)
 # ---------------------------------------------------------------------------
+
+
+@app.get("/chat/starters")
+async def chat_starters(user_id: str, limit: int = 5):
+    """Personal starter chips for the empty chat screen (no LLM, fast).
+
+    Items: {label, send, kind: log|ask|example, reason}. Tapping one sends
+    `send` as the user's message; clients should pass
+    `origin="starter:<kind>"` on that /chat/stream call so taps are measured.
+    Never errors — falls back to generic examples.
+    """
+    from src.agent.starters import build_starters
+
+    items = await build_starters(user_id, limit=max(1, min(limit, 8)))
+    return {"items": items}
 
 
 @app.get("/threads")
