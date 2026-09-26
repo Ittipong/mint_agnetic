@@ -43,3 +43,4 @@ evals/chat_loop/media/*.jpg
 evals/chat_loop/media/*.m4a
 evals/chat_loop/media/*.aiff
 evals/chat_loop/media/last_block.json
+evals/chat_loop/results_*/

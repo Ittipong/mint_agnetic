@@ -5,18 +5,21 @@ Usage: chat_qa.py scenarios.json [only_id ...]
 scenario = {"id": "...", "turns": ["msg1", "msg2", ...]}
 Writes results/<id>.json and prints a compact transcript.
 """
-import json, os, sys, time, uuid, urllib.request
+import json, os, subprocess, sys, time, uuid, urllib.request
 
 BASE = "https://chat.minttechdev.uk"
-INSIGHT_DEV = "https://insight.minttechdev.uk/dev/api"
+_ENV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "backend", ".env.dev")
+DB_URL = next((l.split("=", 1)[1].strip() for l in open(_ENV) if l.startswith("DATABASE_URL=")), "")
 WRITTEN: list[str] = []  # sync_ids this run inserted — printed at the end for cleanup
-USER = "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9"
+USER = os.environ.get("QA_USER", "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9")
+WALLET = os.environ.get("QA_WALLET")  # the chat-input wallet pick, as the app sends it
 OUT = os.path.join(os.path.dirname(__file__), "results")
 os.makedirs(OUT, exist_ok=True)
 
 
 def turn(thread, msg, timeout=150):
-    body = json.dumps({"user_id": USER, "thread_id": thread, "message": msg}).encode()
+    body = json.dumps({"user_id": USER, "thread_id": thread, "message": msg,
+                       **({"wallet_id": WALLET} if WALLET else {})}).encode()
     req = urllib.request.Request(BASE + "/chat/stream", data=body, method="POST",
                                  headers={"Content-Type": "application/json",
                                           "Accept": "text/event-stream",
@@ -66,20 +69,32 @@ def write_and_confirm(thread, proposal):
     """What tapping ยืนยัน does in the app/prototype: write the ledger row
     (the agent never writes transactions), then mark the proposal confirmed."""
     # A group card (multi-item text / slip) saves every row, then ONE confirm.
+    # Rows go straight into the dev DB with the same columns insight's
+    # /dev/api/transaction writes (that endpoint is now key- and
+    # allowlist-gated, and test users are not on the list).
     txs = proposal.get("transactions") or [proposal["transaction"]]
     wrote = []
     for tx in txs:
-        row = {"user_id": USER, "sync_id": tx.get("sync_id"), "type": tx["type"],
-               "amount": tx["amount"], "date": tx.get("date"), "note": tx.get("note"),
-               "wallet_sync_id": tx.get("wallet_sync_id"),
-               "category_sync_id": tx.get("category_sync_id")}
-        req = urllib.request.Request(INSIGHT_DEV + "/transaction", data=json.dumps(row).encode(),
-                                     method="POST", headers={"Content-Type": "application/json",
-                                                             "User-Agent": "curl/8.4.0"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            w = json.loads(r.read().decode())
-        WRITTEN.append(w["sync_id"])
-        wrote.append(w)
+        sync_id = tx.get("sync_id") or str(uuid.uuid4())
+        eff = 1 if tx["type"] == "income" else -1
+        def q(v):
+            return "NULL" if v is None else "'" + str(v).replace("'", "''") + "'"
+        sql = (
+            "INSERT INTO transactions (sync_id, created_by_user_id, type, amount, date, note, "
+            "currency_code, currency_symbol, category_sync_id, wallet_sync_id, effect_on_wallet, "
+            "icon, category_name, status, include_in_report, version, is_deleted, is_recurring, "
+            "created_at, updated_at) "
+            f"SELECT {q(sync_id)}, {q(USER)}, {q(tx['type'])}, {float(tx['amount'])}, "
+            f"COALESCE({q(tx.get('date'))}::timestamptz, now()), {q(tx.get('note'))}, 'THB', '฿', "
+            f"{q(tx.get('category_sync_id'))}, {q(tx.get('wallet_sync_id'))}, {eff}, "
+            "c.icon, c.name, 'confirmed', true, 1, false, false, now(), now() "
+            f"FROM (SELECT 1) one LEFT JOIN categories c ON c.sync_id = {q(tx.get('category_sync_id'))} "
+            "ON CONFLICT (sync_id) DO NOTHING;"
+        )
+        subprocess.run(["psql", DB_URL, "-v", "ON_ERROR_STOP=1", "-qtAc", sql], check=True,
+                       capture_output=True, text=True)
+        WRITTEN.append(sync_id)
+        wrote.append({"sync_id": sync_id, "amount": tx["amount"]})
     return wrote, confirm(thread, proposal["proposal_id"])
 
 

@@ -172,6 +172,11 @@ class AgentState(TypedDict, total=False):
     # when the user has no row, no consent, or the backend pool is unwired
     # (tests). Shape: the dict returned by `user_preferences.load_user_preferences`.
     user_preferences: Optional[dict]
+    # How far along the user is (user_stage.load_user_stage): stage new /
+    # starting / established + tx_count, history_days, has_income. Loaded by
+    # _pre_turn_hook; scalar channel, so it MUST be declared to cross the
+    # react boundary into _make_prompt and the classify/propose nodes.
+    user_stage: Optional[dict]
 
     # — per-turn outputs (validator reads, SSE adapter forwards, append-only) —
     tool_outputs_this_turn: Annotated[list[ToolOutput], append_reducer]

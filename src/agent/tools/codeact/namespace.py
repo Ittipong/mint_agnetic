@@ -16,6 +16,7 @@ Anything not in `build_namespace()` is unreachable from sandbox code.
 from __future__ import annotations
 
 import asyncio
+import functools
 from concurrent.futures import Future
 import calendar
 from datetime import date, timedelta
@@ -37,6 +38,7 @@ from .calculators import (
     compute_dti,
     debt_payoff_months,
     emergency_fund_target,
+    starter_plan,
     mortgage_payment,
     refi_payback_months,
 )
@@ -1177,6 +1179,8 @@ def build_namespace(
         "refi_payback_months":   refi_payback_months,
         "debt_payoff_months":    debt_payoff_months,
         "emergency_fund_target": emergency_fund_target,
+        # today bound to the injected clock so time-warped replays stay deterministic
+        "starter_plan": functools.partial(starter_plan, today=today),
         # Decimal-safe primitives
         "Decimal":             Decimal,
         "date":                date,

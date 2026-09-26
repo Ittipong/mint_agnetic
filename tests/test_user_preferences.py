@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from src.agent.prompts import render_system_prompt
 from src.agent.tools.user_preferences_tool import (
     classify_and_coerce,
@@ -224,3 +226,24 @@ def test_UT_UP13_loader_uses_injected_fake():
         finally:
             set_preferences_loader(None)
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("prev_ai, user, ok", [
+    ("ให้ผมจำรายได้นี้ไว้ใช้วางแผนครั้งหน้าไหมครับ", "ได้ จำไว้เลย", True),
+    ("ให้ผมจำรายได้นี้ไว้ใช้วางแผนครั้งหน้าไหมครับ", "โอเคครับ", True),
+    (None, "จำไว้ด้วยนะว่าตอนนี้เราทำงานเป็นฟรีแลนซ์", True),   # user asked first
+    # the live bug: the assistant asked for costs, the user listed costs
+    ("ค่าใช้จ่ายคงที่ต่อเดือนมีอะไรบ้างครับ", "ค่าห้อง 6000 ค่าเน็ต 599", False),
+    ("ให้ผมจำรายได้นี้ไว้ไหมครับ", "ไม่ต้องจำครับ", False),
+    ("เดือนนี้ใช้ไป 5,000 บาทครับ", "ได้", False),               # yes to nothing
+])
+def test_UT_UP12_consent_only_from_the_users_own_words(prev_ai, user, ok):
+    """UT-UP12 (PDPA): live, the LLM called set_user_preference(memory_consent
+    =true) while the user was only listing bills. The tool now grants consent
+    only when the user's latest message actually agrees."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from src.agent.tools.user_preferences_tool import _user_gave_consent
+
+    msgs = ([AIMessage(prev_ai)] if prev_ai else []) + [HumanMessage(user)]
+    assert _user_gave_consent({"messages": msgs}) is ok

@@ -23,6 +23,7 @@ Never raises out — store/validation failures degrade to a structured
 from __future__ import annotations
 
 import json
+import re
 from typing import Annotated, Any, Optional
 
 from langchain_core.messages import ToolMessage
@@ -136,6 +137,18 @@ async def set_user_preference(
     # Consent is always the user's own act, never an AI inference.
     if field == "memory_consent":
         source = "user_stated"
+        # PDPA: the LLM once set memory_consent=true on its own while the user
+        # was only listing their bills. Consent is granted ONLY by the user's
+        # own words, checked here, deterministically.
+        if coerced is True and not _user_gave_consent(state):
+            return _err(
+                tool_call_id,
+                "The user has NOT agreed to be remembered. Ask them first (one "
+                "short line, e.g. 'ให้ผมจำรายได้นี้ไว้ใช้วางแผนครั้งหน้าไหมครับ') "
+                "and set memory_consent only after they say yes. Do not say "
+                "anything was saved.",
+                "consent_not_given",
+            )
 
     # PDPA gate — personal/financial fields need prior consent.
     if field in FINANCIAL_FIELDS and not _has_consent(state):
@@ -267,6 +280,33 @@ def _coerce_bool(value: Any) -> Optional[bool]:
     if isinstance(value, (int, float)) and value in (0, 1):
         return bool(value)
     return None
+
+
+_REMEMBER = re.compile(r"จำ|remember|เก็บ(ข้อมูล)?ไว้|บันทึกไว้", re.I)
+_YES = re.compile(r"^\s*(ได้|โอเค|ok|okay|ตกลง|ใช่|ยินดี|yes|เอา|จำ|ได้เลย|ได้ครับ|ได้ค่ะ)", re.I)
+_NO = re.compile(r"ไม่|อย่า|no\b|don'?t", re.I)
+
+
+def _user_gave_consent(state: dict) -> bool:
+    """True when the user's LATEST message grants consent: either they asked
+    to be remembered themselves ("จำไว้ด้วยนะว่า…"), or they said yes right
+    after the assistant asked to remember. A refusal never counts."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    msgs = state.get("messages") or []
+    last_user_i = next((i for i in range(len(msgs) - 1, -1, -1)
+                        if isinstance(msgs[i], HumanMessage)), None)
+    if last_user_i is None:
+        return False
+    text = msgs[last_user_i].content if isinstance(msgs[last_user_i].content, str) else ""
+    if _NO.search(text):
+        return False
+    if _REMEMBER.search(text):
+        return True
+    prev_ai = next((m for m in reversed(msgs[:last_user_i])
+                    if isinstance(m, AIMessage) and isinstance(m.content, str)
+                    and m.content.strip()), None)
+    return bool(_YES.match(text) and prev_ai and _REMEMBER.search(prev_ai.content))
 
 
 def _has_consent(state: dict) -> bool:
