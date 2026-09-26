@@ -211,9 +211,9 @@ async def handle_voice_chat(
     `stt_call` is injected so tests can mock without an OpenRouter dependency;
     Wave 6's server.py wires `make_multimodal_call("stt")` here.
 
-    `wallet_id` is the mobile-selected wallet (None for voice — voice carries
-    no wallet selection per v2 contract). Propagated into initial_state so
-    propose_transaction's index-0 cascade sees the right input.
+    `wallet_id` is the wallet picked in the chat input (the /chat/voice form
+    field; None for clients that do not send it). Propagated into
+    initial_state so propose_transaction uses it as the ADD default.
     """
     # 1. Status — animated label while STT runs.
     async for ev in _stream_status_tokens(_STATUS_TRANSCRIBING):
@@ -237,8 +237,8 @@ async def handle_voice_chat(
 
     # 4. Drive the ReAct graph with the transcript as the user message,
     # reusing the text-path streaming adapter. The transcript becomes the
-    # message content; voice carries no wallet, so wallet_id is left empty
-    # for propose_transaction's index-0 cascade.
+    # message content; wallet_id is the chat-input pick (empty → the
+    # propose_transaction fallback cascade).
     init_state: dict = {
         "user_id": user_id,
         "thread_id": thread_id,

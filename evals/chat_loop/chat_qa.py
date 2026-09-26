@@ -65,17 +65,21 @@ def confirm(thread, proposal_id):
 def write_and_confirm(thread, proposal):
     """What tapping ยืนยัน does in the app/prototype: write the ledger row
     (the agent never writes transactions), then mark the proposal confirmed."""
-    tx = proposal["transaction"]
-    row = {"user_id": USER, "sync_id": tx.get("sync_id"), "type": tx["type"],
-           "amount": tx["amount"], "date": tx.get("date"), "note": tx.get("note"),
-           "wallet_sync_id": tx.get("wallet_sync_id"),
-           "category_sync_id": tx.get("category_sync_id")}
-    req = urllib.request.Request(INSIGHT_DEV + "/transaction", data=json.dumps(row).encode(),
-                                 method="POST", headers={"Content-Type": "application/json",
-                                                         "User-Agent": "curl/8.4.0"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        wrote = json.loads(r.read().decode())
-    WRITTEN.append(wrote["sync_id"])
+    # A group card (multi-item text / slip) saves every row, then ONE confirm.
+    txs = proposal.get("transactions") or [proposal["transaction"]]
+    wrote = []
+    for tx in txs:
+        row = {"user_id": USER, "sync_id": tx.get("sync_id"), "type": tx["type"],
+               "amount": tx["amount"], "date": tx.get("date"), "note": tx.get("note"),
+               "wallet_sync_id": tx.get("wallet_sync_id"),
+               "category_sync_id": tx.get("category_sync_id")}
+        req = urllib.request.Request(INSIGHT_DEV + "/transaction", data=json.dumps(row).encode(),
+                                     method="POST", headers={"Content-Type": "application/json",
+                                                             "User-Agent": "curl/8.4.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            w = json.loads(r.read().decode())
+        WRITTEN.append(w["sync_id"])
+        wrote.append(w)
     return wrote, confirm(thread, proposal["proposal_id"])
 
 
@@ -107,7 +111,7 @@ def main():
                 t = dict(msg=m, answer="", blocks=[], status=[], errors=[repr(e)], other=[], secs=0)
             res["turns"].append(t)
             for b in t["blocks"]:
-                if b.get("type") == "transaction_proposal":
+                if b.get("type") in ("transaction_proposal", "transaction_proposal_group"):
                     last_prop = b.get("proposal_id")
                     last_block = b
             print(f"\n>>> USER: {m}   ({t['secs']}s)")

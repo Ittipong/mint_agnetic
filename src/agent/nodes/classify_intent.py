@@ -37,6 +37,7 @@ from __future__ import annotations
 import os
 import re
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -47,6 +48,7 @@ from src.agent.session_logger import slog, slog_block, slog_error
 from src.agent.tools.propose_transaction import (
     _extract_json_object,
     _propose_core,
+    _propose_group_core,
     is_saved_card_correction,
     latest_card,
 )
@@ -61,6 +63,8 @@ def latest_card_note(state: dict) -> str:
     if not card:
         return ""
     p = card.get("payload") or {}
+    if p.get("transactions"):  # a group card (multi-item text or slip)
+        p = {"amount": p.get("total"), "category": f"({len(p['transactions'])} รายการ)"}
     status = card.get("status") or "pending"
     label = {"confirmed": "CONFIRMED (already saved to the ledger)",
              "cancelled": "CANCELLED (not saved)",
@@ -157,12 +161,15 @@ complete = TRUE only when amount AND (category_label OR note) are present.
 multi    = TRUE when the LATEST message lists 2+ SEPARATE transactions, each
            with its own amount ("กาแฟ 60 ข้าว 80", "ค่าน้ำ 100, ค่าไฟ 900").
            A quantity inside one item is NOT multi ("ข้าว 2 จาน 120").
+items    = when multi, EVERY transaction in order, each
+           {{"amount","type","category_label","note","date_iso"}}; the top-level
+           amount/category_label describe the first item. [] when not multi.
 
 Return EXACTLY this JSON shape:
 {{"intent":"ADD"|"OTHER","complete":true|false,"multi":true|false,\
 "amount":number|null,"type":"expense"|"income"|"auto"|null,\
 "category_label":string|null,"wallet_label":string|null,"note":string|null,\
-"date_iso":string|null}}
+"date_iso":string|null,"items":[...]}}
 """
 
 
@@ -295,6 +302,29 @@ def _coerce_slots(parsed: dict) -> dict:
         except (TypeError, ValueError):
             date_iso = None
 
+    items: list[dict] = []
+    for raw in parsed.get("items") or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            amt = float(raw.get("amount"))
+        except (TypeError, ValueError):
+            continue
+        lbl = str(raw.get("category_label") or "").strip() or None
+        nte = str(raw.get("note") or "").strip() or None
+        if amt <= 0 or not (lbl or nte):
+            continue
+        it_date = raw.get("date_iso") or date_iso
+        try:
+            date.fromisoformat(str(it_date)) if it_date else None
+        except (TypeError, ValueError):
+            it_date = date_iso
+        items.append({
+            "amount": amt,
+            "type": raw.get("type") if raw.get("type") in ("expense", "income", "auto") else tx_type,
+            "category_label": lbl, "note": nte, "date_iso": it_date,
+        })
+
     derived_complete = amount is not None and (label is not None or note is not None)
     complete = bool(parsed.get("complete")) and derived_complete
 
@@ -302,6 +332,7 @@ def _coerce_slots(parsed: dict) -> dict:
         "intent": intent,
         "complete": complete,
         "multi": parsed.get("multi") is True,
+        "items": items,
         "amount": amount,
         "type": tx_type,
         "category_label": label,
@@ -358,14 +389,14 @@ async def classify_intent_node(state: dict) -> dict:
     amount = slots["amount"]
     has_label = bool(slots["category_label"] or slots["note"])
 
-    # Completeness Gate B — only an unambiguous, complete, SINGLE-item ADD
-    # shortcuts. A multi-item message goes to react, which applies R7 (propose
-    # the first item and tell the user the rest can follow) — direct_propose
-    # would silently drop every item after the first.
+    # Completeness Gate B. A multi-item message shortcuts only when EVERY item
+    # parsed complete (→ one group card); otherwise it goes to react (R7: one
+    # card now, the rest after) — never silently drop items 2..n.
+    multi_ok = slots["multi"] and len(slots["items"]) >= 2
     route_direct = (
         intent == "ADD"
         and complete
-        and not slots["multi"]
+        and (multi_ok or not slots["multi"])
         and amount is not None
         and amount > 0
         and has_label
@@ -406,6 +437,34 @@ def _confirm_text(amount: Any, category_name: str) -> str:
         f"ขอยืนยันรายการ {_fmt_amount(amount)} บาท หมวด{category_name} "
         "— กดยืนยันเพื่อบันทึกได้เลยครับ"
     )
+
+
+def _confirm_group_text(rows: list, total: Any) -> str:
+    """"ขอยืนยัน 3 รายการ รวม 184 บาท (กาแฟ 60 · อาหาร 80 · BTS/MRT 44) — …".
+
+    A mix of income and expense has no single meaningful "รวม" (the net read
+    as "รวม -180 บาท"), so it states each side instead.
+    """
+    parts = " · ".join(f"{cat} {_fmt_amount(amt)}" for amt, cat, *_ in rows)
+    types = {r[2] if len(r) > 2 else "expense" for r in rows}
+    if types == {"expense"}:
+        head = f"รวม {_fmt_amount(total)} บาท"
+    elif types == {"income"}:
+        head = f"รวมรายรับ {_fmt_amount(abs(total))} บาท"
+    else:
+        sums = {"expense": Decimal(0), "income": Decimal(0)}
+        for amt, _cat, typ in rows:
+            sums[typ] += Decimal(str(amt))
+        head = (f"จ่าย {_fmt_amount(_num(sums['expense']))} บาท · "
+                f"รับ {_fmt_amount(_num(sums['income']))} บาท")
+    return (
+        f"ขอยืนยัน {len(rows)} รายการ {head} ({parts}) "
+        "— กดยืนยันเพื่อบันทึกทั้งหมดได้เลยครับ"
+    )
+
+
+def _num(d: Decimal) -> int | float:
+    return int(d) if d == d.to_integral_value() else float(d)
 
 
 def _fmt_amount(amount: Any) -> str:
@@ -452,15 +511,21 @@ async def direct_propose_node(state: dict) -> dict:
     writer is removed; the AIMessage is the single source of truth.
     """
     slots = state.get("__classified_add__") or {}
-    result = await _propose_core(
-        amount=slots.get("amount"),
-        type=slots.get("type") or "expense",
-        category_label=slots.get("category_label"),
-        wallet_label=slots.get("wallet_label"),
-        note=slots.get("note"),
-        date_iso=slots.get("date_iso"),
-        state=state,
-    )
+    group = slots.get("multi") and len(slots.get("items") or []) >= 2
+    if group:
+        result = await _propose_group_core(
+            items=slots["items"], wallet_label=slots.get("wallet_label"), state=state,
+        )
+    else:
+        result = await _propose_core(
+            amount=slots.get("amount"),
+            type=slots.get("type") or "expense",
+            category_label=slots.get("category_label"),
+            wallet_label=slots.get("wallet_label"),
+            note=slots.get("note"),
+            date_iso=slots.get("date_iso"),
+            state=state,
+        )
 
     if not result.ok:
         # Onboarding OR error → hand the turn to react (no recovery here).
@@ -472,7 +537,11 @@ async def direct_propose_node(state: dict) -> dict:
         return {"__classify_route__": _ROUTE_REACT, "__classified_add__": {}}
 
     summary = result.summary
-    confirm = _confirm_text(summary.get("amount"), summary.get("category_name", "อื่นๆ"))
+    confirm = (
+        _confirm_group_text(summary.get("rows") or [], summary.get("amount"))
+        if group
+        else _confirm_text(summary.get("amount"), summary.get("category_name", "อื่นๆ"))
+    )
 
     updates: dict[str, Any] = dict(result.state_updates)
     # SINGLE source for the confirmation: this node-authored AIMessage is both

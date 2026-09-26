@@ -634,3 +634,70 @@ def test_UT_T04d_propose_refuses_correction_of_saved_card(base_state):
         assert not base_state["emitted_blocks_this_turn"]
 
     asyncio.run(run())
+
+
+def test_UT_T05_multi_item_text_becomes_one_group_card(base_state):
+    """UT-T05: "กาแฟ 60 อาหาร 80 เงินเดือน 1000" must be ONE
+    transaction_proposal_group (the multi-line slip contract, proposal_id ==
+    group_id), with every row resolved like a single ADD and on one wallet.
+    Before, only the first item became a card and the rest were typed again."""
+    base_state["pending_proposal"] = {"proposal_id": "prop_old", "status": "pending",
+                                      "payload": {}}
+    base_state["proposals"] = [base_state["pending_proposal"]]
+    items = [
+        {"amount": 60, "type": "expense", "category_label": "อาหาร", "note": "กาแฟ"},
+        {"amount": 80, "type": "expense", "category_label": "อาหาร", "note": "ข้าว"},
+        {"amount": 1000, "type": "income", "category_label": "เงินเดือน", "note": None},
+    ]
+
+    async def run():
+        r = await pt_module._propose_group_core(items=items, state=base_state)
+        assert r.ok, r.result_payload
+        blocks = r.state_updates["emitted_blocks_this_turn"]
+        assert [b["type"] for b in blocks] == ["discard_proposal", "transaction_proposal_group"]
+        assert blocks[0]["target"] == "prop_old"
+        g = blocks[1]
+        assert g["proposal_id"] == g["group_id"]
+        assert [t["amount"] for t in g["transactions"]] == [60, 80, 1000]
+        assert {t["wallet_sync_id"] for t in g["transactions"]} == {g["wallet_sync_id"]}
+        assert g["transactions"][2]["type"] == "income"
+        assert g["total"] == -860  # Σexpense − Σincome, like a slip
+        entry = r.state_updates["pending_proposal"]
+        assert entry["intent_type"] == "ADD_TRANSACTION_GROUP"
+        assert entry["proposal_id"] == g["group_id"]
+        # exactly one new proposal in state (the group), plus the discarded old one
+        assert [p["status"] for p in r.state_updates["proposals"]] == ["discarded", "pending"]
+        assert base_state["__repo__"].inserts[-1]["kind"] == "ADD_TRANSACTION_GROUP"
+
+    asyncio.run(run())
+
+
+def test_UT_T04e_amount_only_is_refused_not_filed_as_other(base_state):
+    """UT-T04e: "จด 250" → the LLM called propose with the amount only and the
+    Other-floor filed it under อื่นๆ. Gate B needs amount AND what-for: the tool
+    refuses so the agent asks what it was for."""
+
+    async def run():
+        _cmd, out = await _invoke_propose(state=base_state, args={"amount": 250, "type": "expense"})
+        assert out["kind"] == "missing_description"
+        assert not base_state["emitted_blocks_this_turn"]
+        _cmd, out = await _invoke_propose(
+            state=base_state, args={"amount": 250, "type": "expense", "note": "ค่าอาหาร"})
+        assert "error" not in out  # a description alone is enough
+
+    asyncio.run(run())
+
+
+def test_UT_T04f_refused_amount_only_keeps_the_pending_card(base_state):
+    """UT-T04f: the Gate-B refusal must run BEFORE the atomic discard —
+    "จด 250" while a card is waiting must not void that card."""
+    pending = {"proposal_id": "prop_wait", "status": "pending", "payload": {}}
+    base_state["pending_proposal"] = pending
+    base_state["proposals"] = [pending]
+
+    async def run():
+        _cmd, out = await _invoke_propose(state=base_state, args={"amount": 250, "type": "expense"})
+        assert out["kind"] == "missing_description"
+        assert pending["status"] == "pending"
+
+    asyncio.run(run())

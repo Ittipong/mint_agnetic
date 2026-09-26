@@ -28,7 +28,9 @@ def slip(path):
     t=time.time(); r=subprocess.run(["curl","-s","-N","-m","120","-X","POST",BASE+"/chat/stream","-H","Content-Type: application/json","--data-binary","@/tmp/_slip.json"],capture_output=True,text=True)
     show(path, parse(r.stdout.replace("\r","")), round(time.time()-t,1))
 def voice(path):
-    t=time.time(); r=subprocess.run(["curl","-s","-N","-m","120","-X","POST",BASE+"/chat/voice","-F",f"user_id={U}","-F",f"thread_id=qa-voice-{uuid.uuid4().hex[:6]}","-F",f"audio=@{path};type=audio/mp4"],capture_output=True,text=True)
+    # VOICE_WALLET_ID = the wallet picked in the chat input (optional form field)
+    wal = ["-F", f"wallet_id={os.environ['VOICE_WALLET_ID']}"] if os.environ.get("VOICE_WALLET_ID") else []
+    t=time.time(); r=subprocess.run(["curl","-s","-N","-m","120","-X","POST",BASE+"/chat/voice","-F",f"user_id={U}","-F",f"thread_id=qa-voice-{uuid.uuid4().hex[:6]}",*wal,"-F",f"audio=@{path};type=audio/mp4"],capture_output=True,text=True)
     show(path, parse(r.stdout.replace("\r","")), round(time.time()-t,1))
 for p in sys.argv[1:]:
     (slip if p.endswith(".jpg") else voice)(p)

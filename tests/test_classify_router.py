@@ -654,3 +654,61 @@ def test_UT_CR17c_card_note_reaches_the_react_prompt():
     })
     assert "75 บาท กาแฟ — CONFIRMED" in msgs[0].content
     assert 'get_app_capability("edit_confirmed_txn")' in msgs[0].content
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UT-CR18 — multi-item ADD with parsed items → ONE group card via direct_propose
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_UT_CR18_multi_item_with_items_routes_direct_and_groups(monkeypatch):
+    """UT-CR18: "กาแฟ 60 ข้าวเที่ยง 80 BTS 44" with all three items parsed →
+    direct_propose builds ONE transaction_proposal_group and a confirm line
+    that names every row."""
+    _seed_catalog()
+    _stub_pair_resolver(monkeypatch)
+    _patch_classifier(monkeypatch, {
+        "intent": "ADD", "complete": True, "multi": True, "amount": 60,
+        "type": "expense", "category_label": "กาแฟ", "note": None, "date_iso": None,
+        "items": [
+            {"amount": 60, "type": "expense", "category_label": "กาแฟ"},
+            {"amount": 80, "type": "expense", "category_label": "ข้าวเที่ยง"},
+            {"amount": 44, "type": "expense", "category_label": "BTS"},
+            {"amount": 0, "type": "expense", "category_label": "junk"},  # dropped
+        ],
+    })
+
+    async def run():
+        graph = await _build(_UnusedModel())  # raises if react reached
+        return await graph.ainvoke(
+            {"user_id": "u-1", "thread_id": "t-CR18",
+             "messages": [HumanMessage("กาแฟ 60 ข้าวเที่ยง 80 BTS 44")]},
+            config={"configurable": {"thread_id": "t-CR18"}, "recursion_limit": 25},
+        )
+
+    out = asyncio.run(run())
+    blocks = out.get("emitted_blocks_this_turn", [])
+    groups = [b for b in blocks if b.get("type") == "transaction_proposal_group"]
+    assert len(groups) == 1 and len(groups[0]["transactions"]) == 3
+    assert groups[0]["total"] == 184
+    assert not [b for b in blocks if b.get("type") == "transaction_proposal"]
+    ai = [m.content for m in out["messages"] if isinstance(m, AIMessage)][-1]
+    assert ai.startswith("ขอยืนยัน 3 รายการ รวม 184 บาท") and "กดยืนยัน" in ai
+
+
+def test_UT_CR18b_multi_without_items_still_goes_react(monkeypatch):
+    """UT-CR18b: multi flagged but items missing/incomplete → react (R7 fallback)."""
+    _patch_classifier(monkeypatch, {
+        "intent": "ADD", "complete": True, "multi": True, "amount": 60,
+        "type": "expense", "category_label": "กาแฟ", "items": [{"amount": 60}],
+    })
+    out = asyncio.run(ci.classify_intent_node({"messages": [HumanMessage("กาแฟ 60 ข้าว 80")]}))
+    assert out["__classify_route__"] == "react"
+
+
+def test_UT_CR19_group_confirm_text_income_expense_mix():
+    """UT-CR19: "ได้เงินคืน 300 จ่ายแท็กซี่ 120" read "รวม -180 บาท"."""
+    t = ci._confirm_group_text([(300, "เงินคืน/Refund", "income"), (120, "แท็กซี่", "expense")], -180)
+    assert "จ่าย 120 บาท · รับ 300 บาท" in t and "-180" not in t
+    t = ci._confirm_group_text([(60, "กาแฟ", "expense"), (80.5, "อาหาร", "expense")], 140.5)
+    assert "รวม 140.50 บาท" in t

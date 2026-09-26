@@ -51,6 +51,7 @@ would dead-loop on an unhandled exception inside a tool.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -287,14 +288,22 @@ async def _propose_core(
 
     # ── 1b. Never re-propose a correction of a SAVED card ─────────────────
     if is_saved_card_correction(state):
-        from src.agent.tools.app_capability import CAPABILITIES
+        return _saved_card_refusal()
 
-        redirect = CAPABILITIES["edit_confirmed_txn"]["redirect_text"]
+    # ── 1c. Completeness gate B, enforced (amount AND what-for) ───────────
+    # BEFORE the atomic discard, so a refused turn never voids a pending card.
+    # A user already known to have no wallet skips it: the create-wallet CTA
+    # (step 3) comes first.
+    # "จด 250" once became a card filed under อื่นๆ: the LLM called the tool
+    # with the amount only and the Other-floor accepted it. Other-floor is for a
+    # description that matches NO category, never for a missing description.
+    known_no_wallet = (state.get("user_context") or {}).get("wallets") == []
+    if not known_no_wallet and not ((category_label or "").strip() or (note or "").strip()):
         return _error_result(
-            error=("the latest card is already SAVED (user confirmed it); a new "
-                   "card would record it twice. Do not propose again. Tell the "
-                   f"user, in your own warm words, where to edit it: {redirect}"),
-            kind="confirmed_card_edit",
+            error=(f"no description — ask the user what the {amount} baht was "
+                   f"for (e.g. \"{amount} บาทนี้เป็นค่าอะไรครับ\"), then propose. "
+                   "Do not guess a category."),
+            kind="missing_description",
         )
 
     # ── 2. Atomic discard guard (Decision X) ──────────────────────────────
@@ -372,6 +381,7 @@ async def _propose_core(
             user_context=user_context,
             ctx_auto_loaded=ctx_auto_loaded,
         )
+
 
     # ── 4. Wallet candidate selection — priority chain ────────────────────
     # Priority (stop at first match):
@@ -692,7 +702,163 @@ async def _propose_core(
     )
 
 
+async def _propose_group_core(
+    *,
+    items: list[dict],
+    wallet_label: Optional[str] = None,
+    state: dict,
+) -> ProposeResult:
+    """Several items in one message ("กาแฟ 60 ข้าวเที่ยง 80 BTS 44") → ONE
+    `transaction_proposal_group` card, the same contract a multi-line slip
+    uses (proposal_id == group_id, one confirm saves every row).
+
+    Each row is resolved by `_propose_core` itself, on a scratch copy of the
+    state (no repo, no pending, no blocks), so wallet/category/type rules stay
+    identical to a single ADD. Only the assembled group touches real state.
+    Every row lands on the first row's wallet — one card, one wallet.
+    """
+    if is_saved_card_correction(state):
+        return _saved_card_refusal()
+
+    def scratch(user_context: Optional[dict], wallet_id: Optional[str]) -> dict:
+        return {
+            **state,
+            "__repo__": None,
+            "pending_proposal": None,
+            "proposals": [],
+            "emitted_blocks_this_turn": [],
+            "user_context": user_context if user_context is not None else state.get("user_context"),
+            "wallet_id": wallet_id or state.get("wallet_id"),
+        }
+
+    async def one(it: dict, st: dict, label: Optional[str]) -> ProposeResult:
+        return await _propose_core(
+            amount=it.get("amount"),
+            type=it.get("type") or "expense",
+            category_label=it.get("category_label"),
+            wallet_label=label,
+            note=it.get("note"),
+            date_iso=it.get("date_iso"),
+            state=st,
+        )
+
+    first = await one(items[0], scratch(None, None), wallet_label)
+    if not first.ok:
+        return first
+    user_context = first.state_updates.get("user_context") or state.get("user_context")
+    first_row = first.state_updates["pending_proposal"]["payload"]
+    wallet_id = first_row["wallet_sync_id"]
+    rest = await asyncio.gather(*(one(it, scratch(user_context, wallet_id), None)
+                                  for it in items[1:]))
+    for r in rest:
+        if not r.ok:
+            return r
+    rows = [first_row] + [r.state_updates["pending_proposal"]["payload"] for r in rest]
+    for r in rows:
+        r["include_in_report"] = True
+
+    # Net total like a slip: Σ(expense) − Σ(income), Decimal-exact.
+    total_dec = Decimal(0)
+    for r in rows:
+        total_dec += Decimal(str(r["amount"])) * (Decimal(-1) if r["type"] == "income" else Decimal(1))
+    total = _jsonable_amount(total_dec)
+
+    # Atomic discard of the real pending card (Decision X), then one group card.
+    discarded_id: Optional[str] = None
+    pending = _get_pending_proposal(state)
+    if pending is not None:
+        discarded_id = pending.get("proposal_id")
+        pending["status"] = "discarded"
+        pending["discarded_at"] = _now_iso()
+        state["pending_proposal"] = None
+
+    group_id = uuid.uuid4().hex
+    payload = {
+        "group_id": group_id,
+        "total": total,
+        "wallet_sync_id": wallet_id,
+        "currency_code": rows[0].get("currency_code"),
+        "user_id": state.get("user_id"),
+        "transactions": rows,
+    }
+    repo = state.get("__repo__")
+    if repo is not None:
+        try:
+            await repo.insert_pending_proposal(
+                proposal_id=group_id, user_id=state.get("user_id"),
+                kind="ADD_TRANSACTION_GROUP", payload=payload)
+        except Exception as exc:
+            slog("propose_transaction",
+                 f"insert_pending_proposal FAILED for group {group_id}: "
+                 f"{exc.__class__.__name__}: {exc}")
+
+    entry: dict[str, Any] = {
+        "proposal_id": group_id,
+        "intent_type": "ADD_TRANSACTION_GROUP",
+        "type": "ADD_TRANSACTION_GROUP",
+        "payload": payload,
+        "status": "pending",
+        "created_at": _now_iso(),
+        "confirmed_at": None,
+        "cancelled_at": None,
+        "discarded_at": None,
+    }
+    state.setdefault("proposals", []).append(entry)
+    state["pending_proposal"] = entry
+
+    blocks: list[dict[str, Any]] = []
+    if discarded_id is not None:
+        blocks.append({"type": "discard_proposal", "target": discarded_id})
+    blocks.append({
+        "type": "transaction_proposal_group",
+        "proposal_id": group_id,
+        "group_id": group_id,
+        "total": total,
+        "wallet_sync_id": wallet_id,
+        "currency_code": payload["currency_code"],
+        "low_confidence": False,
+        "transactions": rows,
+    })
+    slog("propose_transaction",
+         f"proposed group {group_id} rows={len(rows)} total={total_dec} "
+         f"wallet={wallet_id} discarded={discarded_id}")
+
+    last_txn = {"id": group_id, "type": "ADD_TRANSACTION_GROUP",
+                "amount": total, "category": None, "pending": True}
+    state_updates: dict[str, Any] = {
+        "pending_proposal": entry,
+        "last_txn": last_txn,
+        "emitted_blocks_this_turn": blocks,
+        "proposals": list(state.get("proposals") or []),
+    }
+    if first.state_updates.get("user_context") is not None:
+        state_updates["user_context"] = user_context
+    return ProposeResult(
+        state_updates=state_updates,
+        result_payload={"proposal_id": group_id, "rows": len(rows),
+                        "discarded_proposal_id": discarded_id},
+        summary={
+            "amount": total,
+            "rows": [(r["amount"], r["category"], r["type"]) for r in rows],
+            "discarded_id": discarded_id,
+        },
+    )
+
+
 # ── Helpers (private) ──────────────────────────────────────────────────────
+
+
+def _saved_card_refusal() -> ProposeResult:
+    """Refuse to re-propose a correction of a card the user already saved."""
+    from src.agent.tools.app_capability import CAPABILITIES
+
+    redirect = CAPABILITIES["edit_confirmed_txn"]["redirect_text"]
+    return _error_result(
+        error=("the latest card is already SAVED (user confirmed it); a new "
+               "card would record it twice. Do not propose again. Tell the "
+               f"user, in your own warm words, where to edit it: {redirect}"),
+        kind="confirmed_card_edit",
+    )
 
 
 def _error_result(*, error: str, kind: str) -> ProposeResult:

@@ -706,3 +706,36 @@ def test_UT_SR10_endpoint_inventory() -> None:
                 found.add((route.path, m))
     missing = endpoints - found
     assert not missing, f"missing endpoints: {sorted(missing)}"
+
+
+# ---------------------------------------------------------------------------
+# UT-SR09 — /chat/voice carries the chat-input wallet to the ADD
+# ---------------------------------------------------------------------------
+
+
+def test_UT_SR09_chat_voice_forwards_wallet_id(monkeypatch) -> None:
+    """UT-SR09: the wallet picked in the chat input is the default for every
+    ADD. /chat/voice hard-coded wallet_id=None, so a spoken "ได้เงินเดือน"
+    landed in the index-0 fallback wallet instead of the picked one."""
+    seen: dict = {}
+
+    async def fake_voice(**kw):
+        seen.update(kw)
+        if False:
+            yield {}
+
+    monkeypatch.setattr(server, "handle_voice_chat", fake_voice)
+    with fake_app_state(stt_call=lambda m: None) as client:
+        resp = client.post(
+            "/chat/voice",
+            data={"user_id": "u-1", "thread_id": "t-sr9", "wallet_id": "w-kbank"},
+            files={"audio": ("voice.m4a", b"\x00", "audio/m4a")},
+        )
+        assert resp.status_code == 200
+    assert seen["wallet_id"] == "w-kbank"
+
+    seen.clear()
+    with fake_app_state(stt_call=lambda m: None) as client:  # old clients: no field
+        client.post("/chat/voice", data={"user_id": "u-1", "thread_id": "t-sr9b"},
+                    files={"audio": ("voice.m4a", b"\x00", "audio/m4a")})
+    assert seen["wallet_id"] is None

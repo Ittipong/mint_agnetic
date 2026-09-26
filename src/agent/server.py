@@ -860,18 +860,21 @@ async def chat_voice(
     user_id: str = Form(...),
     thread_id: str = Form(...),
     audio: UploadFile = File(...),
+    wallet_id: Optional[str] = Form(None),
 ):
     """Voice-to-proposal — multipart `audio` (m4a) + form fields.
 
-    Voice carries no wallet selection, so propose_transaction's cascade
-    falls back to index-0 (memory `project_wallet_index0_ordering`).
+    `wallet_id` = the wallet picked in the chat input, the default for every
+    ADD (same as /chat/stream). It was dropped here, so a spoken "เงินเดือน"
+    landed in whatever wallet the index-0 fallback picked. Still optional, so
+    older clients that do not send it keep the fallback.
     """
     audio_bytes = await audio.read()
     body = ChatStreamRequest(
         thread_id=thread_id,
         user_id=user_id,
         message="",  # filled with the transcript after STT
-        wallet_id=None,
+        wallet_id=wallet_id or None,
     )
     return EventSourceResponse(
         _voice_stream_generator(req.app, body, audio_bytes)
