@@ -6,7 +6,7 @@ It records what broke, why, and how to re-run the loop.
 
 ## Fixture
 
-`scripts/seed_chat_qa_6m.py --apply` wipes wallets, transactions, categories,
+`evals/chat_loop/seed_chat_qa_6m.py --apply` (old path `scripts/seed_chat_qa_6m.py` is a shim) wipes wallets, transactions, categories,
 budgets, tags, recurring and obligation data for **all users**, then seeds
 `ittipong.it@gmail.com` with 6 months (Apr–Sep 2026) of a Bangkok office
 worker: salary 42,000 on the 25th, rent on the 1st, daily coffee/lunch/BTS,
