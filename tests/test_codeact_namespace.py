@@ -193,7 +193,6 @@ def test_UT_NS01b_namespace_returns_expected_18_data_keys():
     calculator_keys = {
         "compute_dti", "mortgage_payment", "affordability_check",
         "refi_payback_months", "debt_payoff_months", "emergency_fund_target",
-        "starter_plan",
     }
     assert calculator_keys.issubset(ns.keys())
 

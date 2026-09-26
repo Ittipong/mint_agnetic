@@ -68,7 +68,6 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import create_react_agent
 
 from src.agent.prompts import render_system_prompt
-from src.agent.user_stage import format_user_stage_block, load_user_stage
 from src.agent.user_preferences import (
     format_about_user_block,
     load_user_preferences,
@@ -237,7 +236,6 @@ def _make_prompt(state: AgentState) -> list:
             "record the item twice. A PENDING card is corrected by proposing "
             "again (E4)."
         )
-    system_text += format_user_stage_block(state.get("user_stage"))
     windowed = _window_messages(
         state.get("messages") or [], _history_window_turns()
     )
@@ -275,12 +273,9 @@ async def _pre_turn_hook(state: AgentState) -> dict:
     is unwired (tests) — the prompt simply renders without `[about_user]`.
     """
     user_preferences = await load_user_preferences(state.get("user_id") or "")
-    user_stage = await load_user_stage(state.get("user_id") or "")
     return {
         # Durable user context for the [about_user] prompt block (scalar).
         "user_preferences": user_preferences,
-        # new / starting / established — drives the NEW USER PLAYBOOK.
-        "user_stage": user_stage,
         # Per-turn append channels — explicit reset via the sentinel.
         "tool_outputs_this_turn": ["__RESET__"],
         "emitted_blocks_this_turn": ["__RESET__"],
@@ -397,7 +392,6 @@ async def _gen_suggestions(state: AgentState) -> dict:
         tool_data=tool_data,
         user_context=state.get("user_context"),
         proposal_emitted=_add_turn(state, messages),
-        user_stage=state.get("user_stage"),
     )
     return {"suggestions_block": block}
 

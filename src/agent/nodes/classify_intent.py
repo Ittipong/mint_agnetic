@@ -54,26 +54,6 @@ from src.agent.tools.propose_transaction import (
 )
 
 
-# Hidden control message mobile sends right after the user creates a wallet
-# from the in-chat CTA (chat_cubit `_walletCreatedMarker`) — the very first
-# moment of a new user's chat. v3 had no handler, so the LLM got the raw
-# marker. It now opens the NEW USER PLAYBOOK with a deterministic welcome.
-WALLET_CREATED_MARKER = "[INTENT:wallet_created]"
-
-WELCOME_TEXT = (
-    "🎉 กระเป๋าเงินพร้อมแล้ว! ผม Nimo ผู้ช่วยจดเงินของคุณครับ\n\n"
-    "จดได้ 3 แบบ ง่ายสุดคือพิมพ์เหมือนแชทกับเพื่อน เช่น **\"กาแฟ 60\"** "
-    "หรือหลายอย่างทีเดียว **\"ข้าว 50 BTS 44\"** · กดไมค์แล้วพูด · หรือส่งรูปสลิป\n\n"
-    "ถ้าบอกผมว่า**รายได้ต่อเดือนประมาณเท่าไหร่** "
-    "เดี๋ยวผมคำนวณให้เลยว่าเดือนนี้ใช้ได้วันละเท่าไหร่ครับ"
-)
-WELCOME_CHIPS = [
-    {"label": "วางแผนเริ่มต้นให้หน่อย", "send": "ช่วยวางแผนการเงินเริ่มต้นให้หน่อย"},
-    {"label": "ลองจด: กาแฟ 60", "send": "กาแฟ 60"},
-    {"label": "Nimo ทำอะไรได้บ้าง", "send": "Nimo ทำอะไรได้บ้าง"},
-]
-
-
 def latest_card_note(state: dict) -> str:
     """One line describing the newest card and whether the user already saved
     it. Confirm/cancel happen out-of-band (REST), so neither the classifier nor
@@ -165,11 +145,6 @@ CRITICAL context rule:
   If the assistant's previous turn ASKED the user something (e.g. "อยากซื้อรถ
   ราคาเท่าไหร่", "ตั้งเป้าออมเดือนละเท่าไหร่"), then a bare amount or short
   reply from the user is ANSWERING that question → intent=OTHER, NOT ADD.
-  This holds for a LIST too: the assistant asked for monthly/fixed costs,
-  income or other PLAN INPUTS ("ค่าใช้จ่ายคงที่ต่อเดือนมีอะไรบ้าง",
-  "รายจ่ายประจำ", "รายได้ต่อเดือน") → "ค่าห้อง 6000 ค่าเน็ต 599 ค่ามือถือ 399"
-  is the ANSWER (planning numbers), intent=OTHER, even with several amounts.
-  Only an explicit record verb or "จ่ายไปแล้ว" makes it an ADD.
   Only classify ADD when the LATEST message itself expresses intent to record
   a transaction.
 
@@ -380,13 +355,6 @@ async def classify_intent_node(state: dict) -> dict:
     windowed history, apply Completeness Gate B, and route. Any failure
     (LLM transport, parse, ambiguity) fail-safe routes to react.
     """
-    # The wallet-created marker is answered deterministically (no LLM),
-    # router on or off.
-    if _last_user_text(state.get("messages") or []) == WALLET_CREATED_MARKER:
-        slog("classify_router", "wallet_created marker → welcome")
-        return {"__classify_route__": _ROUTE_DIRECT_PROPOSE,
-                "__classified_add__": {"__welcome__": True}}
-
     # Kill-switch: OFF → no LLM call, every turn → react.
     if not is_classify_router_enabled():
         return {"__classify_route__": _ROUTE_REACT, "__classified_add__": {}}
@@ -543,12 +511,6 @@ async def direct_propose_node(state: dict) -> dict:
     writer is removed; the AIMessage is the single source of truth.
     """
     slots = state.get("__classified_add__") or {}
-    if slots.get("__welcome__"):
-        slog("classify_router", "direct_propose → welcome (new wallet)")
-        return {
-            "messages": [AIMessage(content=WELCOME_TEXT)],
-            "suggestions_block": {"type": "suggestions", "items": WELCOME_CHIPS},
-        }
     group = slots.get("multi") and len(slots.get("items") or []) >= 2
     if group:
         result = await _propose_group_core(
@@ -580,9 +542,6 @@ async def direct_propose_node(state: dict) -> dict:
         if group
         else _confirm_text(summary.get("amount"), summary.get("category_name", "อื่นๆ"))
     )
-    if (state.get("user_stage") or {}).get("stage") == "new":
-        # NEW USER PLAYBOOK N5 — the first record ever is a moment.
-        confirm = "รายการแรกของคุณ 🎉 " + confirm
 
     updates: dict[str, Any] = dict(result.state_updates)
     # SINGLE source for the confirmation: this node-authored AIMessage is both

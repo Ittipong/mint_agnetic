@@ -209,13 +209,6 @@ MODE-NORMAL HARD RULES:
   - NEVER repeat the question the user just asked, and never re-ask something
     this turn's answer already fully covered. Each chip is a NEW angle.
 
-NEW-USER RULES (only when user stage is "new" or "starting"):
-  - The user has days of data, not months. NEVER chips about trends, averages,
-    "เดือนที่แล้ว", "3 เดือน", comparisons, or "เดือนนี้หมวดไหนเยอะสุด".
-  - Prefer the first-plan path the assistant can do now:
-    "ช่วยวางแผนเริ่มต้นให้หน่อย", "ใช้ได้วันละเท่าไหร่ถึงสิ้นเดือน",
-    "ควรเก็บเงินฉุกเฉินเท่าไหร่ (รายได้ …)" — anchored to numbers the user said.
-
 QUALITY RULES:
   - Thai. Short, tappable label (aim ≤25 chars). Specific, never "ดูเพิ่มเติม".
   - Each chip a DIFFERENT axis (time / category / wallet / comparison / advice).
@@ -227,7 +220,6 @@ last user message: {user_text}
 assistant answer: {answer_text}
 this-turn tool data: {tool_data}
 user catalog (wallets / budgets / goals): {user_catalog}
-user stage: {user_stage}
 
 Now output the JSON."""
 
@@ -244,7 +236,6 @@ async def build_suggestions_block(
     tool_data: str = "(none)",
     user_context: Optional[dict] = None,
     proposal_emitted: bool = False,
-    user_stage: Optional[dict] = None,
 ) -> Optional[dict]:
     """Return a validated `suggestions` block, or None to emit nothing.
 
@@ -285,7 +276,6 @@ async def build_suggestions_block(
             answer_text=answer_text,
             tool_data=tool_data or "(none)",
             user_catalog=_summarize_catalog(user_context),
-            user_stage=(user_stage or {}).get("stage") or "established",
         )
         if result is None:
             # LLM failed / timed out. Chips are nice-to-have → emit nothing.
@@ -429,7 +419,7 @@ def _has_card_debt(wallet: dict) -> bool:
 
 # Chips that command something only the app can do. The prompt bans them, yet
 # live runs still produced "เพิ่มบัตรเครดิต" / "ตั้งเป้าหมายออมเงิน" — tapping
-# one only earns a "do it in the app" redirect, a dead end for a new user.
+# one only earns a "do it in the app" redirect, a dead end.
 _APP_ONLY_CHIP = re.compile(
     r"^\s*(เพิ่ม|สร้าง|ตั้ง|ลบ|แก้ไข|แก้|ย้าย|โอน|export|ส่งออก)\s*"
     r"(กระเป๋า|บัญชี|บัตร|เป้า|งบ|รายการประจำ|หมวด|แท็ก|รายการ|ข้อมูล)"
@@ -494,7 +484,6 @@ async def _generate(
     answer_text: str,
     tool_data: str,
     user_catalog: str,
-    user_stage: str = "established",
 ) -> Optional[dict]:
     """Run the chip generator. Returns the parsed dict, or None on any
     failure (caller then emits nothing)."""
@@ -508,7 +497,6 @@ async def _generate(
         answer_text=(answer_text or "")[:1500],
         tool_data=tool_data,
         user_catalog=user_catalog or "(none)",
-        user_stage=user_stage,
     )
     headers = {
         "Authorization": f"Bearer {api_key}",

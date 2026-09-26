@@ -298,3 +298,19 @@ def test_UT_SG15_prompt_declares_quick_reply_mode():
     # The anti-ADD-misroute guarantee: `send` must carry the topic, not a number.
     assert "anti-misroute" in tmpl
     assert "bare number" in tmpl
+
+
+def test_UT_SUG_APPONLY_action_chips_the_chat_cannot_do_are_dropped():
+    """Live chips offered "เพิ่มบัตรเครดิต" / "ตั้งเป้าหมายออมเงิน" — the chat
+    cannot do either (the prompt already bans them), so a tap only earns a
+    redirect. They are filtered deterministically after the chip LLM."""
+    from src.agent.suggest_followups import _finalize
+
+    out = _finalize([
+        {"label": "เพิ่มบัตรเครดิต", "send": "เพิ่มบัตรเครดิต"},
+        {"label": "ตั้งเป้าหมายออมเงิน", "send": "ตั้งเป้าหมายออมเงิน"},
+        {"label": "ลบรายการนี้", "send": "ลบรายการกาแฟ"},
+        {"label": "ควรออมเดือนละเท่าไหร่", "send": "ควรออมเดือนละเท่าไหร่ดี"},
+        {"label": "ตั้งแต่ต้นเดือนใช้ไปเท่าไหร่", "send": "ตั้งแต่ต้นเดือนใช้ไปเท่าไหร่"},
+    ])
+    assert [c["label"] for c in out] == ["ควรออมเดือนละเท่าไหร่", "ตั้งแต่ต้นเดือนใช้ไปเท่าไหร่"]

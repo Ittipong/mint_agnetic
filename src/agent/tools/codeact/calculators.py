@@ -23,9 +23,7 @@ under "## Financial calculators". UT-NS01 / UT-P01 enforce lockstep.
 
 from __future__ import annotations
 
-import calendar
-from datetime import date
-from decimal import ROUND_FLOOR, Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 
@@ -253,65 +251,7 @@ def emergency_fund_target(monthly_expenses, months=6) -> Decimal:
     return _q(exp * m)
 
 
-# ── Starter plan (new users) ───────────────────────────────────────────────
-
-
-def starter_plan(monthly_income, fixed_costs=0, balance=None, salary_day=None,
-                 today=None) -> dict:
-    """A first money plan from what a NEW user tells us, before any history
-    exists (NEW USER PLAYBOOK) — so the first chat already gives them numbers
-    that are theirs, instead of "average 0 บาท".
-
-    Save 20% when fixed costs leave at least half the income, else 10%, and
-    nothing when fixed costs eat everything. What is left after fixed costs
-    and saving is the flexible money; ÷30 gives a daily figure. With the
-    wallet `balance` it also says how much a day is safe until next payday
-    (`salary_day`, else the 1st of next month). Emergency target = 3 months of
-    fixed + flexible spending — the starter goal (6 months comes later).
-    """
-    today = today or date.today()
-    income = _to_dec(monthly_income)
-    fixed = _to_dec(fixed_costs or 0)
-    if income <= 0:
-        raise ValueError("monthly_income must be > 0")
-    left = income - fixed
-    if left <= 0:
-        rate = Decimal("0")
-    elif left / income >= Decimal("0.5"):
-        rate = Decimal("0.20")
-    else:
-        rate = Decimal("0.10")
-    saving = (income * rate / 100).to_integral_value(rounding=ROUND_FLOOR) * 100
-    flexible = max(left - saving, Decimal(0))
-    plan = {
-        "monthly_income": _q(income),
-        "fixed_costs": _q(fixed),
-        "save_rate_pct": int(rate * 100),
-        "monthly_saving": _q(saving),
-        "flexible_monthly": _q(flexible),
-        "daily_flexible": (flexible / 30).to_integral_value(rounding=ROUND_FLOOR),
-        "emergency_target": _q((fixed + flexible) * 3),
-        "fixed_exceeds_income": fixed >= income,
-    }
-    if balance is not None:
-        if salary_day:
-            day = int(salary_day)
-            y, m = today.year, today.month
-            if today.day >= day:
-                y, m = (y + 1, 1) if m == 12 else (y, m + 1)
-            payday = date(y, m, min(day, calendar.monthrange(y, m)[1]))
-        else:
-            payday = date(today.year + (today.month == 12), today.month % 12 + 1, 1)
-        days = (payday - today).days
-        plan["next_payday"] = payday
-        plan["days_to_payday"] = days
-        plan["balance_per_day"] = (_to_dec(balance) / days).to_integral_value(
-            rounding=ROUND_FLOOR)
-    return plan
-
-
 __all__ = [
-    "starter_plan",
     "compute_dti",
     "mortgage_payment",
     "affordability_check",
