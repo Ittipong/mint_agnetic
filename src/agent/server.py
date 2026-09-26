@@ -63,6 +63,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -318,6 +319,29 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="mint_agentic_v3", lifespan=lifespan)
+
+# ── CORS — browser clients (the design prototype) ────────────────────────────
+# WHY (2026-09-26): the mobile app is a native client and never needed CORS, but
+# the insight/chat prototype at design.minttechdev.uk is a BROWSER page, and a
+# browser refuses to read a cross-origin response the server has not allowed.
+# The allowlist is explicit (no "*") and configurable via CHAT_ALLOWED_ORIGINS.
+# NOTE this does not change who can CALL this service — it is already
+# unauthenticated (user_id travels in the body) behind the Cloudflare tunnel, so
+# any curl could always reach it. CORS only decides which browser PAGE may read
+# the reply.
+_ALLOWED_ORIGINS = [
+    o.strip() for o in os.getenv(
+        "CHAT_ALLOWED_ORIGINS",
+        "https://design.minttechdev.uk,http://localhost:8767,http://127.0.0.1:8767",
+    ).split(",") if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 
 # ---------------------------------------------------------------------------
