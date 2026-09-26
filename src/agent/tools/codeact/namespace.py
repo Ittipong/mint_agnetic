@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import Future
+import calendar
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
@@ -267,22 +268,23 @@ class _Wrappers:
         match_destination_note: bool = True,
         has_note: bool | None = None,
         transaction_type: str | None = None,  # accepted-and-ignored (see sum_income)
+        by_parent: bool = False,
     ) -> list[dict]:
-        """Spending breakdown by category (expense only)."""
-        rows = self._exec(
-            self._spec(
-                metric="sum_by_category",
-                start=start,
-                end=end,
-                wallet_names=wallet_names,
-                currency=currency,
-                convert_to_thb=convert_to_thb,
-                note_query=note_query,
-                match_destination_note=match_destination_note,
-                has_note=has_note,
-            )
+        """Spending breakdown by category (expense only). `by_parent=True`
+        folds sub-categories into their parent (the app's "แยกตามหมวด")."""
+        spec = self._spec(
+            metric="sum_by_category",
+            start=start,
+            end=end,
+            wallet_names=wallet_names,
+            currency=currency,
+            convert_to_thb=convert_to_thb,
+            note_query=note_query,
+            match_destination_note=match_destination_note,
+            has_note=has_note,
         )
-        return rows
+        spec.category_level = "parent" if by_parent else "leaf"
+        return self._exec(spec)
 
     def sum_by_wallet(
         self,
@@ -442,18 +444,44 @@ class _Wrappers:
         """Every non-deleted credit-card wallet — limit, used, available, currency.
 
         Each row: {sync_id, name, credit_limit, used, available, currency,
-        cache_updated_at}. `used` mirrors the backend's cached_used_amount.
+        billing_cycle_day, payment_due_day, last_statement_date, next_due_date,
+        statement_balance, amount_due, cache_updated_at}. `amount_due` = the
+        closed statement minus payments since — the figure to pay by
+        next_due_date (None when the card has no billing day). `used` mirrors the backend's cached_used_amount.
         When the cache has never been written it stays NULL (and `available`
         is NULL too) — never substitute a 0 or initial_used here, an unknown
         usage must read as unknown so the user can see the cache is stale.
+        The two dates are computed from the injected `today` (not SQL now())
+        so time-warped QA replays stay deterministic.
         """
-        return self._exec(
+        rows = self._exec(
             self._spec(
                 metric="creditcard_list",
                 start=date(1900, 1, 1),
                 end=self._today,
             )
         )
+        for r in rows:
+            r["last_statement_date"] = _day_of_month_on_or_before(
+                self._today, r.get("billing_cycle_day"))
+            r["next_due_date"] = _day_of_month_on_or_after(
+                self._today, r.get("payment_due_day"))
+            # "ต้องจ่ายเท่าไหร่" = what the closed statement billed minus what was
+            # paid since, NOT the live `used` (which also holds the open cycle's
+            # swipes that bill next month).
+            r["statement_balance"] = r["amount_due"] = None
+            if r["last_statement_date"] is not None:
+                spec = self._spec(metric="creditcard_statement",
+                                  start=date(1900, 1, 1), end=r["last_statement_date"])
+                spec.wallets = [ResolvedEntity(sync_id=r["sync_id"], display_name=r["name"],
+                                               kind="wallet", score=1.0)]
+                st = self._exec(spec)
+                if st:
+                    bal = Decimal(str(st[0]["statement_balance"] or 0))
+                    paid = Decimal(str(st[0]["paid_since_statement"] or 0))
+                    r["statement_balance"] = bal
+                    r["amount_due"] = max(bal - paid, Decimal(0))
+        return rows
 
     def budget_transactions(
         self,
@@ -961,6 +989,34 @@ class _Wrappers:
         }
 
 
+def _clamped(year: int, month: int, day: int) -> date:
+    return date(year, month, min(day, calendar.monthrange(year, month)[1]))
+
+
+def _day_of_month_on_or_after(today: date, day: int | None) -> date | None:
+    """Next date (today inclusive) that falls on `day` of a month, clamped to
+    the month length — e.g. a card's next payment-due date."""
+    if not day:
+        return None
+    d = _clamped(today.year, today.month, day)
+    if d >= today:
+        return d
+    y, m = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+    return _clamped(y, m, day)
+
+
+def _day_of_month_on_or_before(today: date, day: int | None) -> date | None:
+    """Latest date (today inclusive) on `day` of a month — e.g. the last
+    statement (billing-cycle close) date."""
+    if not day:
+        return None
+    d = _clamped(today.year, today.month, day)
+    if d <= today:
+        return d
+    y, m = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+    return _clamped(y, m, day)
+
+
 # ── Public entry point ───────────────────────────────────────────────────────
 
 
@@ -1026,15 +1082,19 @@ def build_namespace(
             cats = resolve_category(term)
         except Exception:
             cats = []
-        cat_match = any(kw in c for c in cats)
+        # Case-insensitive: users type "subscription" for the "Subscription"
+        # category; a case-sensitive check fell to the note search and reported 0.
+        cat_match = any(kw.casefold() in c.casefold() for c in cats)
 
         is_income = transaction_type == "income"
         sum_fn = w.sum_income if is_income else w.sum_expense
 
         def _sum(**flt) -> tuple[Decimal, int]:
             rows = sum_fn(start=start, end=end, convert_to_thb=True, **flt)
-            if rows:
-                return Decimal(str(rows[0]["amount"])), int(rows[0]["cnt"])
+            # SUM over zero matching rows comes back as NULL, not 0 — Decimal("None")
+            # raised and the LLM retried the same call until the recursion limit.
+            if rows and rows[0].get("amount") is not None:
+                return Decimal(str(rows[0]["amount"])), int(rows[0].get("cnt") or 0)
             return Decimal(0), 0
 
         cat_total, cat_cnt = _sum(category_names=cats) if cat_match else (Decimal(0), 0)

@@ -436,17 +436,30 @@ def build_sum_by_category(spec: QuerySpec, user_id: str) -> tuple[str, list]:
     extra = _common_filters(spec, params)
     # `category_sync_id` (MAX over the transactions table) lets prose emit the
     # `{{cat:<sync_id>}}` inline-icon token in bullet-list breakdowns.
+    # category_level="parent" mirrors the app report's "แยกตามหมวด" mode
+    # (category_breakdown_segment_cubit): a sub-category counts under its
+    # parent, and parents are merged by NAME across wallets.
+    if spec.category_level == "parent":
+        bucket = "COALESCE(catp.name, catc.name, t.category_name, '(uncategorized)')"
+        cat_id = "MAX(COALESCE(catp.sync_id, t.category_sync_id))"
+        cat_join = """
+            LEFT JOIN categories catc ON catc.sync_id = t.category_sync_id
+            LEFT JOIN categories catp ON catp.sync_id = catc.parent_sync_id"""
+    else:
+        bucket = "COALESCE(t.category_name, '(uncategorized)')"
+        cat_id = "MAX(t.category_sync_id)"
+        cat_join = ""
     if spec.convert_to_thb:
         sql = f"""
             SELECT
-                COALESCE(t.category_name, '(uncategorized)') AS bucket,
-                MAX(t.category_sync_id)                        AS category_sync_id,
+                {bucket} AS bucket,
+                {cat_id} AS category_sync_id,
                 'THB'                                          AS currency,
                 SUM({_AMOUNT_THB_EXPR})                        AS amount,
                 COUNT(*)                                       AS cnt
             FROM transactions t
             {_wallet_join()}
-            {_currency_join()}
+            {_currency_join()}{cat_join}
             WHERE 1=1 {_wallet_user_check()}
               AND t.date >= $2
               AND t.date <  ($3::date + INTERVAL '1 day')
@@ -454,20 +467,20 @@ def build_sum_by_category(spec: QuerySpec, user_id: str) -> tuple[str, list]:
               AND t.is_deleted = false
               AND t.status = 'confirmed'
               {extra}
-            GROUP BY COALESCE(t.category_name, '(uncategorized)')
+            GROUP BY {bucket}
             ORDER BY amount DESC
             LIMIT 30
         """
     else:
         sql = f"""
             SELECT
-                COALESCE(t.category_name, '(uncategorized)') AS bucket,
-                MAX(t.category_sync_id)                       AS category_sync_id,
+                {bucket} AS bucket,
+                {cat_id} AS category_sync_id,
                 COALESCE(t.currency_code, 'THB')             AS currency,
                 SUM(t.amount::numeric)                        AS amount,
                 COUNT(*)                                      AS cnt
             FROM transactions t
-            {_wallet_join()}
+            {_wallet_join()}{cat_join}
             WHERE 1=1 {_wallet_user_check()}
               AND t.date >= $2
               AND t.date <  ($3::date + INTERVAL '1 day')
@@ -475,7 +488,7 @@ def build_sum_by_category(spec: QuerySpec, user_id: str) -> tuple[str, list]:
               AND t.is_deleted = false
               AND t.status = 'confirmed'
               {extra}
-            GROUP BY COALESCE(t.category_name, '(uncategorized)'),
+            GROUP BY {bucket},
                      COALESCE(t.currency_code, 'THB')
             ORDER BY amount DESC
             LIMIT 30
@@ -1042,6 +1055,8 @@ def build_creditcard_list(spec: QuerySpec, user_id: str) -> tuple[str, list]:
                 ELSE cc.credit_limit::numeric - cc.cached_used_amount::numeric
             END                                              AS available,
             cc.currency                                      AS currency,
+            cc.billing_cycle_day                             AS billing_cycle_day,
+            cc.payment_due_day                               AS payment_due_day,
             cc.cache_updated_at                              AS cache_updated_at
         FROM creditcard_wallets cc
         WHERE cc.deleted_at IS NULL
@@ -1049,6 +1064,45 @@ def build_creditcard_list(spec: QuerySpec, user_id: str) -> tuple[str, list]:
         ORDER BY cc.name
     """
     return sql, params
+
+
+def build_creditcard_statement(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """One card's closed statement: the balance it owed at the statement date
+    (`time_range.end`) and what was paid into it after that date.
+
+    Same sign rules as the `wallet_live_balances` view (used = initial_used −
+    Σ effect × amount), so a statement balance and the live `used` always
+    agree on how each transaction moves the card.
+    """
+    card = spec.wallets[0].sync_id
+    sql = """
+        WITH fx AS (
+            SELECT t.wallet_sync_id, t.destination_wallet_sync_id,
+                   (t.date AT TIME ZONE 'Asia/Bangkok')::date AS d,
+                   COALESCE(t.converted_amount, t.amount) AS src_amount,
+                   COALESCE(t.destination_converted_amount, t.amount) AS dst_amount,
+                   COALESCE(NULLIF(t.effect_on_wallet, 0),
+                            CASE WHEN t.type IN ('income', 'creditCardCashback')
+                                 THEN 1 ELSE -1 END) AS eff_w,
+                   COALESCE(t.effect_on_destination, 1) AS eff_d
+            FROM transactions t
+            WHERE t.is_deleted = false AND t.status = 'confirmed'
+              AND (t.wallet_sync_id = $2 OR t.destination_wallet_sync_id = $2)
+        )
+        SELECT
+            (cc.initial_used::double precision - COALESCE(SUM(
+                CASE WHEN fx.d <= $3 THEN
+                    CASE WHEN fx.wallet_sync_id = $2 THEN fx.eff_w * fx.src_amount
+                         ELSE fx.eff_d * fx.dst_amount END
+                END), 0))::numeric                               AS statement_balance,
+            COALESCE(SUM(CASE WHEN fx.d > $3 AND fx.destination_wallet_sync_id = $2
+                              THEN fx.dst_amount END), 0)::numeric AS paid_since_statement
+        FROM creditcard_wallets cc
+        LEFT JOIN fx ON true
+        WHERE cc.sync_id::text = $2 AND cc.user_id = $1 AND cc.deleted_at IS NULL
+        GROUP BY cc.initial_used
+    """
+    return sql, [user_id, card, spec.time_range.end]
 
 
 # ── Goal metrics ─────────────────────────────────────────────────────────────
@@ -1246,6 +1300,7 @@ _BUILDERS = {
     "budget_remaining": build_budget_remaining,
     "budget_transactions": build_budget_transactions,
     "creditcard_list": build_creditcard_list,
+    "creditcard_statement": build_creditcard_statement,
     "goal_list": build_goal_list,
     "goal_progress": build_goal_progress,
     "goal_transactions": build_goal_transactions,

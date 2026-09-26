@@ -10,6 +10,7 @@ Composition:
 
     START → pre_turn → classify_intent
       classify_intent --(ADD complete)--> direct_propose → post_turn → END
+                                   (propose fails → react)
       classify_intent --(else/OFF/error)--> react → gen_suggestions
                                                   → post_turn → END
 
@@ -519,6 +520,7 @@ async def build_graph(
         classify_intent_node,
         direct_propose_node,
         route_after_classify,
+        route_after_direct_propose,
     )
 
     builder = StateGraph(AgentState)
@@ -561,7 +563,14 @@ async def build_graph(
     #   - flat: the loop exits to gen_suggestions via `_route_after_agent`'s
     #           `_EXIT` sentinel (wired through `exit_node` above — no static
     #           edge here).
-    builder.add_edge("direct_propose", "post_turn")
+    # A FAILED direct_propose (onboarding / off-list wallet / resolve error)
+    # sets route=react; a static edge here used to drop that, so react never
+    # ran and the user got the generic "ระบบขัดข้อง" fallback (UT-CR15).
+    builder.add_conditional_edges(
+        "direct_propose",
+        route_after_direct_propose,
+        {"post_turn": "post_turn", "react": react_entry},
+    )
     if not use_flat:
         builder.add_edge("react", "gen_suggestions")
     builder.add_edge("gen_suggestions", "post_turn")
