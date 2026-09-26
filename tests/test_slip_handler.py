@@ -298,37 +298,39 @@ def test_UT_SL03b_default_currency_code_passed_through() -> None:
 
 
 # ---------------------------------------------------------------------------
-# UT-SL04 — code documents the as_node="finalize" requirement
+# UT-SL04 — slip/confirm persistence targets a node that EXISTS in the graph
 # ---------------------------------------------------------------------------
 
 
-def test_UT_SL04_as_node_finalize_documented_in_code() -> None:
-    """UT-SL04: the slip handler module documents the
-    `as_node="finalize"` requirement that Wave 6's server.py MUST honor
-    when persisting the group proposal via `graph.aupdate_state`.
-
-    Per memory `project_slip_vision_as_node`, missing `as_node="finalize"`
-    on a slip turn's seeded state raises InvalidUpdateError because the
-    slip flow short-circuits BEFORE the graph runs. This is a foot-gun
-    we forbid by documenting it inline; the test asserts the docstring
-    + comments live in the source so a future refactor can't silently
-    drop them.
+def test_UT_SL04_as_node_is_a_real_terminal_node() -> None:
+    """UT-SL04: out-of-graph writes (slip group seed, confirm, cancel) must pass
+    `as_node="post_turn"` — v3's terminal node. v2 used "finalize", which v3
+    does not have; writing as a missing node raises InvalidUpdateError (the old
+    confirm/cancel 500). Guards both sides: the code uses post_turn, and the
+    compiled graph really has a post_turn node wired to END.
     """
-    src = Path(
-        "/Users/ittipong.it/Projects/mint_money/mint_agentic_v3/src/agent/"
-        "endpoints/slip_handler.py"
-    ).read_text(encoding="utf-8")
-    # The literal token `as_node="finalize"` (or "finalize" within a few
-    # words of `as_node`) must appear in the source. We assert the strict
-    # substring so a future renaming surfaces in CI.
-    assert 'as_node="finalize"' in src, (
-        "slip_handler.py must contain the exact string `as_node=\"finalize\"` "
-        "in its comments — Wave 6 server.py reads this contract before "
-        "persisting the slip-group proposal (memory "
-        "project_slip_vision_as_node)"
-    )
-    # Plus the memory anchor itself for traceability.
-    assert "project_slip_vision_as_node" in src
+    import asyncio
+
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from src.agent.graph import build_graph
+
+    src = (Path(__file__).resolve().parents[1] / "src/agent/server.py").read_text(
+        encoding="utf-8")
+    assert 'as_node="post_turn"' in src
+    assert 'as_node="finalize"' not in src.replace('`as_node="finalize"`', "")
+
+    from tests.test_react_loop import FakeToolingModel
+
+    async def nodes():
+        g = await build_graph(model=FakeToolingModel(responses=[]),
+                              checkpointer=MemorySaver())
+        return g.get_graph()
+
+    graph = asyncio.run(nodes())
+    assert "post_turn" in graph.nodes
+    assert "finalize" not in graph.nodes
+    assert any(e.source == "post_turn" and e.target == "__end__" for e in graph.edges)
 
 
 def test_UT_SL04b_wallet_id_pick_honored() -> None:
@@ -358,3 +360,25 @@ def test_UT_SL04b_wallet_id_pick_honored() -> None:
     assert payload["wallet_sync_id"] == "wallet-cc"
     # Inner txn rows also point to the chosen wallet.
     assert payload["transactions"][0]["wallet_sync_id"] == "wallet-cc"
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("2026-09-24", "2026-09-24"),                    # slip's own date kept
+    ("2569-09-24", "2026-09-24"),                    # BE year left unconverted
+    ("2026-09-24T12:41:00+07:00", "2026-09-24"),     # datetime → date only
+    ("2026-12-01", "2026-09-26T10:00:00+00:00"),     # future → now
+    (None, "2026-09-26T10:00:00+00:00"),             # not printed → now
+    ("24 ก.ย.", "2026-09-26T10:00:00+00:00"),        # unparseable → now
+])
+def test_UT_SL08_slip_date_uses_printed_date(raw, expected) -> None:
+    """UT-SL08: a slip dated "24 ก.ย. 2569" was saved as TODAY — the vision
+    prompt never asked for a date, so every line fell back to now()."""
+    from src.agent.endpoints.slip_handler import _valid_date
+    assert _valid_date(raw, "2026-09-26T10:00:00+00:00") == expected
+
+
+def test_UT_SL08b_vision_prompt_asks_for_the_date() -> None:
+    from src.agent.endpoints.slip_handler import _build_slip_prompt
+    import inspect
+    src = inspect.getsource(_build_slip_prompt)
+    assert '"date": "2026-09-24"' in src and "Buddhist Era" in src

@@ -576,7 +576,7 @@ async def _slip_stream(app: FastAPI, body: ChatStreamRequest) -> AsyncIterator[d
 
     Per Wave 5 design (decision α), the slip flow SKIPS the ReAct loop
     entirely — one vision call + one group block. Persists the group
-    proposal to the checkpointer state via `as_node="finalize"` so the
+    proposal to the checkpointer state via `as_node="post_turn"` so the
     confirm/cancel endpoint can resolve it later (memory:
     `project_slip_vision_as_node`).
     """
@@ -658,7 +658,8 @@ async def _persist_slip_proposal(
 
     The slip flow short-circuits BEFORE the graph runs, so we have to seed
     state ourselves. Per memory `project_slip_vision_as_node`,
-    `aupdate_state` MUST pass `as_node="finalize"` — otherwise LangGraph
+    `aupdate_state` MUST pass `as_node="post_turn"` (v3's terminal node;
+    v2's `finalize` does not exist here) — otherwise LangGraph
     can't infer the owning node on a fresh thread and raises
     InvalidUpdateError.
 
@@ -1170,11 +1171,11 @@ async def _finalize_proposal_in_state(
     status in-place, and (for confirms) writes `last_txn` so the next turn's
     resolver can see the freshest confirmed txn.
 
-    `as_node="finalize"` is REQUIRED on `aupdate_state` per memory
-    `project_slip_vision_as_node` — both in-graph proposals (which actually
-    ran the graph to `finalize`) and slip/voice proposals (seeded
-    out-of-graph at `finalize`) end at the same terminal node, so attributing
-    the write there is correct + ambiguity-free.
+    `as_node="post_turn"` is REQUIRED on `aupdate_state` (memory
+    `project_slip_vision_as_node`; v2 used `finalize`, which v3 does not have)
+    — both in-graph proposals (which ran the graph to `post_turn`) and
+    slip/voice proposals (seeded out-of-graph at `post_turn`) end at the same
+    terminal node, so attributing the write there is correct + ambiguity-free.
     """
     g = app.state.agent_graph
     values: dict = {}
@@ -1209,6 +1210,10 @@ async def _finalize_proposal_in_state(
     proposals[idx] = entry
 
     update: dict = {"proposals": proposals}
+    # Drop the pending pointer too, or the next propose would "discard" a card
+    # that is already confirmed/cancelled.
+    if (values.get("pending_proposal") or {}).get("proposal_id") == proposal_id:
+        update["pending_proposal"] = None
     if new_status == "confirmed" and entry.get("intent_type") == "ADD_TRANSACTION":
         # Persist the just-confirmed txn into short-term memory so the next
         # turn's resolver can find it as `last_txn`.

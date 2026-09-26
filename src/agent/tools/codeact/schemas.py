@@ -47,6 +47,7 @@ Metric = Literal[
     "goal_transactions",
     # Credit card family
     "creditcard_list",
+    "creditcard_statement",
 ]
 
 Granularity = Literal["day", "week", "month", "quarter", "year", "all"]
@@ -103,3 +104,6 @@ class QuerySpec(BaseModel):
     # Filter by presence of a note — True = note IS NOT NULL AND <> '',
     # False = note IS NULL OR ''. None disables the filter.
     has_note: bool | None = None
+    # sum_by_category only: "parent" folds sub-categories into their parent and
+    # merges same-named parents across wallets — the app report's "แยกตามหมวด".
+    category_level: Literal["leaf", "parent"] = "leaf"

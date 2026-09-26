@@ -558,3 +558,56 @@ def test_UT_T04_llm_call_failure_returns_joint_error(
 
 # Re-export FakeRepo for the UT-T03 amount test that builds its own state
 _FakeRepoExport = _FakeRepo
+
+
+def test_UT_T04b_single_wallet_recovers_category_put_in_wallet_field(
+    base_state, monkeypatch,
+):
+    """UT-T04b: single-wallet path (state wallet_id fixed). Seen live for
+    "จ่ายค่าเช่า 9500": the joint LLM returned the CATEGORY id in
+    wallet_sync_id and category null → the whole ADD failed and the user got
+    "ระบบขัดข้อง". The wallet is already fixed, so the proposal must still land
+    on that wallet, with the category the LLM meant."""
+
+    async def swapped(**_kwargs):
+        return _PairChoice(wallet_sync_id="c-food", category_sync_id=None,
+                           confidence=0.8, reason="swapped fields")
+
+    monkeypatch.setattr(pt_module, "_resolve_pair_async", swapped)
+
+    async def run():
+        _cmd, out = await _invoke_propose(
+            state=base_state,
+            args={"amount": 120, "type": "expense", "category_label": "อาหาร"},
+        )
+        assert "error" not in out, out
+        txn = base_state["emitted_blocks_this_turn"][-1]["transaction"]
+        assert txn["wallet_sync_id"] == "w-cash"
+        assert txn["category_sync_id"] == "c-food"
+
+    asyncio.run(run())
+
+
+def test_UT_T04c_confirmed_card_is_not_discarded_by_next_propose(
+    base_state,
+):
+    """UT-T04c: "กาแฟ 60 ข้าว 80" → confirm the coffee card → "ต่อรายการถัดไป".
+    /transactions/confirm finalizes the `proposals` entry, but the separate
+    `pending_proposal` pointer stayed "pending" — so the next propose emitted a
+    discard_proposal for the CONFIRMED card. The list is the source of truth."""
+    confirmed = {"proposal_id": "prop_saved", "status": "confirmed", "payload": {}}
+    base_state["proposals"] = [confirmed]
+    base_state["pending_proposal"] = {"proposal_id": "prop_saved", "status": "pending",
+                                      "payload": {}}
+
+    async def run():
+        _cmd, out = await _invoke_propose(
+            state=base_state,
+            args={"amount": 80, "type": "expense", "category_label": "อาหาร"},
+        )
+        assert "error" not in out, out
+        assert out["discarded_proposal_id"] is None
+        types = [b["type"] for b in base_state["emitted_blocks_this_turn"]]
+        assert "discard_proposal" not in types
+
+    asyncio.run(run())

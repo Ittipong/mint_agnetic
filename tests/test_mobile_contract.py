@@ -137,8 +137,13 @@ _FAKE_ASTREAM_GAP_REASON = (
 # 1. v2 wire contract — the frozen mobile-facing event names
 # ---------------------------------------------------------------------------
 
+# `narration_token` (LLM text streamed next to a tool call) and
+# `suggestions_pending` (chips on the way) were added after v2. The mobile
+# decoder routes both (mobile/lib/data/datasources/remote/api/
+# chat_api_datasource.dart `_parseEvent`), so they belong to the contract.
 V2_EVENT_NAMES: frozenset[str] = frozenset(
-    {"status_token", "answer_token", "block", "done", "error"}
+    {"status_token", "narration_token", "answer_token", "block",
+     "suggestions_pending", "done", "error"}
 )
 
 
@@ -326,7 +331,6 @@ def _ai_tool_call(name: str, args: dict, call_id: str) -> AIMessage:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(reason=_FAKE_ASTREAM_GAP_REASON, strict=True)
 def test_UT_MC01_text_add_wire_matches_v2_contract() -> None:
     """UT-MC01: text ADD turn yields the v2 sequence — status_token(s)
     before the transaction_proposal, then a final block:answer + done.

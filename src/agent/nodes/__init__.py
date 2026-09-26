@@ -15,6 +15,7 @@ from .classify_intent import (
     direct_propose_node,
     is_classify_router_enabled,
     route_after_classify,
+    route_after_direct_propose,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "direct_propose_node",
     "is_classify_router_enabled",
     "route_after_classify",
+    "route_after_direct_propose",
 ]

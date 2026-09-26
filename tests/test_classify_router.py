@@ -526,3 +526,80 @@ def test_UT_CR15_direct_propose_node_does_not_use_stream_writer(monkeypatch):
     ai_texts = [m.content for m in msgs if isinstance(m, AIMessage)]
     assert len(ai_texts) == 1
     assert "กดยืนยันเพื่อบันทึก" in ai_texts[0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UT-CR14 — multi-item ADD must NOT shortcut (would drop items 2..n)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_UT_CR14_multi_item_add_routes_react(monkeypatch):
+    """UT-CR14: "กาแฟ 60 ข้าวเที่ยง 80 BTS 44" — classifier flags multi=true.
+    direct_propose only proposes the first item and the other two vanished
+    silently, so a multi-item ADD must go to react (R7: propose the first,
+    tell the user the rest can follow)."""
+    monkeypatch.setenv("CLASSIFY_ROUTER_ENABLED", "1")
+    _patch_classifier(monkeypatch, {
+        "intent": "ADD", "complete": True, "multi": True, "amount": 60,
+        "type": "expense", "category_label": "กาแฟ", "note": None, "date_iso": None,
+    })
+    state = {"messages": [HumanMessage("กาแฟ 60 ข้าวเที่ยง 80 BTS 44")]}
+    out = asyncio.run(ci.classify_intent_node(state))
+    assert out["__classify_route__"] == "react"
+
+
+def test_UT_CR14b_single_item_add_still_shortcuts(monkeypatch):
+    """UT-CR14b: the multi flag must not slow down the common single-item ADD."""
+    monkeypatch.setenv("CLASSIFY_ROUTER_ENABLED", "1")
+    _patch_classifier(monkeypatch, {
+        "intent": "ADD", "complete": True, "multi": False, "amount": 60,
+        "type": "expense", "category_label": "กาแฟ", "note": None, "date_iso": None,
+    })
+    state = {"messages": [HumanMessage("กาแฟ 60")]}
+    out = asyncio.run(ci.classify_intent_node(state))
+    assert out["__classify_route__"] == "direct_propose"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UT-CR15 — graph: a FAILED direct_propose must actually reach react
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_UT_CR15_failed_direct_propose_falls_back_to_react_in_graph(monkeypatch):
+    """UT-CR15: "จ่ายค่าเช่า 9500 เมื่อวันที่ 1 กันยา" — the joint resolver
+    failed → direct_propose not ok → it asks for react.
+    The graph wired direct_propose → post_turn with a STATIC edge, so react
+    never ran and the user got "ระบบขัดข้องชั่วคราว". The fallback must reach
+    react inside the graph, not just in the node's return value."""
+    import importlib
+
+    _seed_catalog()
+    pt_module = importlib.import_module("src.agent.tools.propose_transaction")
+
+    async def resolver_down(**_kwargs):
+        return None  # joint resolver failure → joint_resolve_failed
+
+    monkeypatch.setattr(pt_module, "_resolve_pair_async", resolver_down)
+    _patch_classifier(monkeypatch, {
+        "intent": "ADD", "complete": True, "multi": False, "amount": 9500,
+        "type": "expense", "category_label": "ค่าเช่า",
+        "wallet_label": None, "note": None, "date_iso": "2026-09-01",
+    })
+
+    async def run():
+        graph = await _build(_ReactStubModel())
+        return await graph.ainvoke(
+            {"user_id": "u-1", "thread_id": "t-CR15",
+             "messages": [HumanMessage("จ่ายค่าเช่า 9500 เมื่อวันที่ 1 กันยา")]},
+            config={"configurable": {"thread_id": "t-CR15"}, "recursion_limit": 25},
+        )
+
+    out = asyncio.run(run())
+    ai_texts = [m.content for m in out["messages"] if isinstance(m, AIMessage)]
+    assert any(t == "REACT_HANDLED" for t in ai_texts)
+
+
+def test_UT_CR16_confirm_text_shows_two_satang_digits():
+    """UT-CR16: "ค่าไฟ 1,250.50 บาท" was echoed back as "1,250.5 บาท"."""
+    assert "1,250.50 บาท" in ci._confirm_text(1250.5, "ค่าไฟ")
+    assert "250 บาท" in ci._confirm_text(250, "กาแฟ")

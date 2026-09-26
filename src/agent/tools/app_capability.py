@@ -194,6 +194,23 @@ CAPABILITIES: dict[str, dict] = {
         ),
     },
 
+    "transfer": {
+        "topic_label": "โอนเงินระหว่างกระเป๋า / จ่ายบัตรเครดิต / เก็บเข้าเป้า",
+        "chat_can_do": [
+            "บันทึกรายจ่ายที่จ่ายให้คนอื่นหรือร้านค้า เช่น 'โอนค่าเช่าให้เจ้าของห้อง 9500'",
+        ],
+        "chat_cannot_do": [
+            "โอนเงินระหว่างกระเป๋าของตัวเอง จ่ายบัตรเครดิต หรือเก็บเงินเข้าเป้าหมาย ในแชท",
+        ],
+        "where_to_do_it": "หน้าเพิ่มรายการ → เลือก 'โอนเงิน' หรือ 'จ่ายบัตรเครดิต'",
+        "phrase_examples": [],
+        "redirect_text": (
+            "การโอนระหว่างกระเป๋าของคุณเอง (รวมถึงจ่ายบัตรและเก็บเข้าเป้า) ยังทำในแชทไม่ได้นะครับ "
+            "ไปที่หน้าเพิ่มรายการแล้วเลือก 'โอนเงิน' หรือ 'จ่ายบัตรเครดิต' ได้เลย "
+            "ยอดจะได้ไม่ถูกนับเป็นรายจ่าย"
+        ),
+    },
+
     "general": {
         "topic_label": "ภาพรวม — แชทนี้ทำอะไรได้บ้าง",
         "chat_can_do": [
@@ -229,7 +246,7 @@ async def get_app_capability(
     topic: Literal[
         "edit_confirmed_txn", "delete_confirmed_txn", "backdate",
         "manage_wallet", "manage_budget", "manage_goal",
-        "split_bill", "export_data", "recurring", "general",
+        "split_bill", "export_data", "recurring", "transfer", "general",
     ],
     *,
     tool_call_id: Annotated[str, InjectedToolCallId],

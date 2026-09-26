@@ -53,8 +53,10 @@ def test_UT_T11_emits_wallet_required_block_with_action_target():
         assert block["action"]["target"] == "/wallets/create"
 
         # In-place mutation also reflects the new block for direct-test
-        # inspection of `state`.
-        assert state["emitted_blocks_this_turn"] == update_blocks
+        # NOT mirrored into state in place: the append_reducer applies the
+        # Command(update=) once; mirroring too put the block on the SSE wire
+        # twice (#SSE-DUP).
+        assert state["emitted_blocks_this_turn"] == []
 
     asyncio.run(run())
 

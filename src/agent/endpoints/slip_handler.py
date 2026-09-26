@@ -17,10 +17,11 @@ Mobile contract (frozen, identical to v2 slip flow):
 
 Wave 6 expectation (documented but NOT executed here): when Wave 6's
 `server.py` persists the group proposal via `graph.aupdate_state(...)`, it
-MUST pass `as_node="finalize"`. Per memory `project_slip_vision_as_node`,
+MUST pass `as_node="post_turn"` (v3's terminal node — v2's `finalize` does
+not exist here). Per memory `project_slip_vision_as_node`,
 seeding state for a turn that short-circuited BEFORE the graph ran (slip
 flow doesn't enter the graph at all) leaves LangGraph unable to infer the
-write's owning node → InvalidUpdateError. The terminal `finalize` node (=
+write's owning node → InvalidUpdateError. The terminal `post_turn` node (=
 edge to END) is the safe target.
 
 The group block carries `proposal_id == group_id` per the same memory: the
@@ -125,14 +126,27 @@ def _to_data_uri(b64: str) -> str:
 
 
 def _valid_date(raw: Any, fallback_iso: str) -> str:
-    """Accept a real ISO date string; fall back to today on malformed input."""
+    """The slip's own date (YYYY-MM-DD); fall back to now when absent/bad.
+
+    Guards against the two ways a vision model gets Thai slips wrong: a
+    Buddhist-Era year left unconverted (2569 → 2026) and a date in the future
+    (a slip can't be dated after it was photographed).
+    """
     if not isinstance(raw, str) or not raw.strip():
         return fallback_iso
     try:
-        datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return raw
+        d = datetime.fromisoformat(raw.strip().replace("Z", "+00:00")).date()
     except ValueError:
         return fallback_iso
+    today = datetime.fromisoformat(fallback_iso.replace("Z", "+00:00")).date()
+    if d.year > today.year + 1:
+        try:
+            d = d.replace(year=d.year - 543)
+        except ValueError:
+            return fallback_iso
+    if d > today:
+        return fallback_iso
+    return d.isoformat()
 
 
 def _other_category(
@@ -222,7 +236,11 @@ Only `reject` when no amount can be read at all.
 **If `slip_type == reject`:** Return `{{"readable": false, "transactions": []}}` and stop.
 
 ## Step 1 — Extract raw context
-- `amount` per slip / line item. Buddhist Era 25xx dates → subtract 543.
+- `amount` per slip / line item.
+- `date` — the transaction date printed on the slip, as `YYYY-MM-DD`
+  (Buddhist Era 25xx → subtract 543; "24 ก.ย. 2569" → "2026-09-24",
+  "25/09/2569" → "2026-09-25"). Every line of one receipt shares that date.
+  No date printed → `null` (the app uses today).
 - `transaction_type` — `expense` (money leaves) or `income` (money enters); ambiguous → expense.
 - `merchant_or_recipient` — store / recipient / issuer / employer (strip payment-rail wrappers).
 
@@ -247,7 +265,7 @@ Only `reject` when no amount can be read at all.
 
 ## Output — STRICT JSON only (no prose, no markdown fences)
 {{"readable": true, "transactions": [
-  {{"type": "expense", "amount": 120.0, "category_sync_id": "<id>", "note": "ค่ากาแฟ", "include_in_report": true}}
+  {{"type": "expense", "amount": 120.0, "category_sync_id": "<id>", "note": "ค่ากาแฟ", "date": "2026-09-24", "include_in_report": true}}
 ]}}
 
 Unreadable image → {{"readable": false, "transactions": []}}.
@@ -471,13 +489,13 @@ async def handle_slip_chat(
 
     NOTE for Wave 6 (server.py persistence):
         When persisting the group proposal via `graph.aupdate_state(...)`
-        the caller MUST pass `as_node="finalize"`. Per memory
+        the caller MUST pass `as_node="post_turn"`. Per memory
         `project_slip_vision_as_node`, the slip turn short-circuits BEFORE
         the graph runs so LangGraph has no pending task to attribute the
         write to → InvalidUpdateError otherwise. Attributing it to the
-        terminal `finalize` node (edge to END) writes the proposals and
+        terminal `post_turn` node (edge to END) writes the proposals and
         schedules no pending tasks — a clean completed state, indistinguishable
-        from a normal turn that ended at finalize.
+        from a normal turn that ended at post_turn.
 
     Wave 6 also reads `proposal_id == group_id` from the emitted block to
     annotate status during history replay — keep both keys in lockstep

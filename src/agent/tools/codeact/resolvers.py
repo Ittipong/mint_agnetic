@@ -606,6 +606,20 @@ def _month_range(today: date, offset: int) -> tuple[date, date]:
     return date(year, month, 1), date(year, month, last)
 
 
+def _rolling_months(today: date, n: int) -> date:
+    """Start of the rolling n-month window ending today (inclusive).
+
+    Same day-of-month n months back, plus one day, so a monthly item (rent on
+    the 1st, salary on the 25th) is counted exactly n times.
+    """
+    year, month = today.year, today.month - n
+    while month <= 0:
+        month += 12
+        year -= 1
+    day = min(today.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day) + timedelta(days=1)
+
+
 def _year_range(today: date, offset: int) -> tuple[date, date]:
     y = today.year + offset
     return date(y, 1, 1), date(y, 12, 31)
@@ -740,7 +754,7 @@ def parse_period(phrase: str | None, today: date) -> tuple[date, date]:
       parse_period('all time')         → (1900-01-01, 2026-05-05)
       parse_period('เดือนนี้')          → (2026-05-01, 2026-05-31)
       parse_period('เดือนที่แล้ว')     → (2026-04-01, 2026-04-30)
-      parse_period('3 เดือนที่แล้ว')   → (2026-02-01, 2026-05-05)
+      parse_period('3 เดือนที่แล้ว')   → (2026-02-06, 2026-05-05)  # rolling
       parse_period('สัปดาห์นี้')        → (2026-05-04, 2026-05-10)  # Mon–Sun
       parse_period('สัปดาห์ที่แล้ว')   → (2026-04-27, 2026-05-03)
       parse_period('ตั้งแต่ต้นปี')     → (2026-01-01, 2026-05-05)  # YTD
@@ -851,22 +865,23 @@ def parse_period(phrase: str | None, today: date) -> tuple[date, date]:
     if half is not None:
         return half
 
-    # "<n> เดือนที่แล้ว" — window of n months ending today.
+    # "<n> เดือนที่แล้ว" — rolling window of exactly n months ending today.
     # Accept every common Thai suffix the LLM emits for "the last n months":
     # ที่แล้ว / ก่อน / ที่ผ่านมา / ล่าสุด / ย้อนหลัง / หลังสุด. Missing one of
     # these (e.g. 'ล่าสุด') is what wasted a whole ReAct retry in trace 0015.
+    # Rolling (not "1st of month-n") because the LLM divides the total by n for
+    # monthly averages: the old calendar-anchored start spanned n months PLUS
+    # the current partial month, inflating every average by ~30%.
     m = re.match(r"^(\d+)\s*เดือน\s*(ที่แล้ว|ก่อน|ที่ผ่านมา|ล่าสุด|ย้อนหลัง|หลังสุด)?$", p)
     if m:
         n = int(m.group(1))
         if n > 0:
-            s, _ = _month_range(today, -n)
-            return s, today
+            return _rolling_months(today, n), today
     m = re.match(r"^(?:last|past|recent)\s+(\d+)\s+months?$", p)
     if m:
         n = int(m.group(1))
         if n > 0:
-            s, _ = _month_range(today, -n)
-            return s, today
+            return _rolling_months(today, n), today
 
     # "<n> วัน"
     m = re.match(r"^(\d+)\s*วัน\s*(ที่แล้ว|ก่อน|ที่ผ่านมา|ล่าสุด|ย้อนหลัง|หลังสุด)?$", p)

@@ -36,3 +36,10 @@ logs/
 
 # LangGraph runtime
 .langgraph_api/
+
+# chat QA loop run outputs
+evals/chat_loop/results/
+evals/chat_loop/media/*.jpg
+evals/chat_loop/media/*.m4a
+evals/chat_loop/media/*.aiff
+evals/chat_loop/media/last_block.json

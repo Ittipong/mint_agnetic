@@ -441,6 +441,23 @@ async def _propose_core(
             (w for w in candidate_wallets if w.sync_id == pair.wallet_sync_id),
             None,
         )
+        if chosen_wallet_opt is None and len(candidate_wallets) == 1:
+            # Single-wallet path: the wallet was already fixed deterministically,
+            # so the LLM's wallet field is irrelevant. Seen live: it put the
+            # CATEGORY id in wallet_sync_id and left category null — recover
+            # that category instead of failing the whole ADD.
+            only = candidate_wallets[0]
+            slog(
+                "propose_transaction",
+                f"single-wallet: ignoring LLM wallet {pair.wallet_sync_id!r}, "
+                f"using {only.sync_id!r}",
+            )
+            if not pair.category_sync_id and any(
+                c.sync_id == pair.wallet_sync_id
+                for c in candidate_cats_by_wallet.get(only.sync_id, [])
+            ):
+                pair = pair.model_copy(update={"category_sync_id": pair.wallet_sync_id})
+            chosen_wallet_opt = only
         if chosen_wallet_opt is None:
             slog(
                 "propose_transaction",
@@ -704,9 +721,17 @@ def _get_pending_proposal(state: dict) -> Optional[dict]:
     update) still discards correctly. Returns the LATEST pending entry.
     """
     pointer = state.get("pending_proposal")
+    proposals = state.get("proposals") or []
     if pointer and pointer.get("status") == "pending":
-        return pointer
-    for p in reversed(state.get("proposals") or []):
+        # `proposals` is the source of truth: /transactions/confirm|cancel
+        # finalizes the list entry, and the pointer is a separate (possibly
+        # stale) copy after checkpointing. Trusting a stale pointer discarded
+        # a card the user had already CONFIRMED.
+        entry = next((p for p in proposals
+                      if p.get("proposal_id") == pointer.get("proposal_id")), None)
+        if entry is None or entry.get("status") == "pending":
+            return pointer
+    for p in reversed(proposals):
         if p.get("status") == "pending":
             return p
     return None

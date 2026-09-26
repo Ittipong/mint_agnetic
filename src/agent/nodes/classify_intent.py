@@ -104,6 +104,12 @@ intents:
             greeting, app help, OR a bare value that ANSWERS the assistant's
             previous question (NOT a record request)
 
+Own-wallet transfer rule:
+  Moving money between the user's OWN wallets / credit cards / savings goals
+  ("โอนเงินเข้า TrueMoney 500", "จ่ายบัตร KTC 5000", "เก็บเข้าเป้า 3000",
+  "ถอนเงินสด 2000") is NOT ADD → intent=OTHER. Paying another person or a shop
+  ("โอนให้แม่ 3000", "โอนค่าเช่าให้เจ้าของห้อง") IS an expense ADD.
+
 CRITICAL context rule:
   If the assistant's previous turn ASKED the user something (e.g. "อยากซื้อรถ
   ราคาเท่าไหร่", "ตั้งเป้าออมเดือนละเท่าไหร่"), then a bare amount or short
@@ -121,11 +127,15 @@ For ADD only, extract:
   date_iso        resolve "เมื่อวาน"/"อาทิตย์ก่อน" to ISO; today = {today}
 
 complete = TRUE only when amount AND (category_label OR note) are present.
+multi    = TRUE when the LATEST message lists 2+ SEPARATE transactions, each
+           with its own amount ("กาแฟ 60 ข้าว 80", "ค่าน้ำ 100, ค่าไฟ 900").
+           A quantity inside one item is NOT multi ("ข้าว 2 จาน 120").
 
 Return EXACTLY this JSON shape:
-{{"intent":"ADD"|"OTHER","complete":true|false,"amount":number|null,\
-"type":"expense"|"income"|"auto"|null,"category_label":string|null,\
-"wallet_label":string|null,"note":string|null,"date_iso":string|null}}
+{{"intent":"ADD"|"OTHER","complete":true|false,"multi":true|false,\
+"amount":number|null,"type":"expense"|"income"|"auto"|null,\
+"category_label":string|null,"wallet_label":string|null,"note":string|null,\
+"date_iso":string|null}}
 """
 
 
@@ -263,6 +273,7 @@ def _coerce_slots(parsed: dict) -> dict:
     return {
         "intent": intent,
         "complete": complete,
+        "multi": parsed.get("multi") is True,
         "amount": amount,
         "type": tx_type,
         "category_label": label,
@@ -312,10 +323,14 @@ async def classify_intent_node(state: dict) -> dict:
     amount = slots["amount"]
     has_label = bool(slots["category_label"] or slots["note"])
 
-    # Completeness Gate B — only an unambiguous, complete ADD shortcuts.
+    # Completeness Gate B — only an unambiguous, complete, SINGLE-item ADD
+    # shortcuts. A multi-item message goes to react, which applies R7 (propose
+    # the first item and tell the user the rest can follow) — direct_propose
+    # would silently drop every item after the first.
     route_direct = (
         intent == "ADD"
         and complete
+        and not slots["multi"]
         and amount is not None
         and amount > 0
         and has_label
@@ -323,7 +338,7 @@ async def classify_intent_node(state: dict) -> dict:
     route = _ROUTE_DIRECT_PROPOSE if route_direct else _ROUTE_REACT
     slog(
         "classify_router",
-        f"intent={intent} complete={complete} amount={amount} "
+        f"intent={intent} complete={complete} multi={slots['multi']} amount={amount} "
         f"label={slots['category_label']!r} note={slots['note']!r} → route={route}",
     )
     if route == _ROUTE_DIRECT_PROPOSE:
@@ -338,6 +353,12 @@ def route_after_classify(state: dict) -> str:
         if state.get("__classify_route__") == _ROUTE_DIRECT_PROPOSE
         else _ROUTE_REACT
     )
+
+
+def route_after_direct_propose(state: dict) -> str:
+    """After direct_propose: success → post_turn; a failed propose (onboarding,
+    off-list wallet, resolve error) → react, which can clarify or retry."""
+    return _ROUTE_REACT if state.get("__classify_route__") == _ROUTE_REACT else "post_turn"
 
 
 # Deterministic confirmation message — 0 LLM calls. Mirrors the EX-ADD few-shot
@@ -363,7 +384,8 @@ def _fmt_amount(amount: Any) -> str:
         if isinstance(amount, int):
             return f"{amount:,}"
         if isinstance(amount, float):
-            return f"{amount:,.2f}".rstrip("0").rstrip(".")
+            # Satang always shows two digits ("1,250.50", never "1,250.5").
+            return f"{amount:,.2f}"
     except (TypeError, ValueError):
         pass
     return str(amount)
