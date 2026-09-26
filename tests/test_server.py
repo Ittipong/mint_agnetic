@@ -9,7 +9,7 @@ Test strategy:
   - Mocks replace: `agent_graph` (astream / aget_state / aupdate_state),
     `vision_call`, `stt_call`, `threads`, `messages`, `repo`.
   - We assert on the SSE wire (event sequence) + on whether the mocks were
-    called with the right arguments (e.g. `as_node="finalize"` on
+    called with the right arguments (e.g. `as_node="post_turn"` on
     confirm/cancel — memory `project_slip_vision_as_node`).
   - No real network / DB / LLM is touched. The TestClient uses ASGI's
     in-process transport, so SSE chunks land as a streaming response.
@@ -131,7 +131,7 @@ class FakeGraph:
     tuples by `astream` exactly the way the real graph would. Customise
     `state_values` to control what `aget_state` returns (for the confirm
     handler tests). `updates` collects every `aupdate_state` call so tests
-    can verify `as_node="finalize"` was passed.
+    can verify `as_node="post_turn"` was passed.
     """
 
     def __init__(self) -> None:
@@ -360,8 +360,8 @@ def test_UT_SR02_chat_stream_image_routes_to_slip(monkeypatch: pytest.MonkeyPatc
         assert group["total"] == 120
         assert group["proposal_id"] == group["group_id"]  # memory: lockstep
         # The slip handler short-circuited — `aupdate_state` was called for
-        # persistence with `as_node="finalize"` (memory: project_slip_vision_as_node).
-        assert any(u.get("as_node") == "finalize" for u in g.updates), g.updates
+        # persistence with `as_node="post_turn"` (memory: project_slip_vision_as_node).
+        assert any(u.get("as_node") == "post_turn" for u in g.updates), g.updates
 
 
 # ---------------------------------------------------------------------------
@@ -396,13 +396,13 @@ def test_UT_SR03_chat_voice_starts_with_transcript_block() -> None:
 
 
 # ---------------------------------------------------------------------------
-# UT-SR04 — POST /transactions/confirm updates checkpoint with as_node=finalize
+# UT-SR04 — POST /transactions/confirm updates checkpoint with as_node=post_turn
 # ---------------------------------------------------------------------------
 
 
-def test_UT_SR04_confirm_updates_state_with_finalize_node() -> None:
+def test_UT_SR04_confirm_updates_state_with_post_turn_node() -> None:
     """UT-SR04: confirming a pending proposal flips status to "confirmed"
-    via `aupdate_state(cfg, update, as_node="finalize")`. The `as_node`
+    via `aupdate_state(cfg, update, as_node="post_turn")`. The `as_node`
     argument is MANDATORY — memory `project_slip_vision_as_node`.
 
     Also writes `last_txn` so the next turn's resolver can see the freshest
@@ -437,8 +437,10 @@ def test_UT_SR04_confirm_updates_state_with_finalize_node() -> None:
         # The graph was updated with as_node="finalize".
         assert len(g.updates) == 1
         update_call = g.updates[0]
-        assert update_call["as_node"] == "finalize", (
-            "as_node='finalize' is REQUIRED — memory project_slip_vision_as_node"
+        assert update_call["as_node"] == "post_turn", (
+            "as_node must be v3's terminal node post_turn — 'finalize' does not "
+            "exist in v3 and raises InvalidUpdateError (memory "
+            "project_slip_vision_as_node)"
         )
         # last_txn is written for an ADD_TRANSACTION confirm.
         assert update_call["update"].get("last_txn", {}).get("id") == "p-1"
@@ -602,9 +604,9 @@ class _FakeCursor:
 # ---------------------------------------------------------------------------
 
 
-def test_UT_SR07_cancel_updates_state_with_finalize_node() -> None:
+def test_UT_SR07_cancel_updates_state_with_post_turn_node() -> None:
     """UT-SR07: cancelling a pending proposal flips status to "cancelled"
-    via `aupdate_state(cfg, update, as_node="finalize")` and clears
+    via `aupdate_state(cfg, update, as_node="post_turn")` and clears
     `last_txn` when it points at the cancelled proposal (so a follow-up
     "แก้..." doesn't latch on)."""
     g = FakeGraph()
@@ -627,7 +629,7 @@ def test_UT_SR07_cancel_updates_state_with_finalize_node() -> None:
         body = resp.json()
         assert body["status"] == "cancelled"
         update_call = g.updates[0]
-        assert update_call["as_node"] == "finalize"
+        assert update_call["as_node"] == "post_turn"
         # last_txn cleared because it pointed at the cancelled proposal.
         assert "last_txn" in update_call["update"]
         assert update_call["update"]["last_txn"] is None

@@ -234,7 +234,7 @@ def test_UT_G01_simple_add_emits_transaction_proposal_block():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_UT_G02_pre_turn_hook_clears_scratch_between_turns():
+def test_UT_G02_pre_turn_hook_clears_scratch_between_turns(monkeypatch):
     """UT-G02: turn N's `tool_outputs_this_turn` / `emitted_blocks_this_turn`
     / `user_context` / validator scratch MUST NOT leak into turn N+1.
 
@@ -244,6 +244,21 @@ def test_UT_G02_pre_turn_hook_clears_scratch_between_turns():
     turn lists should reflect ONLY turn 2's activity (empty).
     """
     _seed_catalog()
+    # Hermetic: the joint wallet/category resolver is an LLM call. Unstubbed it
+    # hit OpenRouter (or failed without a key), so turn 1's outcome depended on
+    # the environment.
+    import importlib
+    pt_module = importlib.import_module("src.agent.tools.propose_transaction")
+
+    async def fake_pair(*, candidate_wallets, candidate_cats_by_wallet, **_kw):
+        w = candidate_wallets[0]
+        cats = candidate_cats_by_wallet.get(w.sync_id) or []
+        return pt_module._PairChoice(
+            wallet_sync_id=w.sync_id,
+            category_sync_id=cats[0].sync_id if cats else None,
+            confidence=1.0, reason="stub")
+
+    monkeypatch.setattr(pt_module, "_resolve_pair_async", fake_pair)
 
     # Turn 1 — call get_user_context + propose, then answer.
     turn1_responses = [

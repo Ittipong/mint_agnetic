@@ -437,11 +437,26 @@ def test_UT_NS07_parse_period_last_3_months_variants(phrase):
     """UT-NS07 (E2): eliminate the avoidable ValueError at the source. The LLM
     emits many surface forms for "the last 3 months"; each unrecognized one
     wastes a ReAct retry (trace 0015: 'ล่าสุด' was unrecognized). All MUST
-    parse to the same Feb 1 → today window without raising."""
+    parse to the same rolling 3-month window (Feb 16 → May 15) without raising."""
     from src.agent.tools.codeact.resolvers import parse_period
     start, end = parse_period(phrase, date(2026, 5, 15))
-    assert start == date(2026, 2, 1), f"{phrase!r} → {start}"
+    assert start == date(2026, 2, 16), f"{phrase!r} → {start}"
     assert end == date(2026, 5, 15), f"{phrase!r} → {end}"
+
+
+@pytest.mark.parametrize("today, expected_start", [
+    (date(2026, 9, 26), date(2026, 6, 27)),
+    (date(2026, 5, 31), date(2026, 3, 1)),   # Feb has no 31st → clamp, then +1
+    (date(2026, 1, 10), date(2025, 10, 11)),  # crosses the year boundary
+])
+def test_UT_NS07d_last_n_months_is_exactly_n_months(today, expected_start):
+    """UT-NS07d: "3 เดือนที่ผ่านมา" must cover exactly 3 months so total / 3 is a
+    true monthly average — a rent paid on the 1st or salary on the 25th lands in
+    the window exactly 3 times. The old window (1st of month-3 → today) spanned
+    ~3.9 months and inflated the chat's average income/expense by ~30%."""
+    from src.agent.tools.codeact.resolvers import parse_period
+    start, end = parse_period("3 เดือนที่ผ่านมา", today)
+    assert (start, end) == (expected_start, today)
 
 
 def test_UT_NS07b_parse_period_days_alias():
@@ -608,7 +623,7 @@ def test_UT_NS12_fuzzy_period_raises_instead_of_wrong_window(phrase):
 # UT-NS13 — Thai number words + quarter/half with an explicit year token
 # ─────────────────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("phrase,start,end", [
-    ("สองเดือนก่อน", date(2026, 4, 1), _TODAY_WED),
+    ("สองเดือนก่อน", date(2026, 4, 4), _TODAY_WED),  # rolling 2 months
     ("สามสัปดาห์ที่แล้ว", date(2026, 5, 13), _TODAY_WED),
     ("เมื่อสองวันก่อน", date(2026, 6, 1), _TODAY_WED),
     ("ไตรมาสแรก", date(2026, 1, 1), date(2026, 3, 31)),
@@ -728,3 +743,135 @@ def test_UT_NS_CB03_compare_periods_category_returns_rows_no_side_effect(
         assert rows["เดินทาง"]["diff"] == "-50"
 
     asyncio.run(run())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UT-NS-SF01 — spend_for matches a Latin category name case-insensitively
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_UT_NS_SF01_spend_for_latin_category_is_case_insensitive(monkeypatch):
+    """UT-NS-SF01: "ค่า subscription ต่อเดือน" → spend_for("subscription") must
+    land on the "Subscription" CATEGORY (mode=category, 603). A case-sensitive
+    name check routed it to the note search (notes say Netflix/Spotify) and the
+    chat told the user they had no subscriptions at all."""
+    catalog = EntityCatalog(
+        wallets=[WalletEntry(sync_id="w-1", name="Card", currency="THB")],
+        categories=[CategoryEntry(sync_id="c-sub", name="Subscription", type="expense")],
+        tags=[],
+    )
+    monkeypatch.setattr(
+        ns_mod, "make_resolve_category", lambda cat, loop: (lambda q: ["Subscription"]))
+
+    async def fake_run_query(spec, user_id):
+        by_cat = any(c.display_name == "Subscription" for c in spec.categories)
+        if spec.metric == "list":
+            return []
+        if by_cat and not spec.note_query:
+            return [{"amount": Decimal("603"), "cnt": 3, "currency": "THB"}]
+        # Real SQL: SUM over zero rows → NULL amount (must not crash spend_for).
+        return [{"amount": None, "cnt": 0, "currency": "THB"}]
+
+    monkeypatch.setattr(ns_mod, "_run_query", fake_run_query)
+
+    async def run():
+        ns = build_namespace(user_id="u-1", catalog=catalog,
+                             today=date(2026, 9, 26), main_loop=asyncio.get_running_loop())
+        return await asyncio.to_thread(
+            ns["spend_for"], "subscription",
+            start=date(2026, 9, 1), end=date(2026, 9, 26))
+
+    r = asyncio.run(run())
+    assert r["mode"] == "category"
+    assert r["cat_total"] == Decimal("603")
+    assert r["note_total"] == Decimal("0")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UT-NS-CC01 — creditcard_list exposes due / statement dates
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_UT_NS_CC01_creditcard_list_has_due_date_and_amount_due(monkeypatch):
+    """UT-NS-CC01: "บัตร KTC ต้องจ่ายวันไหน" — the card has payment_due_day=5,
+    billing_cycle_day=20, but creditcard_list never returned them, so the chat
+    told the user the app has no due date. Today 2026-09-26 → last statement
+    2026-09-20, next due 2026-10-05; a due day of 31 clamps to Feb 28."""
+
+    async def fake_run_query(spec, user_id):
+        if spec.metric == "creditcard_statement":
+            # KTC closed at 24,111 on the statement date; 5,000 paid since.
+            assert spec.wallets[0].sync_id == "cc-1"
+            return [{"statement_balance": Decimal("24111"),
+                     "paid_since_statement": Decimal("5000")}]
+        assert spec.metric == "creditcard_list"
+        return [
+            {"sync_id": "cc-1", "name": "KTC", "credit_limit": Decimal("80000"),
+             "used": Decimal("24943"), "available": Decimal("55057"),
+             "currency": "THB", "billing_cycle_day": 20, "payment_due_day": 5},
+            {"sync_id": "cc-2", "name": "NoDays", "credit_limit": Decimal("1000"),
+             "used": None, "available": None, "currency": "THB",
+             "billing_cycle_day": None, "payment_due_day": None},
+        ]
+
+    monkeypatch.setattr(ns_mod, "_run_query", fake_run_query)
+
+    async def run(today):
+        ns = build_namespace(user_id="u-1", catalog=_catalog(), today=today,
+                             main_loop=asyncio.get_running_loop())
+        return await asyncio.to_thread(ns["creditcard_list"])
+
+    rows = asyncio.run(run(date(2026, 9, 26)))
+    assert rows[0]["last_statement_date"] == date(2026, 9, 20)
+    assert rows[0]["next_due_date"] == date(2026, 10, 5)
+    assert rows[1]["next_due_date"] is None
+    # Due = closed statement − paid since (NOT the live `used`, 24,943).
+    assert rows[0]["statement_balance"] == Decimal("24111")
+    assert rows[0]["amount_due"] == Decimal("19111")
+    assert rows[1]["amount_due"] is None  # no billing day → unknown, not 0
+
+    rows = asyncio.run(run(date(2026, 10, 5)))  # due today → today
+    assert rows[0]["next_due_date"] == date(2026, 10, 5)
+    assert rows[0]["last_statement_date"] == date(2026, 9, 20)
+
+    assert ns_mod._day_of_month_on_or_after(date(2026, 2, 10), 31) == date(2026, 2, 28)
+    assert ns_mod._day_of_month_on_or_before(date(2026, 1, 3), 20) == date(2025, 12, 20)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UT-NS-CAT01 — sum_by_category(by_parent=True) folds sub-categories
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_UT_NS_CAT01_sum_by_category_parent_level(monkeypatch):
+    """UT-NS-CAT01: "หมวดไหนเยอะสุด" ranked leaf categories, so a card's
+    "ช้อปปิ้ง" leaf (16,900) beat the whole food group, and the answer did not
+    match the app report's "แยกตามหมวด". by_parent=True must reach SQL as
+    category_level="parent", which groups by the parent name (verified against
+    dev DB: Sep ช้อปปิ้ง 25,345 … total 44,289 unchanged); the default stays
+    leaf for drill-downs."""
+    from src.agent.tools.codeact.sql_templates import build_sum_by_category
+
+    seen = []
+
+    async def fake_run_query(spec, user_id):
+        seen.append(spec.category_level)
+        sql, _ = build_sum_by_category(spec, user_id)
+        if spec.category_level == "parent":
+            assert "LEFT JOIN categories catp ON catp.sync_id = catc.parent_sync_id" in sql
+            assert "GROUP BY COALESCE(catp.name, catc.name" in sql
+        else:
+            assert "catp" not in sql
+        return []
+
+    monkeypatch.setattr(ns_mod, "_run_query", fake_run_query)
+
+    async def run():
+        ns = build_namespace(user_id="u-1", catalog=_catalog(), today=date(2026, 9, 26),
+                             main_loop=asyncio.get_running_loop())
+        for kw in ({}, {"by_parent": True}, {"by_parent": True, "convert_to_thb": True}):
+            await asyncio.to_thread(ns["sum_by_category"], start=date(2026, 9, 1),
+                                    end=date(2026, 9, 30), **kw)
+
+    asyncio.run(run())
+    assert seen == ["leaf", "parent", "parent"]

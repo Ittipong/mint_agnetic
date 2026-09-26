@@ -192,7 +192,9 @@ def test_UT_T07_clarification_emits_block_without_raising(monkeypatch):
         assert update_blocks[0]["type"] == "clarification"
         assert update_blocks[0]["text"] == "กระเป๋าไหน"
         assert {"label": "Cash", "send": "Cash"} in update_blocks[0]["options"]
-        # In-place mirror also reflects the block for backward-compat tests.
-        assert state["emitted_blocks_this_turn"] == update_blocks
+        # NOT mirrored into state in place: the append_reducer applies the
+        # Command(update=) once; mirroring too put the block on the SSE wire
+        # twice (#SSE-DUP).
+        assert state["emitted_blocks_this_turn"] == []
 
     asyncio.run(run())

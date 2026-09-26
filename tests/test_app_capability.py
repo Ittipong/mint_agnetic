@@ -27,7 +27,7 @@ REQUIRED_KEYS = {
 EXPECTED_TOPICS = {
     "edit_confirmed_txn", "delete_confirmed_txn", "backdate",
     "manage_wallet", "manage_budget", "manage_goal",
-    "split_bill", "export_data", "recurring", "general",
+    "split_bill", "export_data", "recurring", "transfer", "general",
 }
 
 

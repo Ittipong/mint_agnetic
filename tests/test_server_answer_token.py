@@ -174,7 +174,8 @@ def test_UT_SAT003_done_event_carries_thread_id_from_initial_state():
 # ---------------------------------------------------------------------------
 def test_UT_SAT004_content_with_tool_calls_is_emitted():
     """When the LLM emits `content` (Thai narration) in the SAME response
-    as `tool_calls`, the content MUST reach the user as an answer_token —
+    as `tool_calls`, the content MUST reach the user right away (as a
+    narration_token, apart from the final answer_token) —
     this drives the "thinking out loud" UX (memory: progress-narration in
     prompts.py). The user sees "กำลังเช็คยอดบัตรให้นะ" streaming while the
     tool runs, instead of staring at a blank screen for 5-15s.
@@ -199,8 +200,11 @@ def test_UT_SAT004_content_with_tool_calls_is_emitted():
             initial_state={"thread_id": "t-4", "user_id": "u-1", "messages": []},
             config={"configurable": {"thread_id": "t-4"}},
         ))
-        answer_events = [ev for ev in wire if ev["event"] == "answer_token"]
-        texts = [ev["data"] for ev in answer_events]
-        assert texts == ["กำลังเช็คยอดบัตรให้นะ", "เสร็จแล้วครับ"], texts
+        narration = [ev["data"] for ev in wire if ev["event"] == "narration_token"]
+        texts = [ev["data"] for ev in wire if ev["event"] == "answer_token"]
+        # Content bundled with tool_calls streams immediately, as narration_token
+        # (mobile renders it apart from the answer); the final text is answer_token.
+        assert narration == ["กำลังเช็คยอดบัตรให้นะ"], narration
+        assert texts == ["เสร็จแล้วครับ"], texts
 
     asyncio.run(run())
