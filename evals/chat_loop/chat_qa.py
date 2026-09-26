@@ -8,6 +8,8 @@ Writes results/<id>.json and prints a compact transcript.
 import json, os, sys, time, uuid, urllib.request
 
 BASE = "https://chat.minttechdev.uk"
+INSIGHT_DEV = "https://insight.minttechdev.uk/dev/api"
+WRITTEN: list[str] = []  # sync_ids this run inserted — printed at the end for cleanup
 USER = "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9"
 OUT = os.path.join(os.path.dirname(__file__), "results")
 os.makedirs(OUT, exist_ok=True)
@@ -60,6 +62,23 @@ def confirm(thread, proposal_id):
         return r.read().decode()
 
 
+def write_and_confirm(thread, proposal):
+    """What tapping ยืนยัน does in the app/prototype: write the ledger row
+    (the agent never writes transactions), then mark the proposal confirmed."""
+    tx = proposal["transaction"]
+    row = {"user_id": USER, "sync_id": tx.get("sync_id"), "type": tx["type"],
+           "amount": tx["amount"], "date": tx.get("date"), "note": tx.get("note"),
+           "wallet_sync_id": tx.get("wallet_sync_id"),
+           "category_sync_id": tx.get("category_sync_id")}
+    req = urllib.request.Request(INSIGHT_DEV + "/transaction", data=json.dumps(row).encode(),
+                                 method="POST", headers={"Content-Type": "application/json",
+                                                         "User-Agent": "curl/8.4.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        wrote = json.loads(r.read().decode())
+    WRITTEN.append(wrote["sync_id"])
+    return wrote, confirm(thread, proposal["proposal_id"])
+
+
 def main():
     scen = json.load(open(sys.argv[1]))
     only = set(sys.argv[2:])
@@ -70,7 +89,13 @@ def main():
         res = {"id": s["id"], "thread": thread, "turns": []}
         print(f"\n######## {s['id']}  thread={thread}")
         last_prop = None
+        last_block = None
         for m in s["turns"]:
+            if m == "__CONFIRM_WRITE__":
+                out = write_and_confirm(thread, last_block) if last_block else "no proposal"
+                print(f"\n=== CONFIRM+WRITE: {str(out)[:160]}")
+                res["turns"].append(dict(msg=m, answer=str(out), blocks=[], status=[], errors=[], other=[], secs=0))
+                continue
             if m == "__CONFIRM__":
                 out = confirm(thread, last_prop) if last_prop else "no proposal"
                 print(f"\n=== CONFIRM {last_prop}: {out[:120]}")
@@ -84,6 +109,7 @@ def main():
             for b in t["blocks"]:
                 if b.get("type") == "transaction_proposal":
                     last_prop = b.get("proposal_id")
+                    last_block = b
             print(f"\n>>> USER: {m}   ({t['secs']}s)")
             if t["errors"]:
                 print("!!! ERROR:", t["errors"])
@@ -96,6 +122,10 @@ def main():
                     print("  [block]", json.dumps(b, ensure_ascii=False)[:700])
             print("<<< BOT:", t["answer"][:2500])
         json.dump(res, open(os.path.join(OUT, f"{s['id']}.json"), "w"), ensure_ascii=False, indent=1)
+    if WRITTEN:
+        with open(os.path.join(OUT, "written_sync_ids.txt"), "a") as f:
+            f.write("\n".join(WRITTEN) + "\n")
+        print(f"\nWROTE {len(WRITTEN)} transaction(s) → results/written_sync_ids.txt (delete after the run)")
 
 
 if __name__ == "__main__":

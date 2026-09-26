@@ -220,6 +220,22 @@ def _make_prompt(state: AgentState) -> list:
     system_text = render_system_prompt(
         today=today_iso, user_id=user_id, about_user=about_user,
     )
+    # Card state rides at the END of the system prompt so the cached prefix is
+    # unchanged. Confirm/cancel arrive via REST, invisible in the messages.
+    from src.agent.nodes import latest_card_note
+
+    card_note = latest_card_note(state)
+    if card_note:
+        system_text += (
+            "\n\n# LATEST TRANSACTION CARD (this thread)\n"
+            f"{card_note}\n"
+            "If it is CONFIRMED and the user corrects it (\"แก้เป็น 85\", "
+            "\"เปลี่ยนหมวด\", \"ไม่ใช่ 75\"): the saved row cannot be edited "
+            "from chat — call get_app_capability(\"edit_confirmed_txn\") and use "
+            "its redirect_text. Do NOT call propose_transaction: a new card would "
+            "record the item twice. A PENDING card is corrected by proposing "
+            "again (E4)."
+        )
     windowed = _window_messages(
         state.get("messages") or [], _history_window_turns()
     )

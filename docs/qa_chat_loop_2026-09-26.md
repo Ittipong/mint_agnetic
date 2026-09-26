@@ -36,6 +36,7 @@ clear its data, or it can push the old rows back.
 | 13 | "1,250.5 บาท" | `_fmt_amount` stripped trailing zeros | Always 2 satang digits (UT-CR16) |
 | 14 | "หมวดไหนเยอะสุด" ranked leaf categories, so the ranking did not match the app report | `sum_by_category` grouped by leaf name only | `by_parent=True` folds sub-categories into the parent, the app's "แยกตามหมวด" mode (UT-NS-CAT01); overview examples use it |
 | 15 | "ต้องจ่ายบัตรเท่าไหร่" gave the live `used` (24,943), which includes swipes billed next month | No statement figure existed | `creditcard_list` adds `statement_balance` and `amount_due` = closed statement − payments since (KTC: 24,111) (UT-NS-CC01) |
+| 17 | "แก้เป็น 85" after the user CONFIRMED "กาแฟ 75" offered a second card, so confirming it would count the coffee twice | Confirm happens over REST, so neither the classifier nor ReAct could see the card was saved. Even with the state in the prompt, the LLM followed E4 ("correction = propose again") | Card state goes into the classifier and the ReAct prompt; `is_saved_card_correction` routes the turn to react; `propose_transaction` refuses with `confirmed_card_edit` and hands back the "edit it in the transaction list" text (UT-CR17, UT-T04d) |
 | 16 | Slip / receipt saved with TODAY's date instead of the printed one | The vision prompt never asked for a `date` | `date` added to the output schema; `_valid_date` fixes an unconverted BE year and rejects future dates (UT-SL08) |
 
 Result: round 1 passed 33/40 checks → round 4 passed 46/46. Voice (3 clips,
@@ -51,9 +52,37 @@ old failures:
   router ON for every test after it, and the joint resolver called a live LLM.
   `conftest.py` now pins the router OFF and stubs the resolver.
 
+## Round 6 — writes to the real ledger (2026-09-26 evening)
+
+Logic cases ran through the API with `__CONFIRM_WRITE__`. That step does what
+tapping ยืนยัน does: it writes the ledger row through the insight
+`/dev/api/transaction` endpoint, then confirms the proposal. Results after the
+writes: food budget 7,405 ✓, income 42,300 ✓, KTC used 25,593 while amount_due
+stayed 24,111 ✓, and a multi-item chain listed both items ✓. W3 (bug 17) was
+found here.
+
+UI-only checks ran in the prototype browser at 393×852
+(design.minttechdev.uk/prototype_v2, live mode):
+- A confirm through the UI wrote the row, and the next answer included it
+  (ค่าไฟ 2,478).
+- A replaced card shows "ถูกแทนด้วยข้อความใหม่".
+- Tapping a chip sends the message.
+- A reopened thread renders its history.
+
+Two prototype parity bugs were fixed. `chat.js` resolved `{{cat:}}` by name
+while the agent sends a sync_id, so no category icon ever showed. `.ch-itok`
+was display:grid, which pushed the icon onto its own line.
+
+All test rows (13) and test threads (194) were deleted afterwards, and the DB
+is back to its baseline.
+
 ## Still open
 
-- Nothing from this loop. The "งบ/หมวด" level choice follows the app report
+- A pending card that the prototype/app auto-discards on the next turn is
+  still `pending` on the server (v3 discards only inside `propose_transaction`,
+  locked decision #11). After a thread reload it becomes confirmable again.
+  Product call: auto-discard on the server, or keep late confirms.
+- Nothing else from this loop. The "งบ/หมวด" level choice follows the app report
   (parent for overviews, leaf for drill-down). Revisit it if the report
   changes.
 

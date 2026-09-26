@@ -221,6 +221,37 @@ async def propose_transaction(
     return Command(update=update)
 
 
+# "แก้เป็น 85", "เปลี่ยนหมวดเป็น…", "ไม่ใช่ 75 แต่ 85" — a correction of an earlier card.
+CORRECTION_RE = re.compile(r"^\s*(แก้|เปลี่ยน|ไม่ใช่|ผิด)")
+
+
+def latest_card(state: dict) -> Optional[dict]:
+    """The newest transaction proposal in this thread, or None."""
+    proposals = state.get("proposals") or []
+    return proposals[-1] if proposals else None
+
+
+def _last_user_text(state: dict) -> str:
+    from langchain_core.messages import HumanMessage
+
+    for m in reversed(state.get("messages") or []):
+        if isinstance(m, HumanMessage):
+            return m.content if isinstance(m.content, str) else ""
+    return ""
+
+
+def is_saved_card_correction(state: dict) -> bool:
+    """True when the user is correcting a card they already CONFIRMED.
+
+    That row is in the ledger; a new card would record the item twice
+    (75 + 85). Confirm happens over REST, so the LLM cannot see it; this is
+    enforced here, deterministically, and in the classify router.
+    """
+    card = latest_card(state)
+    return bool(card and card.get("status") == "confirmed"
+                and CORRECTION_RE.match(_last_user_text(state)))
+
+
 async def _propose_core(
     *,
     amount: float,
@@ -253,6 +284,18 @@ async def _propose_core(
         )
     if canon_amount <= 0:
         return _error_result(error="amount must be > 0", kind="invalid_amount")
+
+    # ── 1b. Never re-propose a correction of a SAVED card ─────────────────
+    if is_saved_card_correction(state):
+        from src.agent.tools.app_capability import CAPABILITIES
+
+        redirect = CAPABILITIES["edit_confirmed_txn"]["redirect_text"]
+        return _error_result(
+            error=("the latest card is already SAVED (user confirmed it); a new "
+                   "card would record it twice. Do not propose again. Tell the "
+                   f"user, in your own warm words, where to edit it: {redirect}"),
+            kind="confirmed_card_edit",
+        )
 
     # ── 2. Atomic discard guard (Decision X) ──────────────────────────────
     # Mark the current pending as discarded BEFORE building the new one, and

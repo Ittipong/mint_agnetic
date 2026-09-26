@@ -603,3 +603,54 @@ def test_UT_CR16_confirm_text_shows_two_satang_digits():
     """UT-CR16: "ค่าไฟ 1,250.50 บาท" was echoed back as "1,250.5 บาท"."""
     assert "1,250.50 บาท" in ci._confirm_text(1250.5, "ค่าไฟ")
     assert "250 บาท" in ci._confirm_text(250, "กาแฟ")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UT-CR17 — correcting a CONFIRMED card never fast-paths into a second ADD
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_UT_CR17_correction_after_confirmed_card_routes_react(monkeypatch):
+    """UT-CR17: "กาแฟ 75" → user taps ยืนยัน (saved) → "แก้เป็น 85". The
+    classifier could not see the confirm (it happens over REST), called it an
+    ADD, and direct_propose offered a second card — confirming it would count
+    the coffee twice (75 + 85). It must go to react, which redirects the edit."""
+    def boom(role, *, timeout_s=30.0):
+        raise AssertionError("guard must decide before the classifier LLM")
+
+    monkeypatch.setattr(ci, "make_llm_call", boom)
+    state = {
+        "messages": [HumanMessage("แก้เป็น 85")],
+        "proposals": [{"proposal_id": "p1", "status": "confirmed",
+                       "payload": {"amount": 75, "category": "กาแฟ"}}],
+    }
+    out = asyncio.run(ci.classify_intent_node(state))
+    assert out["__classify_route__"] == "react"
+
+
+def test_UT_CR17b_correction_of_pending_card_still_reproposes(monkeypatch):
+    """UT-CR17b: E4 must keep working — a PENDING card is corrected by a new ADD."""
+    _patch_classifier(monkeypatch, {
+        "intent": "ADD", "complete": True, "multi": False, "amount": 85,
+        "type": "expense", "category_label": "กาแฟ", "note": None, "date_iso": None,
+    })
+    state = {
+        "messages": [HumanMessage("แก้เป็น 85")],
+        "proposals": [{"proposal_id": "p1", "status": "pending",
+                       "payload": {"amount": 75, "category": "กาแฟ"}}],
+    }
+    out = asyncio.run(ci.classify_intent_node(state))
+    assert out["__classify_route__"] == "direct_propose"
+
+
+def test_UT_CR17c_card_note_reaches_the_react_prompt():
+    """UT-CR17c: ReAct sees the saved state, or it would propose again itself."""
+    from src.agent.graph import _make_prompt
+
+    msgs = _make_prompt({
+        "user_id": "u-1", "messages": [HumanMessage("แก้เป็น 85")],
+        "proposals": [{"proposal_id": "p1", "status": "confirmed",
+                       "payload": {"amount": 75, "category": "กาแฟ"}}],
+    })
+    assert "75 บาท กาแฟ — CONFIRMED" in msgs[0].content
+    assert 'get_app_capability("edit_confirmed_txn")' in msgs[0].content

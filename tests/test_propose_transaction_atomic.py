@@ -611,3 +611,26 @@ def test_UT_T04c_confirmed_card_is_not_discarded_by_next_propose(
         assert "discard_proposal" not in types
 
     asyncio.run(run())
+
+
+def test_UT_T04d_propose_refuses_correction_of_saved_card(base_state):
+    """UT-T04d: "แก้เป็น 85" after the user CONFIRMED "กาแฟ 75". Even with the
+    card state in its prompt, the LLM followed E4 and proposed 85 — confirming
+    it would count the coffee twice. The tool refuses, and the saved card is not
+    discarded."""
+    from langchain_core.messages import HumanMessage
+
+    saved = {"proposal_id": "prop_saved", "status": "confirmed",
+             "payload": {"amount": 75, "category": "อาหาร"}}
+    base_state["proposals"] = [saved]
+    base_state["messages"] = [HumanMessage("แก้เป็น 85")]
+
+    async def run():
+        _cmd, out = await _invoke_propose(
+            state=base_state, args={"amount": 85, "type": "expense", "category_label": "อาหาร"})
+        assert out["kind"] == "confirmed_card_edit"
+        assert "transaction list" in out["error"]  # tells the user WHERE to edit
+        assert saved["status"] == "confirmed"
+        assert not base_state["emitted_blocks_this_turn"]
+
+    asyncio.run(run())

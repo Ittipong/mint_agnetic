@@ -35,6 +35,7 @@ Conservative: any doubt → react.
 from __future__ import annotations
 
 import os
+import re
 from datetime import date, timedelta
 from typing import Any, Optional
 
@@ -43,7 +44,28 @@ from langsmith import traceable as _ls_traceable
 
 from src.agent.llm_openrouter import OpenRouterError, make_llm_call
 from src.agent.session_logger import slog, slog_block, slog_error
-from src.agent.tools.propose_transaction import _extract_json_object, _propose_core
+from src.agent.tools.propose_transaction import (
+    _extract_json_object,
+    _propose_core,
+    is_saved_card_correction,
+    latest_card,
+)
+
+
+def latest_card_note(state: dict) -> str:
+    """One line describing the newest card and whether the user already saved
+    it. Confirm/cancel happen out-of-band (REST), so neither the classifier nor
+    ReAct can see them in the conversation text — without this line "แก้เป็น 85"
+    after a CONFIRMED 75 became a second card and the coffee was counted twice."""
+    card = latest_card(state)
+    if not card:
+        return ""
+    p = card.get("payload") or {}
+    status = card.get("status") or "pending"
+    label = {"confirmed": "CONFIRMED (already saved to the ledger)",
+             "cancelled": "CANCELLED (not saved)",
+             "discarded": "DISCARDED (not saved)"}.get(status, "PENDING (not saved yet)")
+    return f"{p.get('amount')} บาท {p.get('category') or ''} — {label}".strip()
 
 
 # Route the conditional edge reads. Distinct from any LLM intent label.
@@ -109,6 +131,11 @@ Own-wallet transfer rule:
   ("โอนเงินเข้า TrueMoney 500", "จ่ายบัตร KTC 5000", "เก็บเข้าเป้า 3000",
   "ถอนเงินสด 2000") is NOT ADD → intent=OTHER. Paying another person or a shop
   ("โอนให้แม่ 3000", "โอนค่าเช่าให้เจ้าของห้อง") IS an expense ADD.
+
+Saved-card rule:
+  If the latest transaction card is CONFIRMED and the LATEST message corrects
+  it ("แก้เป็น 85", "เปลี่ยนหมวดเป็นอาหาร", "ไม่ใช่ 75"), that is NOT a new
+  ADD → intent=OTHER (the saved row has to be edited in the app).
 
 CRITICAL context rule:
   If the assistant's previous turn ASKED the user something (e.g. "อยากซื้อรถ
@@ -186,7 +213,7 @@ def _render_history(messages: list) -> str:
 
 @_ls_traceable(name="llm.classify_router", run_type="llm", tags=["classify_router"])
 async def _run_classify_llm(
-    *, history_text: str, user_text: str, today: date
+    *, history_text: str, user_text: str, today: date, card_note: str = ""
 ) -> Optional[dict]:
     """One short classification call. Returns parsed dict or None on ANY failure.
 
@@ -197,6 +224,7 @@ async def _run_classify_llm(
         _INSTRUCTIONS.format(today=today.isoformat(), yesterday=yesterday)
         + "\n\nConversation (most recent last):\n"
         + history_text
+        + (f"\n\nLatest transaction card: {card_note}" if card_note else "")
         + f"\n\nLATEST user message to classify:\n{user_text}"
     )
     messages = [
@@ -310,8 +338,15 @@ async def classify_intent_node(state: dict) -> dict:
     windowed = _window_messages(messages, _history_window_turns())
     history_text = _render_history(windowed)
 
+    # Deterministic guard: a correction right after a SAVED card can never be a
+    # fast-path ADD (it would record the item twice) — react redirects it.
+    if is_saved_card_correction(state):
+        slog("classify_router", "correction of a confirmed card → react")
+        return {"__classify_route__": _ROUTE_REACT, "__classified_add__": {}}
+
     parsed = await _run_classify_llm(
-        history_text=history_text, user_text=user_text, today=date.today()
+        history_text=history_text, user_text=user_text, today=date.today(),
+        card_note=latest_card_note(state),
     )
     if parsed is None:
         # Fail-safe: classifier unavailable / failed → react handles the turn.

@@ -1,0 +1,7 @@
+[
+{"id":"W6_budget_after_write","turns":["ข้าวเย็น 150","__CONFIRM_WRITE__","งบอาหารเดือนนี้เหลือเท่าไหร่"]},
+{"id":"W2_income_after_write","turns":["ได้เงินคืนจากเพื่อน 300","__CONFIRM_WRITE__","เดือนนี้รายได้เท่าไหร่"]},
+{"id":"W4_card_after_write","turns":["ซื้อของ Tops 650 บัตร KTC","__CONFIRM_WRITE__","บัตร KTC ตอนนี้ใช้ไปเท่าไหร่ แล้วรอบนี้ต้องจ่ายเท่าไหร่"]},
+{"id":"W1_multi_confirm_chain","turns":["กาแฟ 60 ข้าวเที่ยง 80","__CONFIRM_WRITE__","ต่อรายการถัดไปเลย","__CONFIRM_WRITE__","วันนี้จดอะไรไปบ้าง"]},
+{"id":"W3_edit_after_confirm","turns":["กาแฟ 75","__CONFIRM_WRITE__","แก้เป็น 85"]}
+]
