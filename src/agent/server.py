@@ -92,6 +92,7 @@ from src.agent.session_logger import (
     slog_error,
 )
 from src.agent.preamble import astream_with_preamble
+from src.agent.streaming.user_errors import ErrorKind, USER_MESSAGES, error_event
 from src.agent.streaming.sse_adapter import stream_chat
 from src.agent.threads_repo import THREADS_DDL, ThreadsRepo
 from src.agent.utils.version_router import REFUSE_REASON, is_v3_active
@@ -502,9 +503,7 @@ async def _text_graph_stream(
         # any answer token at all means the main loop produced a real answer.
         main_answered = bool(answer_chars)
         if not main_answered and not turn_blocks:
-            fallback = (
-                "ขออภัยค่ะ ตอนนี้ระบบขัดข้องชั่วคราว ลองพิมพ์ใหม่อีกครั้งได้เลยนะคะ"
-            )
+            fallback = USER_MESSAGES[ErrorKind.INTERNAL]
             slog("server.response",
                  "LLM produced no answer + no blocks — emitting Thai fallback")
             yield {"event": "answer_token", "data": fallback}
@@ -542,15 +541,9 @@ async def _text_graph_stream(
 
     except Exception as e:  # noqa: BLE001 — forward all errors to client
         error_for_log = e
-        tb = traceback.format_exc()
-        slog_error("server", e, tb)
-        yield {
-            "event": "error",
-            "data": json.dumps(
-                {"code": type(e).__name__, "message": str(e)},
-                ensure_ascii=False,
-            ),
-        }
+        # Never forward str(e): mobile shows `message` verbatim (it once
+        # showed OpenRouter's "Insufficient credits…" text to users).
+        yield error_event(e, "server", traceback.format_exc())
     finally:
         # ALWAYS log final state — even on cancel/timeout/error — so the log
         # never has a silent gap between TURN header and footer.
@@ -744,15 +737,9 @@ async def _chat_stream_generator(
             async for chunk in _text_graph_stream(app, body):
                 yield chunk
     except Exception as e:  # noqa: BLE001 — forward all errors to client
-        tb = traceback.format_exc()
-        slog_error("server", e, tb)
-        yield {
-            "event": "error",
-            "data": json.dumps(
-                {"code": type(e).__name__, "message": str(e)},
-                ensure_ascii=False,
-            ),
-        }
+        # Never forward str(e): mobile shows `message` verbatim (it once
+        # showed OpenRouter's "Insufficient credits…" text to users).
+        yield error_event(e, "server", traceback.format_exc())
     finally:
         session_logger.turn_footer(time.monotonic() - _turn_start)
 
@@ -841,15 +828,9 @@ async def _voice_stream_generator(
             slog("server", "voice transcript persistence failed (swallowed)")
 
     except Exception as e:  # noqa: BLE001 — forward all errors to client
-        tb = traceback.format_exc()
-        slog_error("server", e, tb)
-        yield {
-            "event": "error",
-            "data": json.dumps(
-                {"code": type(e).__name__, "message": str(e)},
-                ensure_ascii=False,
-            ),
-        }
+        # Never forward str(e): mobile shows `message` verbatim (it once
+        # showed OpenRouter's "Insufficient credits…" text to users).
+        yield error_event(e, "server", traceback.format_exc())
     finally:
         session_logger.turn_footer(time.monotonic() - _turn_start)
 

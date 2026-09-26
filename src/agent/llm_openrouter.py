@@ -246,7 +246,12 @@ def make_llm_call(role: str, *, timeout_s: float = 30.0) -> Callable[[list[dict]
                     return content
                 last_err = OpenRouterError(f"model {model} returned empty content")
                 slog_error(tag, last_err)
-        raise OpenRouterError(f"all {role} attempts failed; last error: {last_err}")
+        err = OpenRouterError(f"all {role} attempts failed; last error: {last_err}")
+        # Swallowing callers (classifier, resolvers) would hide an outage — alert here.
+        from src.agent.streaming.user_errors import note_llm_failure
+
+        note_llm_failure(err, f"llm.{role}")
+        raise err
 
     return call
 
@@ -317,7 +322,12 @@ def make_multimodal_call(
                     return content
                 last_err = OpenRouterError(f"model {model} returned empty content")
                 slog_error(tag, last_err)
-        raise OpenRouterError(f"all {role} models failed; last error: {last_err}")
+        err = OpenRouterError(f"all {role} models failed; last error: {last_err}")
+        # Swallowing callers (classifier, resolvers) would hide an outage — alert here.
+        from src.agent.streaming.user_errors import note_llm_failure
+
+        note_llm_failure(err, f"llm.{role}")
+        raise err
 
     return call
 

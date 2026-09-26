@@ -56,6 +56,7 @@ from typing import Any, AsyncIterator, Optional
 from langchain_core.messages import AIMessage, AIMessageChunk
 
 from src.agent.session_logger import slog, slog_error
+from src.agent.streaming.user_errors import error_event
 from src.agent.streaming.block_emitter import emit_block, validate_block
 from src.agent.validators.numerical import _WARNING_MARKER
 
@@ -548,20 +549,10 @@ async def stream_chat(
     except Exception as exc:  # noqa: BLE001 — forward all errors to client
         tb = traceback.format_exc()
         # PII: log the full traceback to the session file but NEVER send it
-        # to mobile — error events expose code + a friendly Thai message
-        # only. Per spec section 9 Streaming Flow + memory
+        # to mobile — error events expose a stable code + a friendly Thai
+        # message only (user_errors.error_event; str(exc) used to leak here). Per spec section 9 Streaming Flow + memory
         # `project_sse_ngrok_framing` (Pattern D contract).
-        slog_error("sse_adapter", exc, tb)
-        yield {
-            "event": "error",
-            "data": json.dumps(
-                {
-                    "code": type(exc).__name__,
-                    "message": str(exc) or "เกิดข้อผิดพลาดในการประมวลผล",
-                },
-                ensure_ascii=False,
-            ),
-        }
+        yield error_event(exc, "sse_adapter", tb)
 
 
 __all__ = ["stream_chat", "BlockBuffer"]

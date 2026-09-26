@@ -377,8 +377,11 @@ def test_UT_S06_error_event_no_stack_trace() -> None:
     error_events = [e for e in out if e["event"] == "error"]
     assert len(error_events) == 1
     payload = json.loads(error_events[0]["data"])
-    assert payload["code"] == "RuntimeError"
-    assert "psycopg connection closed" in payload["message"]
+    # Stable code + a Thai message for the user; the exception text is
+    # internal (mobile renders `message` verbatim) and must not be forwarded.
+    assert payload["code"] == "internal_error"
+    assert "psycopg" not in error_events[0]["data"]
+    assert "ครับ" in payload["message"]
     # PII guard — no traceback string, no python file paths.
     assert "traceback" not in payload
     assert "Traceback" not in error_events[0]["data"]
