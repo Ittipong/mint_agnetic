@@ -298,7 +298,7 @@ async def _propose_core(
     # with the amount only and the Other-floor accepted it. Other-floor is for a
     # description that matches NO category, never for a missing description.
     known_no_wallet = (state.get("user_context") or {}).get("wallets") == []
-    if not known_no_wallet and not ((category_label or "").strip() or (note or "").strip()):
+    if not known_no_wallet and not _has_description(category_label, note, state):
         return _error_result(
             error=(f"no description — ask the user what the {amount} baht was "
                    f"for (e.g. \"{amount} บาทนี้เป็นค่าอะไรครับ\"), then propose. "
@@ -846,6 +846,25 @@ async def _propose_group_core(
 
 
 # ── Helpers (private) ──────────────────────────────────────────────────────
+
+
+# Labels that name the Other-floor itself rather than what the money was for.
+_OTHER_LABELS = {"อื่นๆ", "อื่น ๆ", "อื่น", "other", "others", "etc"}
+
+
+def _has_description(category_label: Optional[str], note: Optional[str], state: dict) -> bool:
+    """Gate B's "what for". An Other-ish label the USER did not type counts
+    as no description: seen live, the LLM invented category_label="อื่นๆ"
+    for "จด 250" to get past the plain empty check."""
+    label = (category_label or "").strip()
+    text = (note or "").strip()
+    if text and text.lower() not in _OTHER_LABELS:
+        return True
+    if not label:
+        return False
+    if label.lower() not in _OTHER_LABELS:
+        return True
+    return label in _last_user_text(state)  # "จด 250 อื่นๆ" — the user said it
 
 
 def _saved_card_refusal() -> ProposeResult:

@@ -701,3 +701,21 @@ def test_UT_T04f_refused_amount_only_keeps_the_pending_card(base_state):
         assert pending["status"] == "pending"
 
     asyncio.run(run())
+
+
+def test_UT_T04g_invented_other_label_is_not_a_description(base_state):
+    """UT-T04g: live, the LLM got past the empty check by inventing
+    category_label="อื่นๆ" for "จด 250". Only the USER saying อื่นๆ counts."""
+    from langchain_core.messages import HumanMessage
+
+    async def run():
+        base_state["messages"] = [HumanMessage("จด 250")]
+        _cmd, out = await _invoke_propose(
+            state=base_state, args={"amount": 250, "type": "expense", "category_label": "อื่นๆ"})
+        assert out["kind"] == "missing_description"
+        base_state["messages"] = [HumanMessage("จด 250 อื่นๆ")]
+        _cmd, out = await _invoke_propose(
+            state=base_state, args={"amount": 250, "type": "expense", "category_label": "อื่นๆ"})
+        assert "error" not in out
+
+    asyncio.run(run())

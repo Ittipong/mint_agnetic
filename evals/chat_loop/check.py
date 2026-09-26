@@ -22,7 +22,7 @@ E = {
  "S18_add_card": {0: {"prop": {"amount": 890, "wallet_id": "54bdd26a-2348-55ec-821f-177bdd673dfa"}}},
  "S19_add_noamount_cat": {0: {"noprop": True}},
  "S20_emergency": {0: {"need": ["37,005"], "forbid": ["43,708"]}},
- "S21_afford": {0: {"need": ["54,167", "37,005"], "forbid": ["68,167", "43,708"]}},
+ "S21_afford": {0: {"need": ["17,161"], "forbid": ["68,167", "43,708", "24,458"]}},
  "S23_halluc": {0: {"need": ["44,334", "ไม่ใช่"]}},
  "S25_offtopic": {0: {"forbid": ["```", "sorted("]}},
  "S26_cash_spend": {0: {"need": ["1,387"]}},
