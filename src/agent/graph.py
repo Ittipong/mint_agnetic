@@ -68,10 +68,6 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import create_react_agent
 
 from src.agent.prompts import render_system_prompt
-from src.agent.user_preferences import (
-    format_about_user_block,
-    load_user_preferences,
-)
 from src.agent.state import AgentState
 from src.agent.tools import ALL_TOOLS
 from src.agent.validators.numerical import make_validator_post_model_hook
@@ -213,10 +209,12 @@ def _make_prompt(state: AgentState) -> list:
     """
     today_iso = date.today().isoformat()
     user_id = state.get("user_id") or ""
-    # `user_preferences` is loaded once per turn by `_pre_turn_hook` and merges
-    # across the react boundary (scalar channel). Render it into [about_user];
     # absent/no-consent → "" → the placeholder collapses to nothing.
-    about_user = format_about_user_block(state.get("user_preferences"))
+    # 2026-09-27: `[about_user]` is gone with the retired `user_preferences` store
+    # (see docs — the table never held a row, and the owner has dropped the
+    # design). The prompt renders with an empty block, which is exactly what it
+    # already did for every real user.
+    about_user = ""
     system_text = render_system_prompt(
         today=today_iso, user_id=user_id, about_user=about_user,
     )
@@ -268,14 +266,11 @@ async def _pre_turn_hook(state: AgentState) -> dict:
     Scalar keys (`user_context`, validator scratch, `__repo__`) use the
     default replace-reducer; setting them here propagates verbatim.
 
-    Async because it loads `user_preferences` from the backend DB once per
+    Async because of the other per-turn loads it performs; the `user_preferences`
     turn (one round-trip, like the catalog). Degrades to None when the pool
-    is unwired (tests) — the prompt simply renders without `[about_user]`.
+    load was removed with that store (2026-09-27).
     """
-    user_preferences = await load_user_preferences(state.get("user_id") or "")
     return {
-        # Durable user context for the [about_user] prompt block (scalar).
-        "user_preferences": user_preferences,
         # Per-turn append channels — explicit reset via the sentinel.
         "tool_outputs_this_turn": ["__RESET__"],
         "emitted_blocks_this_turn": ["__RESET__"],

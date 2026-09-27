@@ -28,12 +28,6 @@ CRITICAL — emit_suggestions NOT in ALL_TOOLS:
 
 RETIRED — memory_recall / memory_write (2026-06-02):
     The free-text LangGraph-store memory tools were retired once
-    `set_user_preference` + the always-on `[about_user]` block superseded
-    them. They were optional (the LLM rarely called memory_recall), unverified
-    (no consent/provenance), and overlapped with user_preferences'
-    `financial_notes`. Their only consumer was the BaseStore, so the store
-    (utils/store_factory.py) was removed with them. See
-    docs/user_preferences.md.
 
 The tool count (6) is enforced by `tests/test_tools_registry.py::UT_T00`.
 """
@@ -48,7 +42,6 @@ from .codeact import run_python
 from .emit_suggestions import emit_suggestions
 from .get_user_context import get_user_context
 from .propose_transaction import propose_transaction
-from .user_preferences_tool import set_user_preference
 from .wallet_required_cta import wallet_required_cta
 
 
@@ -65,9 +58,6 @@ ALL_TOOLS = [
     # (src/agent/suggest_followups.py) AFTER the answer, so they are guaranteed
     # on non-ADD/non-crisis turns and a wildcard slot is locked in code.
     # Durable user preferences (financial context / AI style). Read path is the
-    # [about_user] prompt block injected every turn (src/agent/user_preferences.py);
-    # this tool is the WRITE side. PDPA consent-gated for personal fields.
-    set_user_preference,
     # Advisor playbook (Wave 5) — static framework lookup; load JIT for
     # major-decision topics (home/refi/car/debt/tax/invest/discipline).
     get_advice_playbook,
@@ -81,7 +71,6 @@ __all__ = [
     "get_user_context",
     "run_python",
     "propose_transaction",
-    "set_user_preference",
     "wallet_required_cta",
     "emit_suggestions",
     "get_advice_playbook",

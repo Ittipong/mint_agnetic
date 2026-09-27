@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 
 
-def test_UT_T00_ALL_TOOLS_has_exactly_six_entries():
-    """UT-T00: the tool registry must expose EXACTLY 6 tools.
+def test_UT_T00_ALL_TOOLS_has_exactly_five_entries():
+    """UT-T00: the tool registry must expose EXACTLY 5 tools.
 
     History — count went 7 → 6 when `wallet_required_cta` was dropped from
     ALL_TOOLS; 6 → 8 in Wave 5 (+get_advice_playbook, +get_app_capability);
@@ -31,8 +31,8 @@ def test_UT_T00_ALL_TOOLS_has_exactly_six_entries():
     """
     from src.agent.tools import ALL_TOOLS
 
-    assert len(ALL_TOOLS) == 6, (
-        f"expected 6 tools (memory_recall/memory_write retired), "
+    assert len(ALL_TOOLS) == 5, (
+        f"expected 5 tools (set_user_preference retired with its store), "
         f"found {len(ALL_TOOLS)}: {[t.name for t in ALL_TOOLS]}"
     )
 
@@ -76,8 +76,7 @@ def test_UT_T00_expected_tool_names_match_phase2_spec():
         "get_user_context",
         "run_python",
         "propose_transaction",
-        "set_user_preference",
-        "get_advice_playbook",
+            "get_advice_playbook",
         "get_app_capability",
     }
     assert "emit_suggestions" not in {t.name for t in ALL_TOOLS}, (

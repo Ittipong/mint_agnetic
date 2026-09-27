@@ -78,7 +78,6 @@ from src.agent.db import (
 from src.agent.endpoints.slip_handler import handle_slip_chat
 from src.agent.endpoints.voice_handler import handle_voice_chat
 from src.agent.entity_catalog import load_entity_catalog, set_catalog_pool
-from src.agent.user_preferences import set_preferences_pool
 from src.agent.graph import build_graph
 from src.agent.llm_openrouter import make_llm_call, make_multimodal_call
 from src.agent.messages_repo import MESSAGES_DDL, MessagesRepo
@@ -231,8 +230,7 @@ async def lifespan(app: FastAPI):
     # threading a pool through every tool signature.
     set_catalog_pool(backend_pool)
     # Same backend pool feeds the durable user-preferences read/write path
-    # (pre_turn loads [about_user]; the set_user_preference tool upserts).
-    set_preferences_pool(backend_pool)
+    # (the retired user_preferences store used to be loaded here, 2026-09-27).
 
     # 4. Idempotent DDL — agent owns its own metadata tables.
     async with pool.connection() as conn:
@@ -268,7 +266,8 @@ async def lifespan(app: FastAPI):
     # 6. Build the v3 ReAct graph. `repo` is captured by the pre-turn hook
     # so propose_transaction reaches it via state["__repo__"] every turn.
     # No `store=` — the LangGraph BaseStore was retired with memory_*
-    # (its only consumers). Durable user context now lives in user_preferences.
+    # (its only consumers). There is no durable cross-thread user memory now:
+    # the `user_preferences` store that replaced it was retired 2026-09-27.
     agent_graph = await build_graph(
         repo=repo,
         checkpointer=saver,

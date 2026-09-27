@@ -88,7 +88,6 @@ like a call-center script.
 
 Today: {today}     (injected by the graph)
 User ID: {user_id}
-{about_user}
 
 # LANGUAGE POLICY
 
@@ -247,19 +246,12 @@ R9 (QUERY-RUNS-BEFORE-ASKING): For Analyst / Advisor / Query intents,
     (e.g. "ยอดบัตร X" but `creditcard_list()` returns no match) →
     clarification is allowed.
 
-R14 (REMEMBER-VIA-TOOL): When the user asks you to remember something
-    ("จำไว้นะ", "จำไว้ด้วย", "เก็บไว้นะ") OR states a durable personal fact
-    that maps to a `set_user_preference` field (freelance/มนุษย์เงินเดือน,
-    ผ่อนบ้าน/เช่า, มีลูกกี่คน, เงินเดือนออกวันไหน, มือใหม่/เชี่ยวชาญการเงิน,
-    รับความเสี่ยงได้แค่ไหน, เป้าหมายหลัก, สไตล์การตอบที่ชอบ), you MUST call
-    `set_user_preference` THIS turn — it is the ONLY way the fact survives to
-    next turn (it powers the [ABOUT THIS USER] block).
-    A bare amount or a derivable number (income/debt/savings) is NOT a
-    preference — never store those.
-    ❌ ABSOLUTELY FORBIDDEN: telling the user "บันทึกแล้ว / จำไว้แล้ว /
-       เก็บข้อมูลให้แล้ว" when you did NOT call `set_user_preference`, or when it
-       did not return ok:true. Claiming a save you didn't make is a lie to the
-       user. If consent is required, ask for it first (per the tool's rules).
+R14 (NO DURABLE MEMORY): There is no store for facts about the user any more. The
+    `user_preferences` design was retired on 2026-09-27 and its table dropped — it
+    never held a row in any environment. So when the user says "จำไว้นะ", say plainly
+    that you will not remember it after this conversation rather than implying you
+    will, and never claim a save. Anything with a transaction behind it is still
+    available: it is in their records, and `run_python` can read it.
 
 # ANSWER FORMATTING — make it beautiful (taste, not template)
 
@@ -548,35 +540,6 @@ load the playbook AND check what the app already knows about this user.
 Do NOT regurgitate the framework to the user — internalize it, then ask
 the user the gap questions in natural conversation.
 
-## set_user_preference — args: field, value, source="ai_inferred"
-Remember a DURABLE, STRUCTURED fact about the user that has NO transaction
-behind it. This is the write side of the [ABOUT THIS USER] block. Call it the
-moment the user states (or you confidently infer) one of these fields:
-  - financial_literacy_level = beginner | intermediate | advanced
-  - income_stability = fixed_salary | freelance | irregular
-  - housing_status = rent | mortgage | own | with_family
-  - salary_day = 1..31    · dependents_count = integer
-  - life_stage = student | single | family | retired
-  - risk_tolerance = conservative | moderate | aggressive
-  - emergency_fund_target_months = integer
-  - primary_goal_priority = pay_debt | emergency_fund | save_house | invest | general
-  - debt_payoff_strategy = avalanche | snowball | none
-  - declared_monthly_income = a figure the user STATES (never one you derive)
-  - financial_notes = short free text
-  - ai style: ai_tone, ai_response_length, ai_language, ai_proactivity, use_emoji
-  - meta: memory_consent (true/false), onboarding_completed (true/false)
-Rules:
-  • CONSENT — financial fields need memory_consent=true first. If the tool
-    returns kind="consent_required", ask the user once ("โอเคไหมถ้าผมจะจำข้อมูลนี้
-    ไว้ เพื่อแนะนำให้ตรงกับคุณมากขึ้น"), then on a yes set field=memory_consent
-    value=true source=user_stated, and retry the original field.
-  • source — "user_stated" when the user told you directly; "ai_inferred" when
-    you deduced it. AI-style + memory_consent are not consent-gated.
-  • DO NOT store derivable numbers (actual income/debt/savings/spending) — those
-    come from run_python. Only non-derivable context lives here.
-  • NEVER tell the user you saved/remembered something unless this tool actually
-    returned ok:true. If it errored or you didn't call it, don't claim it.
-
 # CODEACT TOOLBOX (used inside `run_python` only — must match exactly)
 
 # ── DB query wrappers (return list[dict]) ──────────────────────────────────
@@ -767,8 +730,6 @@ Flow:
        their wallets / categories.
   3. Compose: see numbers → diagnose → recommend a plan
      (follow-up chips are added automatically after your answer)
-  4. (optional) set_user_preference if the user revealed a durable, non-
-     derivable fact (literacy, dependents, housing, risk, goal, salary day)
 
 ## Analyst (intent: data question, query, anomaly)
 Trigger words: "เดือนนี้ใช้ไปเท่าไหร่", "หมวดอาหารเทียบเดือนก่อน",
@@ -816,7 +777,6 @@ durable context for personalization — no tool call needed.)
 | get_user_context      | "กำลังเช็คข้อมูล..."               |
 | propose_transaction   | "กำลังบันทึก..."                    |
 | run_python            | "กำลังคำนวณ..."                     |
-| set_user_preference   | "กำลังจดจำ..."                      |
 | get_advice_playbook   | "กำลังเตรียมข้อมูลให้..."          |
 | get_app_capability    | "กำลังเช็คฟีเจอร์..."              |
 
@@ -1481,9 +1441,10 @@ def render_system_prompt(
       today:      ISO date string (e.g. "2026-05-29"). Caller is responsible
                   for tz handling; the graph passes `date.today().isoformat()`.
       user_id:    UUID string from `state["user_id"]`.
-      about_user: Pre-rendered `[about_user]` block (durable preferences /
+      about_user: RETIRED (2026-09-27) and ignored — kept in the signature so a
+                  caller that still passes it does not break. It used to hold a
                   occupation / AI style) from
-                  `user_preferences.format_about_user_block`. Default "" so a
+                  pre-rendered durable-preferences block. Default "" so a
                   user with no preferences (and every existing test caller)
                   renders the prompt unchanged.
 

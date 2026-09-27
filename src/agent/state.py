@@ -165,13 +165,6 @@ class AgentState(TypedDict, total=False):
     user_context: Optional[UserContext]
 
     # — durable user preferences (loaded once per turn by the pre-turn hook
-    #   from the BACKEND DB; rendered into the `[about_user]` prompt block) —
-    # Scalar REPLACE channel, so it merges across the prebuilt react subgraph
-    # boundary (like `wallet_id` / `user_context`) and reaches `_make_prompt`.
-    # MUST be declared here or LangGraph drops it at the graph boundary. None
-    # when the user has no row, no consent, or the backend pool is unwired
-    # (tests). Shape: the dict returned by `user_preferences.load_user_preferences`.
-    user_preferences: Optional[dict]
 
     # — per-turn outputs (validator reads, SSE adapter forwards, append-only) —
     tool_outputs_this_turn: Annotated[list[ToolOutput], append_reducer]

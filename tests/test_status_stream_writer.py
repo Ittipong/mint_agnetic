@@ -86,7 +86,6 @@ _TOOL_WRITER_PATHS = {
     "wallet_required_cta": "src.agent.tools.wallet_required_cta.get_stream_writer",
     "emit_suggestions": "src.agent.tools.emit_suggestions.get_stream_writer",
     "run_python": "src.agent.tools.codeact.get_stream_writer",
-    "set_user_preference": "src.agent.tools.user_preferences_tool.get_stream_writer",
 }
 
 
@@ -97,7 +96,6 @@ _EXPECTED_STATUS = {
     "wallet_required_cta": "กำลังเช็คกระเป๋า...",
     "emit_suggestions": "กำลังคิดคำถามต่อ...",
     "run_python": "กำลังคำนวณ...",
-    "set_user_preference": "กำลังจดจำ...",
 }
 
 
@@ -335,37 +333,6 @@ def test_UT_SW01e_run_python_emits_status_once() -> None:
     statuses = [c for c in calls if isinstance(c, dict) and "status" in c]
     assert len(statuses) == 1
     assert statuses[0]["status"] == _EXPECTED_STATUS["run_python"]
-
-
-# ---------------------------------------------------------------------------
-# UT-SW01f — set_user_preference emits exactly one status_token
-# ---------------------------------------------------------------------------
-
-
-def test_UT_SW01f_set_user_preference_emits_status_once() -> None:
-    """UT-SW01f: one `set_user_preference` invocation pushes exactly one
-    `{"status": "กำลังจดจำ..."}`. Status is emitted at tool entry, before any
-    validation/DB work, so it fires even when the write later short-circuits.
-    set_user_preference has an InjectedToolCallId → invoke via the ToolCall
-    protocol (state in `args`, id in `id`)."""
-    from src.agent.tools.user_preferences_tool import set_user_preference
-
-    factory, calls = _make_writer_recorder()
-
-    async def _run() -> None:
-        with patch(_TOOL_WRITER_PATHS["set_user_preference"], factory):
-            await set_user_preference.ainvoke({
-                "name": "set_user_preference",
-                "args": {"field": "ai_tone", "value": "friendly",
-                         "state": {"user_id": "u-1"}},
-                "type": "tool_call",
-                "id": "tc-sw01f",
-            })
-
-    asyncio.run(_run())
-    statuses = [c for c in calls if isinstance(c, dict) and "status" in c]
-    assert len(statuses) == 1
-    assert statuses[0]["status"] == _EXPECTED_STATUS["set_user_preference"]
 
 
 # ---------------------------------------------------------------------------
