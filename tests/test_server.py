@@ -271,8 +271,10 @@ def test_UT_SR01_chat_stream_text_routes_to_react() -> None:
         )
         assert resp.status_code == 200
         events = _parse_sse(resp.text)
-        # Status tokens fire first (one per word of "กำลังคิด...").
-        assert any(e["event"] == "status_token" for e in events), events
+        # No generic "กำลังคิด..." status opens a text turn any more (the
+        # client shows a quiet dot until a real step arrives).
+        assert not any(e["event"] == "status_token" and "กำลังคิด" in e["data"]
+                       for e in events), events
         # Answer tokens carry the streamed deltas.
         answer_tokens = [e for e in events if e["event"] == "answer_token"]
         assert "".join(e["data"] for e in answer_tokens) == "สวัสดีครับ"

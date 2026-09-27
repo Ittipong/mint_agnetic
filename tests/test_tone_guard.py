@@ -23,3 +23,15 @@ def test_UT_TG03_never_empties_and_respects_voiced_feelings():
     assert strip_unasked_empathy(only, "ควรจ่ายเท่าไหร่") == only
     head = "ฟังแล้วเข้าใจเลยครับว่าน่ากังวลใจ" + _BODY
     assert strip_unasked_empathy(head, "เครียดมาก หนี้บัตรเยอะ") == head
+
+
+def test_UT_TG04_progress_opener_is_dropped_from_the_answer():
+    """UT-TG04: the answer opened with "กำลังคำนวณยอดเงินคงเหลือให้ครับ" — a step
+    the waiting UI already showed (2026-09-28). Dropped; a lone line stays."""
+    from src.agent.streaming.tone_guard import strip_progress_opener
+
+    head = "กำลังคำนวณยอดเงินคงเหลือให้ครับ\n\nเงินพอถึงสิ้นเดือนแน่นอนครับ"
+    assert strip_progress_opener(head) == "เงินพอถึงสิ้นเดือนแน่นอนครับ"
+    assert strip_progress_opener("กำลังดูให้ครับ") == "กำลังดูให้ครับ"
+    long_first = "กำลังจะบอกว่า " + "ก" * 90 + "\n\nต่อ"
+    assert strip_progress_opener(long_first) == long_first

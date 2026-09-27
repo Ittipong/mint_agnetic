@@ -106,11 +106,6 @@ from src.agent.utils.version_router import REFUSE_REASON, is_v3_active
 # history list tidy; longer first messages are truncated with an ellipsis.
 _TITLE_MAX_LEN = 40
 
-# Status template streamed by the text branch before the answer token stream.
-# v3 doesn't classify intents up-front (ReAct does it implicitly), so we
-# always show the neutral "thinking..." status. The mobile UI animates it
-# until the first answer_token arrives.
-_STATUS_THINKING = "กำลังคิด..."
 
 # Sentinel value the mobile client may send when the user hasn't picked a
 # specific wallet (forwarded to propose_transaction's index-0 cascade).
@@ -443,10 +438,9 @@ async def _text_graph_stream(
     """
     g = app.state.agent_graph
 
-    # Tip-of-turn status — v3 doesn't pre-classify intent (ReAct decides via
-    # tool calls), so we always start with the neutral "thinking" template.
-    async for chunk in _stream_status_tokens(_STATUS_THINKING):
-        yield chunk
+    # No tip-of-turn "กำลังคิด..." (owner 2026-09-28: the waiting UI follows
+    # ChatGPT — a quiet dot until a REAL step exists, then one status line).
+    # The first thing the client sees is the preamble / a tool step.
 
     # The v3 graph reads from state["messages"] for ReAct's HumanMessage
     # input. Per Wave 4 graph design, the pre_turn_hook clears scratch

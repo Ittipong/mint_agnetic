@@ -59,7 +59,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 from src.agent.session_logger import slog, slog_error
 from src.agent.streaming.user_errors import error_event
 from src.agent.streaming.block_emitter import emit_block, validate_block
-from src.agent.streaming.tone_guard import strip_unasked_empathy
+from src.agent.streaming.tone_guard import strip_progress_opener, strip_unasked_empathy
 from src.agent.validators.numerical import _WARNING_MARKER
 
 
@@ -388,7 +388,7 @@ class _MessageRouter:
 
     def _release_answer(self) -> list[dict]:
         held = _strip_internal_markers("".join(self._held))
-        guarded = strip_unasked_empathy(held, self._user_text)
+        guarded = strip_unasked_empathy(strip_progress_opener(held), self._user_text)
         if guarded != held:
             slog("sse_adapter", f"dropped unasked empathy opener: {held[:80]!r}")
         held = guarded

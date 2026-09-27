@@ -51,3 +51,18 @@ def strip_unasked_empathy(answer_head: str, user_text: str) -> str:
     if len(first) > _MAX_OPENER_CHARS or not _PROJECTED_FEELING.search(first):
         return answer_head
     return rest.lstrip("\n")
+
+
+# "กำลังคำนวณยอดให้ครับ" as the answer's first line: a progress status the
+# model wrote into the final answer. The waiting UI already showed that step
+# (and lists it under "คิดอยู่ N วิ"), so in the answer it is noise.
+_PROGRESS_OPENER = re.compile(r"^กำลัง\S[^\n]{0,70}$")
+
+
+def strip_progress_opener(answer_head: str) -> str:
+    """Drop a short "กำลัง…" first paragraph when another paragraph follows."""
+    head = answer_head.lstrip()
+    first, sep, rest = head.partition("\n\n")
+    if sep and rest.strip() and _PROGRESS_OPENER.match(first.strip()):
+        return rest.lstrip("\n")
+    return answer_head
