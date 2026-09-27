@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from src.agent.starters import (BKK, EXAMPLES, QUESTIONS, TxRow, assemble, habit_chips,
+from src.agent.starters import (BKK, EXAMPLES, QUESTIONS, TxRow, assemble, frequent_chips,
+                                habit_chips,
                                 resolve_example_categories)
 
 NOW = datetime(2026, 9, 26, 8, 30, tzinfo=BKK)   # Saturday morning
@@ -66,15 +67,34 @@ def test_UT_ST05_questions_are_many_generic_examples():
 
 
 def test_UT_ST06_records_then_questions():
-    """A user with no history gets the example records; one with history but
-    no habit this hour gets no record card; the user's own habits win."""
+    """A user with no history gets the example records; the user's own habits
+    win; and the card is never empty (owner 2026-09-28): with no habit this
+    hour it still falls back to the system examples."""
     new = assemble([], has_history=False)
     assert [i["kind"] for i in new[:2]] == ["example", "example"]
     assert new[2]["label"] == "Nimo ทำอะไรได้บ้าง"          # a first-timer asks this first
-    assert assemble([], has_history=True)[0]["kind"] == "ask"
+    late_night = assemble([], has_history=True)
+    assert [i["kind"] for i in late_night[:2]] == ["example", "example"]
     log = [{"label": f"x {i}", "send": f"x {i}", "kind": "log", "reason": ""} for i in range(5)]
     mixed = assemble(log, limit=3, has_history=True)
     assert [i["kind"] for i in mixed[:4]] == ["log", "log", "log", "ask"]
+
+
+def test_UT_ST08_frequent_records_fill_the_card_at_any_hour():
+    """UT-ST08: at 01:00 the dev user had NO record chip (habit window ±2 h).
+    Frequent records of the last 30 days fill it: habit first, then frequent,
+    then examples; monthly bills and today's records are left out."""
+    at_1am = datetime(2026, 9, 26, 1, 0, tzinfo=BKK)
+    coffee = _rows("Starbucks", 95, 8, [1, 2, 3, 5, 8])
+    lunch = _rows("ข้าวแกง", 65, 12, [1, 2, 4])
+    rent = _rows("ค่าเช่า", 9500, 9, [0, 31, 62], day_of_month=1)
+    rows = coffee + lunch + rent
+    assert habit_chips(rows, at_1am) == []
+    freq = frequent_chips(rows, at_1am)
+    assert [c["label"] for c in freq] == ["Starbucks 95", "ข้าวแกง 65"]
+    assert all(c["hint"] == "จดบ่อย" for c in freq)
+    card = assemble(habit_chips(rows, at_1am), 3, has_history=True, frequent=freq)[:3]
+    assert [c["label"] for c in card] == ["Starbucks 95", "ข้าวแกง 65", "กาแฟ 60"]
 
 
 def test_UT_ST07_endpoint_never_errors(monkeypatch):

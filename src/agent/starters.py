@@ -43,6 +43,8 @@ MAX_LOG = 3
 MONTHLY_MAX_PER_MONTH = 1.5   # ≤ this many per month = a monthly item
 
 EXAMPLE_HINT = "ตัวอย่าง · แตะแล้วแก้ยอดได้"
+FREQUENT_HINT = "จดบ่อย"
+FREQUENT_DAYS = 30
 # category_name = a default category every new user has; build_starters swaps in
 # that user's own sync_id (a user who renamed it just gets no icon).
 EXAMPLES = [
@@ -166,10 +168,65 @@ def habit_chips(rows: list[TxRow], now: datetime) -> list[dict]:
     return out
 
 
-def assemble(log: list[dict], limit: int = MAX_LOG, has_history: bool = False) -> list[dict]:
-    """Records first (the user's own, else examples for a user with no
-    history), then every example question."""
-    records = log[:limit] if log else ([] if has_history else [dict(e) for e in EXAMPLES])
+def frequent_chips(rows: list[TxRow], now: datetime) -> list[dict]:
+    """The user's most-recorded items of the last 30 days, best first.
+
+    Why: habit chips only match records made within ±2 h of now, so a user
+    opening the chat at 1 AM (or any hour without a habit) got NO record card
+    at all — the logging shortcut, the product's core promise, vanished
+    (owner 2026-09-28). Monthly items (salary, rent) and anything already
+    recorded today are left out; one chip per category. Pure — no I/O.
+    """
+    today = now.date()
+    since = today - timedelta(days=FREQUENT_DAYS)
+    groups: dict[str, list[TxRow]] = defaultdict(list)
+    for r in rows:
+        key = " ".join(r.label.split()).lower()
+        if key:
+            groups[key].append(r)
+    scored = []
+    for items in groups.values():
+        recent = [i for i in items if i.tx_date >= since]
+        if len(recent) < MIN_OCCURRENCES or any(i.tx_date == today for i in items):
+            continue
+        months = {(i.tx_date.year, i.tx_date.month) for i in items}
+        if len(items) / len(months) <= MONTHLY_MAX_PER_MONTH:
+            continue  # a monthly bill — offered around its day by habit_chips
+        latest = max(items, key=lambda i: i.logged_at)
+        amounts = Counter(i.amount for i in recent)
+        top = max(amounts.values())
+        usual = next(i.amount for i in sorted(recent, key=lambda i: i.logged_at, reverse=True)
+                     if amounts[i.amount] == top)
+        text = f"{latest.label} {_fmt_amount(usual)}"
+        if Counter(i.type for i in items).most_common(1)[0][0] == "income" \
+                and not latest.label.startswith("ได้"):
+            text = f"ได้{text}"
+        cat, cat_id = Counter((i.category, i.category_id) for i in items).most_common(1)[0][0]
+        scored.append((len(recent), {"label": text, "send": text, "kind": "log",
+                                     "reason": f"frequent:{len(recent)}/{FREQUENT_DAYS}d",
+                                     "category_id": cat_id or None, "category_name": cat or None,
+                                     "hint": FREQUENT_HINT}))
+    scored.sort(key=lambda s: s[0], reverse=True)
+    return [chip for _, chip in scored]
+
+
+def assemble(log: list[dict], limit: int = MAX_LOG, has_history: bool = False,
+             frequent: Optional[list[dict]] = None) -> list[dict]:
+    """Record card, then every example question.
+
+    The card always has something to tap (owner 2026-09-28), filled in this
+    order up to `limit`: habits for this hour → the user's frequent records →
+    the system examples. One chip per category/label."""
+    records: list[dict] = []
+    seen: set[str] = set()
+    for chip in [*log, *(frequent or []), *(dict(e) for e in EXAMPLES)]:
+        key = chip.get("category_name") or chip["label"]
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append(chip)
+        if len(records) >= limit:
+            break
     return records + question_chips(has_history)
 
 
@@ -219,7 +276,8 @@ async def build_starters(user_id: str, *, limit: int = MAX_LOG,
             cats = {r["name"]: r["sync_id"] for r in await conn.fetch(_CAT_SQL, user_id)}
         rows = [TxRow(r["type"], Decimal(r["amount"]), r["label"] or "",
                       r["logged_at"], r["tx_date"], r["category"], r["category_id"]) for r in tx]
-        items = assemble(habit_chips(rows, now), limit, has_history=len(rows) >= MIN_OCCURRENCES)
+        items = assemble(habit_chips(rows, now), limit, has_history=len(rows) >= MIN_OCCURRENCES,
+                         frequent=frequent_chips(rows, now))
         resolve_example_categories(items, cats)
     except Exception as exc:  # noqa: BLE001 — chips are nice-to-have
         slog("starters", f"failed, serving examples: {type(exc).__name__}: {exc}")
@@ -228,5 +286,6 @@ async def build_starters(user_id: str, *, limit: int = MAX_LOG,
     return items
 
 
-__all__ = ["EXAMPLES", "QUESTIONS", "TxRow", "assemble", "build_starters", "habit_chips",
+__all__ = ["EXAMPLES", "QUESTIONS", "TxRow", "assemble", "build_starters", "frequent_chips",
+           "habit_chips",
            "question_chips", "resolve_example_categories"]
