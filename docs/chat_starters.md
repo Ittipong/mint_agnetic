@@ -13,20 +13,28 @@ There is no LLM. The screen must render on every chat open, instantly
 
 ## What the user sees
 
+Two parts: the records card, then a long list of example questions.
+
 | kind | when | example |
 |---|---|---|
-| `log` — a habit | recorded ≥3× in 90 days near this hour (±2 h); not yet today; one chip per category | 08:30 → "Starbucks 95", 12:15 → "ข้าวแกง 65", 18:40 → "BTS 44" |
+| `log` — a habit | recorded ≥3× in 90 days near this hour (±2 h); not yet today; one chip per category; at most 3 | 08:30 → "Starbucks 95", 12:15 → "ข้าวแกง 65", 18:40 → "BTS 44" |
 | `log` — a monthly item | ≤1.5×/month (salary, rent, a subscription): only ±1 day around its usual day, and only while this month's is unrecorded | "ได้เงินเดือน 42,000" on the 25th, "Netflix 419" on the 10th |
-| `ask` | a card due within 5 days with a balance; a budget at ≥80% | "บัตร KTC รอบนี้ต้องจ่ายเท่าไหร่", "งบอาหารเดือนนี้เกินไปเท่าไหร่" |
-| fill | up to 3 items: questions about their own data if they have history, generic examples if not | "สัปดาห์นี้ใช้ไปเท่าไหร่" / "กาแฟ 60" |
+| `example` | a user with no history (no records card for a user who has history but no habit this hour) | "กาแฟ 60", "ข้าวเที่ยง 80" |
+| `ask` | always: the fixed list of 14 example questions | "หมวดไหนใช้เยอะที่สุดเดือนนี้", "บัตรเครดิตรอบนี้ต้องจ่ายเท่าไหร่" |
 
 The amount on a `log` chip is the user's usual one (the most common, and the
 latest on a tie).
 
+The questions are deliberately generic (owner, 2026-09-27). Their job is to
+show how much Nimo can answer, so there are many, they scroll, and they quote
+none of the user's numbers. An earlier version built questions from the
+user's state ("งบอาหารเกินไปเท่าไหร่" at 103%) and was dropped. A user with no
+data sees "Nimo ทำอะไรได้บ้าง" first.
+
 ## Contract for clients
 
 ```
-GET /chat/starters?user_id=<uuid>&limit=5
+GET /chat/starters?user_id=<uuid>&limit=3     # limit = max record chips
 → {"items": [{"label", "send", "kind": "log"|"ask"|"example", "reason",
               "hint"?, "category_id"?, "category_name"?}]}
 ```
@@ -34,7 +42,7 @@ GET /chat/starters?user_id=<uuid>&limit=5
 - `label` always equals `send`. A chip that shows one sentence and sends
   another puts words in the user's mouth.
 - `hint` is the one display line that says why the chip is there
-  ("ปกติจดเวลานี้", "ใช้ไป 103% ของงบ", "ครบกำหนดใน 3 วัน"), or null.
+  on record chips ("ปกติจดเวลานี้", "ปกติจดวันที่ 25"), null on questions.
 - Record chips (`log`, and `example` records) carry the category:
   `category_id` is the user's own category sync_id, used to draw its icon.
   For examples it is looked up by name and is null if the user renamed it.
@@ -46,7 +54,7 @@ GET /chat/starters?user_id=<uuid>&limit=5
   meant to make.
 - The endpoint never errors. If it fails it serves the examples, and the app
   keeps its own static list as a last resort.
-- `reason` (for example `habit:10/12@8h`, `monthly:day25`, `budget:103%`) is
+- `reason` (for example `habit:10/12@8h`, `monthly:day25`, `example`) is
   for analytics, not display.
 
 ## Not yet

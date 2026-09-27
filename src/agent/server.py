@@ -895,17 +895,16 @@ async def chat_voice(
 
 
 @app.get("/chat/starters")
-async def chat_starters(user_id: str, limit: int = 5):
-    """Personal starter chips for the empty chat screen (no LLM, fast).
+async def chat_starters(user_id: str, limit: int = 3):
+    """Starter chips for the empty chat screen (no LLM, fast).
 
-    Items: {label, send, kind: log|ask|example, reason}. Tapping one sends
-    `send` as the user's message; clients should pass
-    `origin="starter:<kind>"` on that /chat/stream call so taps are measured.
-    Never errors — falls back to generic examples.
+    Items: the user's record chips (kind log, or example for a user with no
+    history — at most `limit`), then the fixed example questions (kind ask).
+    See docs/chat_starters.md for the tap contract. Never errors.
     """
     from src.agent.starters import build_starters
 
-    items = await build_starters(user_id, limit=max(1, min(limit, 8)))
+    items = await build_starters(user_id, limit=max(1, min(limit, 5)))
     return {"items": items}
 
 
