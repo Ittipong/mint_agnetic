@@ -116,18 +116,18 @@ async def test_UT_SG06_emits_llm_chips_verbatim_no_wildcard():
     appended (the old action-chip mechanism is gone)."""
     block = await _build(
         gen_return=_gen(items=[
-            {"label": "หมวดไหนใช้เยอะสุด", "send": "หมวดไหนใช้เยอะสุด"},
-            {"label": "เทรนด์ 3 เดือน", "send": "เทรนด์ย้อนหลัง 3 เดือนเป็นยังไง"},
-            {"label": "เทียบเดือนก่อน", "send": "เดือนนี้ใช้เยอะกว่าเดือนก่อนไหม"},
+            {"label": "ช้อปเดือนนี้เกินไปไหม", "send": "ช้อปเดือนนี้เกินไปไหม"},
+            {"label": "เทรนด์ 3 เดือนน่าห่วงไหม", "send": "เทรนด์ย้อนหลัง 3 เดือนน่าห่วงไหม"},
+            {"label": "ใช้เยอะกว่าปกติไหม", "send": "เดือนนี้ใช้เยอะกว่าปกติไหม"},
         ]),
     )
     sends = _sends(block)
     assert len(sends) == 3
     assert "ตั้งงบประมาณเดือนนี้" not in sends  # no auto wildcard
     assert sends == [
-        "หมวดไหนใช้เยอะสุด",
-        "เทรนด์ย้อนหลัง 3 เดือนเป็นยังไง",
-        "เดือนนี้ใช้เยอะกว่าเดือนก่อนไหม",
+        "ช้อปเดือนนี้เกินไปไหม",
+        "เทรนด์ย้อนหลัง 3 เดือนน่าห่วงไหม",
+        "เดือนนี้ใช้เยอะกว่าปกติไหม",
     ]
 
 
@@ -136,7 +136,7 @@ async def test_UT_SG07_two_chips_stay_two_not_padded():
     pad to 3 with a filler/wildcard)."""
     block = await _build(
         gen_return=_gen(items=[
-            {"label": "หมวดไหนใช้เยอะสุด", "send": "หมวดไหนใช้เยอะสุด"},
+            {"label": "ช้อปเดือนนี้เกินไปไหม", "send": "ช้อปเดือนนี้เกินไปไหม"},
             {"label": "เทรนด์ 3 เดือน", "send": "เทรนด์ย้อนหลัง 3 เดือน"},
         ]),
     )
@@ -178,10 +178,10 @@ async def test_UT_SG10_llm_failure_emits_nothing():
 
 async def test_UT_SG11_plain_string_items_normalized():
     """UT-SG11: legacy plain-string items are coerced to {label, send}."""
-    block = await _build(gen_return=_gen(items=["หมวดไหนใช้เยอะสุด", "  ", "เทรนด์"]))
+    block = await _build(gen_return=_gen(items=["ช้อปเดือนนี้เกินไปไหม", "  ", "เทรนด์"]))
     items = block["items"]
     assert len(items) == 2  # blank dropped
-    assert items[0] == {"label": "หมวดไหนใช้เยอะสุด", "send": "หมวดไหนใช้เยอะสุด"}
+    assert items[0] == {"label": "ช้อปเดือนนี้เกินไปไหม", "send": "ช้อปเดือนนี้เกินไปไหม"}
 
 
 async def test_UT_SG12_emitted_block_is_valid():
@@ -311,9 +311,9 @@ def test_UT_SUG_APPONLY_action_chips_the_chat_cannot_do_are_dropped():
         {"label": "ตั้งเป้าหมายออมเงิน", "send": "ตั้งเป้าหมายออมเงิน"},
         {"label": "ลบรายการนี้", "send": "ลบรายการกาแฟ"},
         {"label": "ควรออมเดือนละเท่าไหร่", "send": "ควรออมเดือนละเท่าไหร่ดี"},
-        {"label": "ตั้งแต่ต้นเดือนใช้ไปเท่าไหร่", "send": "ตั้งแต่ต้นเดือนใช้ไปเท่าไหร่"},
+        {"label": "เงินจะพอถึงสิ้นเดือนไหม", "send": "เงินจะพอถึงสิ้นเดือนไหม"},
     ])
-    assert [c["label"] for c in out] == ["ควรออมเดือนละเท่าไหร่", "ตั้งแต่ต้นเดือนใช้ไปเท่าไหร่"]
+    assert [c["label"] for c in out] == ["ควรออมเดือนละเท่าไหร่", "เงินจะพอถึงสิ้นเดือนไหม"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -328,24 +328,38 @@ def test_UT_SG20_repeat_of_an_earlier_question_is_dropped():
     out = sf._finalize(
         [
             {"kind": "deeper", "label": "หมวดไหนเยอะสุด", "send": "เดือนนี้หมวดไหน ใช้จ่ายเยอะที่สุด"},
-            {"kind": "deeper", "label": "เทียบเดือนก่อน", "send": "ช้อปปิ้งเทียบเดือนก่อนเป็นยังไง"},
+            {"kind": "decide", "label": "ช้อปเกินไปไหม", "send": "ช้อปเดือนนี้เกินไปไหม"},
         ],
         asked_before=["เดือนนี้ใช้จ่ายไปเท่าไหร่", "เดือนนี้หมวดไหนใช้จ่ายเยอะที่สุด"],
     )
-    assert [c["label"] for c in out] == ["เทียบเดือนก่อน"]
+    assert [c["label"] for c in out] == ["ช้อปเกินไปไหม"]
 
 
-def test_UT_SG21_mix_keeps_one_wider_chip_and_puts_it_last():
-    """UT-SG21: the owner wants drill-downs mixed with ONE sideways question.
-    Extra "wider" chips are dropped and the wider one always renders last."""
+def test_UT_SG21_lookup_chips_dropped_advisor_chips_kept():
+    """UT-SG21: owner 2026-09-28 — Nimo is an advisor; 84% of chips only
+    re-read what an app screen shows. Lookups are dropped in code (reply
+    chips excepted); advisor chips that name a figure are kept."""
     out = sf._finalize([
-        {"kind": "wider", "label": "วันไหนใช้เยอะสุด", "send": "วันไหนของสัปดาห์ที่ฉันใช้เงินเยอะสุด"},
-        {"kind": "deeper", "label": "ทำไมช้อปปิ้งสูง", "send": "ทำไมช้อปปิ้งเดือนนี้สูง"},
-        {"kind": "wider", "label": "ร้านประจำ", "send": "ร้านที่ฉันจ่ายบ่อยที่สุดคือที่ไหน"},
-        {"kind": "deeper", "label": "เทียบเดือนก่อน", "send": "เทียบกับเดือนก่อน"},
+        {"kind": "decide", "label": "หมวดช้อปปิ้งใช้อะไรไปบ้าง", "send": "หมวดช้อปปิ้งใช้อะไรไปบ้าง"},
+        {"kind": "decide", "label": "ยอดรวมทุกบัญชี", "send": "ยอดรวมทุกบัญชี"},
+        {"kind": "ahead", "label": "หมวดไหนใช้เยอะสุด", "send": "เดือนนี้หมวดไหนใช้เยอะสุด"},
+        {"kind": "decide", "label": "ช้อปเดือนนี้เกินไปไหม", "send": "ช้อปเดือนนี้เกินไปไหม"},
+        {"kind": "whatif", "label": "ลดช้อปครึ่งนึงเก็บได้เท่าไหร่",
+         "send": "ถ้าลดช้อปครึ่งนึง เก็บเงินได้เพิ่มเท่าไหร่"},
+        {"kind": "ahead", "label": "เงินพอถึงสิ้นเดือนไหม", "send": "เงินจะพอใช้ถึงสิ้นเดือนไหม"},
     ])
-    assert [c["label"] for c in out] == ["ทำไมช้อปปิ้งสูง", "เทียบเดือนก่อน", "วันไหนใช้เยอะสุด"]
+    assert [c["label"] for c in out] == [
+        "ช้อปเดือนนี้เกินไปไหม", "ลดช้อปครึ่งนึงเก็บได้เท่าไหร่", "เงินพอถึงสิ้นเดือนไหม"]
+    # Reply chips answer the assistant's question — never filtered as lookups.
+    reply = sf._finalize([{"kind": "reply", "label": "ยอดประมาณ 10,000", "send": "รายจ่ายคงที่ประมาณ 10,000"}])
+    assert len(reply) == 1
 
+
+def test_UT_SG21b_prompt_is_advisor_first_and_casual():
+    """UT-SG21b: prompt guard for the 2026-09-28 direction."""
+    t = sf._PROMPT_TEMPLATE
+    assert "THE SCREEN TEST" in t and 'kind="decide"' in t and 'kind="whatif"' in t
+    assert "casual" in t and "Never judging" in t
 
 def test_UT_SG22_asks_back_detects_thai_questions_without_question_mark():
     """UT-SG22: reply chips need the real answer, so a speculative chip call is

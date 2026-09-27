@@ -141,7 +141,7 @@ When tapped, a chip's `send` text is re-sent verbatim AS THE USER'S next
 message — so it must read as something the user would naturally type.
 
 Output JSON ONLY, this exact shape:
-{{"skip": true|false, "reason": "<short>", "items": [{{"kind": "deeper"|"wider"|"reply", "repeats": "<the earlier question or shown figure this chip duplicates, or empty>", "label": "<thai short, tappable>", "send": "<thai full message the user would send>"}}]}}
+{{"skip": true|false, "reason": "<short>", "items": [{{"kind": "decide"|"whatif"|"ahead"|"reply", "repeats": "<the earlier question or shown figure this chip duplicates, or empty>", "label": "<thai short, tappable>", "send": "<thai full message the user would send>"}}]}}
 
 FIRST decide the MODE by looking at the assistant's answer:
 
@@ -158,8 +158,8 @@ the user (e.g. "ยอดเท่าไรครับ", "รายจ่าย
        guessed number — a tapped guess becomes a "fact" the next answer builds
        a whole plan on.
   NEVER a "not now / skip / ยังไม่…ตอนนี้" chip — tapping it wastes a turn.
-  Write 2 replies, then add 1 kind="wider" QUESTION (see MODE-NORMAL) as a way
-  out — otherwise reply chips trap the user in endless "ตึงไป / สูงกว่านี้"
+  Write 2 replies, then add 1 advisor QUESTION (kind="decide"|"whatif"|"ahead",
+  see MODE-NORMAL) as a way out — otherwise reply chips trap the user in endless "ตึงไป / สูงกว่านี้"
   back-and-forth with the assistant.
   CRITICAL anti-misroute rule: the `label` is short, but the `send` MUST carry
   the TOPIC of the question so the next turn is read as a continuation, not as a
@@ -175,19 +175,24 @@ the user (e.g. "ยอดเท่าไรครับ", "รายจ่าย
   NOT apply; do NOT drop these chips for "answer is in the user's head".
 
 MODE-NORMAL — the answer is NOT a question back (a statement / analysis / advice
-/ a greeting). Each chip is a QUESTION the user would plausibly want to ASK the
-assistant NEXT. Write exactly 3, as a MIX:
-  • 2 × kind="deeper" — drill into THIS answer: why, which items, vs last
-    month, which one to act on. THINK LIKE THE USER: "after hearing this, what
-    would I naturally want to know next?"
-  • 1 × kind="wider" — step SIDEWAYS to an angle the user would not think to
-    ask, but would enjoy. It must still be answerable from THEIR OWN data:
-      – what-if: "ถ้าลดช้อปปิ้งลงครึ่งนึง ไปญี่ปุ่นได้เร็วขึ้นกี่เดือน"
-      – habit / pattern: "วันไหนของสัปดาห์ที่ฉันใช้เงินเยอะสุด",
-        "ร้านที่ฉันจ่ายบ่อยที่สุดคือที่ไหน"
-      – connect topics: spending → a goal, a card bill, a budget
-      – self-comparison: "เดือนนี้เป็นเดือนที่ใช้เยอะสุดของปีไหม"
-    Surprising and personal beats generic. Not advice-from-the-internet.
+/ a greeting). Nimo is the user's money ADVISOR and a friend who never judges.
+The app's screens already show every total, list, balance and due date — a
+chip that only re-reads those is wasted. Write 5 ADVISOR chip candidates, BEST
+FIRST (the app shows the first 3 that pass its filters), covering all 3 kinds:
+  • kind="decide" — so-what / should-I, about what this answer showed:
+      "ช้อปเดือนนี้เกินไปไหม", "จ่ายบัตรเต็มเลยดีไหม", "ควรลดตรงไหนก่อน"
+  • kind="whatif" — a what-if or a plan built on their numbers:
+      "ถ้าลดช้อปครึ่งนึง ไปญี่ปุ่นเร็วขึ้นกี่เดือน", "เก็บเดือนละเท่าไหร่ถึงจะทัน"
+  • kind="ahead" — looking forward, or a habit they would not spot alone:
+      "เงินจะพอใช้ถึงสิ้นเดือนไหม", "ฉันชอบใช้เงินหนักวันไหน"
+THE SCREEN TEST (drop the chip if it fails): "could the user get this by
+opening a screen in the app?" → totals, item lists, balances, statement
+amounts, due dates, "เทียบเดือนที่แล้ว" as a bare number are ALL screens.
+  ✗ "ยอดรวมทุกบัญชี", "หมวดช้อปปิ้งมีรายการอะไรบ้าง", "เดือนที่แล้วใช้เท่าไหร่"
+  ✓ "เดือนนี้ใช้เยอะกว่าปกติจนต้องห่วงไหม" (judgment, not a number)
+Advisor questions run out fast if you recycle the same few ("ใช้เยอะไปไหม",
+"เงินพอถึงสิ้นเดือนไหม"). When "already asked" covers this topic, move to a
+NEW one the user has: a goal, a card, a budget, income, a habit.
 The ANSWER-LOCATION TEST and TRANSFORM rule below apply to this mode.
 
 SKIP RULES — set skip=true and items=[] ONLY when (both modes):
@@ -237,16 +242,20 @@ HARD RULES (both modes):
     "จะเป็นอะไรไหม") — ask about the numbers, not about the user.
 
 MODE-NORMAL HARD RULES:
-  - QUESTIONS the user asks the ASSISTANT — to KNOW / ANALYZE / get ADVICE.
-    e.g. "หมวดไหนใช้เยอะสุด", "เทรนด์ 3 เดือนเป็นยังไง", "ควรลดหมวดไหนดี"
+  - QUESTIONS the user asks the ASSISTANT for JUDGMENT, a PLAN or a heads-up —
+    never for a number the app already displays (THE SCREEN TEST).
   - NEVER a question the assistant asks the USER back (fails the ANSWER-LOCATION
     TEST above). The user is the asker, the assistant is the answerer.
   - NEVER repeat the question the user just asked, and never re-ask something
     this turn's answer already fully covered. Each chip is a NEW angle.
 
 QUALITY RULES:
-  - Thai. Short, tappable label (aim ≤25 chars). Specific, never "ดูเพิ่มเติม".
-  - Each chip a DIFFERENT axis (time / category / wallet / comparison / advice).
+  - Thai, spoken and casual — how a user texts a friend who is good with
+    money. Short (aim ≤25 chars). No office words: not "สถานะ…", "รายละเอียด
+    …", "ของฉัน" at the end, "เป็นอย่างไรบ้าง". Prefer "ไหม / ดี / ยังไง".
+      ✗ "สถานะเป้าหมายการเงินของฉัน"  ✓ "ไปญี่ปุ่นทันไหม"
+  - Never judging: ask about the money, never scold the user.
+      ✗ "ทำไมถึงใช้เยอะจัง"  ✓ "ช้อปเดือนนี้เกินไปไหม"
   - Anchor to a NOTABLE number, category, or the user's goals/budgets/debt
     when relevant — make it feel personal, not generic.
 
@@ -566,6 +575,29 @@ _APP_ONLY_CHIP = re.compile(
 )
 
 
+# A chip that only re-reads what an app screen shows (owner, 2026-09-28: Nimo
+# is an advisor, and 84% of chips were such lookups). A chip carrying an
+# advisor word (should / enough / what-if / plan / in time) is kept even if it
+# also names a total: "ถ้าลดช้อปครึ่งนึง เก็บได้เพิ่มเท่าไหร่" is a plan.
+_LOOKUP_CHIP = re.compile(
+    r"^(ช่วย|ขอ)?\s*(ดู|แสดง|สรุป|ยอด|รวม|รายการ|รายละเอียด|สถานะ|เทียบ|เงินเข้า|รายรับ|รายได้)"
+    r"|อะไร(ไป)?บ้าง\s*\??$"
+    r"|(ใช้|จ่าย|เข้า|เหลือ)(ไป|จ่าย|มา)?\s*(รวม)?\s*เท่า(ไหร่|ไร)(แล้ว)?\s*\??$"
+    r"|เป็น(อย่างไร|ยังไง)(บ้าง)?\s*\??$"
+    # Rankings the breakdown screens already sort: "หมวดไหนใช้เยอะสุด".
+    r"|^(เดือนนี้|เดือนที่แล้ว)?\s*(หมวด|บัตร|บัญชี|กระเป๋า)(หมู่)?ไหน.*(เยอะ|สูง|มาก|บ่อย)(ที่)?สุด"
+)
+_ADVISOR_WORD = re.compile(
+    r"ควร|พอ|ไหว|ถ้า|แผน|ทัน|ห่วง|เกินไป|ดีไหม|ดีมั้ย|ปกติ|ทำไม|เก็บเงิน|ออม|ลดได้|ลดตรง"
+)
+
+
+def is_lookup_chip(label: str) -> bool:
+    """True for a chip whose answer is just a number/list an app screen shows."""
+    text = (label or "").strip()
+    return bool(_LOOKUP_CHIP.search(text)) and not _ADVISOR_WORD.search(text)
+
+
 # "Not now" replies: tapping one only earns "ok, ask me anytime" — a dead turn.
 _NOT_NOW_CHIP = re.compile(r"^\s*(ยังไม่|ไม่ต้อง|ไว้ก่อน|ไว้ทีหลัง|ไม่เป็นไร)")
 
@@ -575,12 +607,11 @@ def _is_app_only(chip: dict) -> bool:
 
 
 def _finalize(items: list[Any], *, asked_before: Optional[list[str]] = None) -> list[dict]:
-    """Normalize LLM items into `{label, send}`, drop app-only action chips and
-    word-for-word repeats of earlier questions, keep at most one "wider" chip
-    (placed last, after the drill-downs), dedup, cap at _MAX_ITEMS."""
-    kept: list[tuple[str, dict]] = []
+    """Normalize LLM items into `{label, send}`; drop app-only action chips,
+    "not now" chips, lookups of what the app screens already show (reply chips
+    excepted), and repeats of earlier questions; dedup; cap at _MAX_ITEMS."""
+    kept: list[dict] = []
     seen: set[str] = {_key(q) for q in (asked_before or []) if q}
-    wider = 0
     for raw in items:
         chip = _norm_chip(raw)
         if chip is None:
@@ -599,14 +630,12 @@ def _finalize(items: list[Any], *, asked_before: Optional[list[str]] = None) -> 
         if isinstance(raw, dict) and str(raw.get("repeats") or "").strip():
             slog("suggest", f"dropped self-flagged repeat {chip['label']!r} ~ {raw['repeats']!r}")
             continue
-        if kind == "wider":
-            if wider:
-                continue
-            wider += 1
+        if kind != "reply" and is_lookup_chip(chip["label"]):
+            slog("suggest", f"dropped lookup chip {chip['label']!r}")
+            continue
         seen.add(key)
-        kept.append((kind, chip))
-    kept.sort(key=lambda kc: kc[0] == "wider")  # stable: drill-downs first
-    return [chip for _, chip in kept[:_MAX_ITEMS]]
+        kept.append(chip)
+    return kept[:_MAX_ITEMS]
 
 
 def _norm_chip(raw: Any) -> Optional[dict]:
@@ -669,7 +698,7 @@ async def _generate(
         # A touch of creativity for varied chips, but low enough to stay on-task.
         "temperature": 0.4,
         "response_format": {"type": "json_object"},
-        "max_tokens": 400,
+        "max_tokens": 700,  # 5 candidates with kind + repeats fields
     }
     if fallbacks:
         body["models"] = [primary, *fallbacks]
@@ -714,6 +743,7 @@ async def _generate(
 
 
 __all__ = [
+    "is_lookup_chip",
     "asked_before",
     "asks_back",
     "tool_data_of",

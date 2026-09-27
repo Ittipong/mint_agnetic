@@ -567,6 +567,9 @@ sum_by_category(start, end, wallet_names=None, currency="ALL",
     #     hit = [r for r in rows if r["bucket"] in names]   # ✅ name vs name
     #   Even simpler — skip the manual filter and let SQL do it:
     #     total = sum_expense(start=s, end=e, category_names=resolve_category("ช้อปปิ้ง"))
+spending_by_weekday(start, end, wallet_names=None)
+    # → rows[{weekday (1=Mon…7=Sun), weekday_th, amount, cnt, days_with_spend}]
+    # Habit questions: "ใช้เงินหนักวันไหน", "วันไหนควรระวัง".
 fixed_costs(start, end, wallet_names=None)
     # → {total, months, monthly_avg, rows[{bucket, parent, category_sync_id, amount, cnt}]}
     # "รายจ่ายคงที่" = THIS helper (rent, bills, subscriptions, insurance,
@@ -641,7 +644,9 @@ compare_periods(period1_start, period1_end, period2_start, period2_end,
                 by="category", transaction_type="expense", currency="ALL",
                 convert_to_thb=True)
     # ALL 4 period args are REQUIRED — it diffs exactly TWO periods.
-    # by ∈ {'category','wallet','tag','total'} ONLY (NOT 'month'/'week').
+    # by ∈ {'category','subcategory','wallet','tag','total'} ONLY (NOT 'month'/'week').
+    # 'category' = the app report's grouping (children fold into the parent);
+    # 'subcategory' only to drill INTO one parent.
     # "เทียบ N เดือน" / "ดูเทรนด์หลายเดือน" → use spending_trend(group_by='month'),
     #   NOT compare_periods.
 spending_pace(as_of=None, wallet_names=None, category_names=None,

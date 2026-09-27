@@ -175,3 +175,40 @@ It averages by whole months (a calendar month = 1, a rolling 3 months = 3).
 Checked on the dev DB for Jun 28–Sep 27: rent 28,500 + bills 6,273 +
 subscriptions 1,809 = 36,582, which is 12,194 a month. Live, 6 of 6 answers
 used the helper: average 12,194, September 12,280, variable 24,525. UT-NS-FIX01.
+
+## Advisor chips + starters (2026-09-28, owner: "AI = ที่ปรึกษา + เพื่อนที่ไม่ตัดสิน ไม่ทางการ")
+
+Chips were 84% lookups of what the app screens already show (13/82 advisor).
+Changes:
+- **Chips:** 5 advisor candidates, best first, covering 3 kinds: decide
+  ("ช้อปเดือนนี้เกินไปไหม"), what-if ("ถ้าลดช้อปครึ่งนึง…"), and ahead / habit
+  ("เงินพอถึงสิ้นเดือนไหม", "ใช้เงินหนักวันไหน"). The prompt applies THE
+  SCREEN TEST and a casual, non-judging voice, and says to move to a new topic
+  once one is covered. `is_lookup_chip` drops leftover lookups in code (reply
+  chips excepted). UT-SG21/21b.
+- **Starters** (`starters.py`, the empty chat screen): 14 fixed advisor
+  questions in the same voice. They still quote no numbers and presume
+  nothing; "Nimo ทำอะไรได้บ้าง" stays last.
+- **Found by the new chips, fixed:**
+  - `compare_periods(by="category")` grouped by leaf, which gave "ช้อปปิ้ง
+    16,900 vs 0". It now uses the report grouping; `by="subcategory"` gives
+    the leaf level. UT-NS-CMP01.
+  - `build_list` caps every list at 100 rows, so the TRUNCATED warning never
+    fired for `limit=500` and a weekday total came out a third short. The
+    warning now uses the effective cap. UT-NS-LIST02.
+  - New `spending_by_weekday()` answers the habit question from SQL (Sunday
+    38,146 / Saturday 28,399). Live 4/4 correct. UT-NS-WDAY01.
+
+Round 10: 0 dead ends; tone 0/28; 1 lookup chip of 78. Cost: chips arrive
+1.7 s (median) after the answer, up from 0.3 s, because 5 candidates take
+longer to write.
+
+Open (advisor answers carry more reasoning risk):
+- "เงินพอถึงสิ้นเดือนไหม" once subtracted the whole month's projected spend
+  from the current balance ("เหลือ 107,309"). Most of that spend is already out
+  of the balance.
+- "จ่ายเต็ม" once called the total owed (25,546) "ยอดที่ต้องจ่าย"; the amount
+  due is 24,714.
+- The advice chain can still drift into investing, and the agent sometimes asks
+  the user something the data already holds (whether they have an emergency
+  fund).

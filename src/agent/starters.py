@@ -12,9 +12,10 @@ Two parts:
               today. A monthly item (salary, rent, a subscription) shows only
               around its usual day, and only while this month's is not
               recorded. A user with no history gets two example records.
-  questions — a long, fixed list of example questions (owner, 2026-09-27):
-              its job is to show the range of what Nimo can answer, so it is
-              the same for everyone and quotes none of the user's numbers.
+  questions — a long, fixed list of advisor questions (owner, 2026-09-27 /
+              09-28): shows the range of what Nimo can help with — judgment,
+              what-ifs, plans, not lookups the screens already show. Same
+              for everyone, quotes none of the user's numbers.
 
 Each item carries `kind` and `reason`, so taps can be measured per signal
 once the client echoes it back (`origin` on /chat/stream). Record chips (log,
@@ -51,23 +52,27 @@ EXAMPLES = [
      "category_id": None, "category_name": "ร้านอาหาร", "hint": EXAMPLE_HINT},
 ]
 
-# One per kind of answer Nimo gives (totals, breakdowns, comparisons, balances,
-# cards, budgets, goals, advice) so scrolling the list teaches the range.
-# No amounts or names in them: they must read right for any user.
+# Advisor questions in a friend's voice (owner, 2026-09-28: Nimo is a money
+# advisor and a friend who never judges). The app's screens already show
+# totals and lists, so the empty chat shows what only a conversation can:
+# judgment, what-ifs, plans, a heads-up. Still the same for everyone and no
+# amounts or presumptions ("มีหนี้บัตรหลายใบ") — they must read right for any
+# user. "Nimo ทำอะไรได้บ้าง" stays last (question_chips moves it first for a
+# user with no history).
 QUESTIONS = [
-    "เดือนนี้ใช้ไปเท่าไหร่",
-    "สัปดาห์นี้ใช้ไปกับอะไรบ้าง",
-    "หมวดไหนใช้เยอะที่สุดเดือนนี้",
-    "เดือนนี้ใช้มากกว่าเดือนที่แล้วไหม",
-    "รายจ่ายที่แพงที่สุดเดือนนี้คืออะไร",
-    "ค่ากินเดือนนี้เท่าไหร่",
-    "เดือนนี้รายรับเท่าไหร่",
-    "ตอนนี้มีเงินเหลือในบัญชีเท่าไหร่",
-    "บัตรเครดิตรอบนี้ต้องจ่ายเท่าไหร่",
-    "งบเดือนนี้เหลือเท่าไหร่",
-    "เป้าหมายเก็บเงินไปถึงไหนแล้ว",
-    "ช่วยสรุปการเงินเดือนนี้ให้หน่อย",
-    "ควรลดรายจ่ายตรงไหนดี",
+    "เดือนนี้ใช้เงินโอเคไหม",
+    "เงินจะพอใช้ถึงสิ้นเดือนไหม",
+    "อยากเก็บเงินเพิ่ม ควรเริ่มลดตรงไหน",
+    "เงินเดือนหายไปไหนหมด",
+    "เดือนนี้มีอะไรผิดปกติไหม",
+    "ฉันชอบใช้เงินหนักช่วงไหน",
+    "จ่ายบัตรเต็มหรือขั้นต่ำดี",
+    "ควรมีเงินสำรองเท่าไหร่ถึงจะอุ่นใจ",
+    "เป้าเก็บเงินจะทันไหม",
+    "ถ้าเก็บเพิ่มเดือนละนิด อีกปีจะมีเท่าไหร่",
+    "งบเดือนนี้ยังไหวไหม",
+    "เงินเดือนออกแล้ว แบ่งใช้แบ่งเก็บยังไงดี",
+    "ช่วยดูหน่อย การเงินตอนนี้เป็นไงบ้าง",
     "Nimo ทำอะไรได้บ้าง",
 ]
 

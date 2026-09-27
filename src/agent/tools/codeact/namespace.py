@@ -320,6 +320,25 @@ class _Wrappers:
             "rows": rows,
         }
 
+    def spending_by_weekday(
+        self,
+        *,
+        start: str | date,
+        end: str | date,
+        wallet_names: list[str] | None = None,
+    ) -> list[dict]:
+        """Expense per day of week, THB, biggest first. Each row: {weekday
+        (1=Mon … 7=Sun), weekday_th, amount, cnt, days_with_spend}. For habit
+        questions ("ใช้เงินหนักวันไหน") — never sum list_transactions."""
+        names = {1: "วันจันทร์", 2: "วันอังคาร", 3: "วันพุธ", 4: "วันพฤหัสบดี",
+                 5: "วันศุกร์", 6: "วันเสาร์", 7: "วันอาทิตย์"}
+        rows = self._exec(self._spec(
+            metric="spending_by_weekday", start=start, end=end, wallet_names=wallet_names,
+        ))
+        for r in rows:
+            r["weekday_th"] = names.get(int(r["weekday"]), str(r["weekday"]))
+        return rows
+
     def sum_by_wallet(
         self,
         *,
@@ -425,11 +444,17 @@ class _Wrappers:
                 has_note=has_note,
             )
         )
-        if limit and len(rows) >= limit:
+        from src.agent.tools.codeact.sql_templates import LIST_ROW_CAP
+
+        # The SQL caps every list at LIST_ROW_CAP whatever `limit` asked for,
+        # so compare against the EFFECTIVE cap (limit=500 once returned 100
+        # rows silently and a weekday total came out a third short).
+        cap = min(limit or 50, LIST_ROW_CAP)
+        if len(rows) >= cap:
             # stdout reaches the LLM. Summing a capped list once turned KTC's
             # 15,524 into 14,574 and a fixed-cost pass lost the rent.
             print(
-                f"[list_transactions] TRUNCATED at limit={limit}: older rows are "
+                f"[list_transactions] TRUNCATED at {cap} rows: older rows are "
                 "missing. Do NOT sum/count/average these rows — use sum_expense, "
                 "sum_by_category, sum_by_wallet or count_transactions for totals."
             )
@@ -820,9 +845,11 @@ class _Wrappers:
         currency: str = "ALL",
         convert_to_thb: bool = True,
     ) -> dict:
-        """Compare TWO periods side-by-side. `by` ∈ {'category','wallet',
-        'tag','total'}. Returns {period1, period2, diff, pct_change} per
-        bucket — one tool call instead of two + Python diff.
+        """Compare TWO periods side-by-side. `by` ∈ {'category','subcategory',
+        'wallet','tag','total'}. Returns {period1, period2, diff, pct_change}
+        per bucket — one tool call instead of two + Python diff. 'category'
+        groups like the app report (sub-categories fold into their parent);
+        'subcategory' is the leaf level for drilling into one parent.
 
         This is a 2-period diff, NOT a multi-period trend. For "compare the
         last N months / see the trend over months", call
@@ -835,6 +862,7 @@ class _Wrappers:
         # letting Python raise a cryptic TypeError on the missing kwargs.
         bucket_metric = {
             "category": "sum_by_category",
+            "subcategory": "sum_by_category",
             "wallet":   "sum_by_wallet",
             "tag":      "sum_by_tag",
             "total":    ("sum_expense" if transaction_type == "expense"
@@ -843,7 +871,7 @@ class _Wrappers:
         if bucket_metric is None:
             raise ValueError(
                 f"compare_periods: by={by!r} is not valid — use one of "
-                "{'category','wallet','tag','total'}. For a trend across "
+                "{'category','subcategory','wallet','tag','total'}. For a trend across "
                 f"months/weeks, call spending_trend(group_by={by!r}) instead."
             )
         if period2_start is None or period2_end is None:
@@ -854,16 +882,18 @@ class _Wrappers:
             )
 
         def _fetch(s: str | date, e: str | date) -> list[dict]:
-            return self._exec(
-                self._spec(
-                    metric=bucket_metric,
-                    start=s,
-                    end=e,
-                    currency=currency,
-                    convert_to_thb=convert_to_thb,
-                    transaction_type=transaction_type if by == "total" else None,
-                )
+            spec = self._spec(
+                metric=bucket_metric,
+                start=s,
+                end=e,
+                currency=currency,
+                convert_to_thb=convert_to_thb,
+                transaction_type=transaction_type if by == "total" else None,
             )
+            # Leaf grouping made "ช้อปปิ้ง" mean only items filed on the root
+            # itself (16,900 vs 0) while the report says 25,345 vs 7,244.
+            spec.category_level = "parent" if by == "category" else "leaf"
+            return self._exec(spec)
 
         rows1 = _fetch(period1_start, period1_end)
         rows2 = _fetch(period2_start, period2_end)
@@ -1189,6 +1219,7 @@ def build_namespace(
         "sum_by_category":     w.sum_by_category,
         "sum_by_wallet":       w.sum_by_wallet,
         "fixed_costs":         w.fixed_costs,
+        "spending_by_weekday": w.spending_by_weekday,
         "sum_by_tag":          w.sum_by_tag,
         "list_transactions":   w.list_transactions,
         "balance":             w.balance,

@@ -940,7 +940,7 @@ def test_UT_NS_LIST01_truncated_list_warns_the_llm(monkeypatch, capsys):
             ns["list_transactions"], start="2026-07-01", end="2026-09-27", limit=limit)
 
     asyncio.run(run(3))
-    assert "TRUNCATED at limit=3" in capsys.readouterr().out
+    assert "TRUNCATED at 3 rows" in capsys.readouterr().out
     asyncio.run(run(50))
     assert "TRUNCATED" not in capsys.readouterr().out
 
@@ -1027,3 +1027,68 @@ def test_UT_NS_FIX01_fixed_costs_rule_and_monthly_average(monkeypatch):
     # Rent lives on the `home` root; its cleaning/furniture children are variable.
     assert "home" in FIXED_COST_SYSTEM_KEYS and "home_cleaning" not in FIXED_COST_SYSTEM_KEYS
     assert "fc.system_key = ANY(" in sql
+
+
+def test_UT_NS_CMP01_compare_periods_category_matches_report(monkeypatch):
+    """UT-NS-CMP01: chip chain round 9 — compare_periods(by="category") grouped
+    by LEAF, so "ช้อปปิ้ง" was only the items filed on the root (16,900 vs 0)
+    while the report says 25,345 vs 7,244. 'category' now groups like the
+    report; 'subcategory' keeps the leaf level for drill-downs."""
+    levels = []
+
+    async def fake_run_query(spec, user_id):
+        levels.append(spec.category_level)
+        return []
+
+    monkeypatch.setattr(ns_mod, "_run_query", fake_run_query)
+
+    async def run(by):
+        ns = build_namespace(user_id="u-1", catalog=_catalog(), today=date(2026, 9, 28),
+                             main_loop=asyncio.get_running_loop())
+        return await asyncio.to_thread(
+            ns["compare_periods"], period1_start="2026-08-01", period1_end="2026-08-31",
+            period2_start="2026-09-01", period2_end="2026-09-30", by=by)
+
+    asyncio.run(run("category"))
+    asyncio.run(run("subcategory"))
+    assert levels == ["parent", "parent", "leaf", "leaf"]
+
+
+def test_UT_NS_LIST02_warns_at_the_effective_cap(monkeypatch, capsys):
+    """UT-NS-LIST02: limit=500 is capped to 100 rows in SQL; the warning must
+    fire at 100 (it compared against 500 and stayed silent — a weekday total
+    came out a third short)."""
+    from src.agent.tools.codeact.sql_templates import LIST_ROW_CAP
+
+    async def fake_run_query(spec, user_id):
+        return [{"amount": 1}] * LIST_ROW_CAP
+
+    monkeypatch.setattr(ns_mod, "_run_query", fake_run_query)
+
+    async def run():
+        ns = build_namespace(user_id="u-1", catalog=_catalog(), today=date(2026, 9, 28),
+                             main_loop=asyncio.get_running_loop())
+        return await asyncio.to_thread(
+            ns["list_transactions"], start="2026-06-28", end="2026-09-28", limit=500)
+
+    asyncio.run(run())
+    assert f"TRUNCATED at {LIST_ROW_CAP} rows" in capsys.readouterr().out
+
+
+def test_UT_NS_WDAY01_spending_by_weekday_labels_days(monkeypatch):
+    """UT-NS-WDAY01: weekday totals come from SQL, labelled in Thai (dev DB
+    Jun 29–Sep 28: Sunday 38,146, Saturday 28,399 — the list-sum said 26,523)."""
+    async def fake_run_query(spec, user_id):
+        assert spec.metric == "spending_by_weekday"
+        return [{"weekday": 7, "amount": Decimal("38146"), "cnt": 30, "days_with_spend": 13},
+                {"weekday": 6, "amount": Decimal("28399"), "cnt": 25, "days_with_spend": 13}]
+
+    monkeypatch.setattr(ns_mod, "_run_query", fake_run_query)
+
+    async def run():
+        ns = build_namespace(user_id="u-1", catalog=_catalog(), today=date(2026, 9, 28),
+                             main_loop=asyncio.get_running_loop())
+        return await asyncio.to_thread(ns["spending_by_weekday"], start="2026-06-29", end="2026-09-28")
+
+    rows = asyncio.run(run())
+    assert [r["weekday_th"] for r in rows] == ["วันอาทิตย์", "วันเสาร์"]

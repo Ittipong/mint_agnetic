@@ -137,6 +137,15 @@ def tone_report(results):
     for t in bad:
         print(f"  - {t['msg'][:50]!r} → {t['answer'][:80]!r}", flush=True)
 
+    # Chip kinds (owner 2026-09-28: advisor, not lookups of app screens).
+    from src.agent.suggest_followups import _ADVISOR_WORD, is_lookup_chip
+    chips = [c["label"] for t in turns for c in t["chips"]]
+    lookups = [c for c in chips if is_lookup_chip(c)]
+    advisor = [c for c in chips if _ADVISOR_WORD.search(c)]
+    dead = sum(1 for t in turns[:-1] if not t["chips"])
+    print(f"chips: {len(chips)} total · advisor-word {len(advisor)} · lookup {len(lookups)} "
+          f"· turns with no chips {dead}", flush=True)
+
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -39,8 +39,8 @@ def test_UT_GS01_analyst_turn_writes_suggestions_block(monkeypatch) -> None:
     async def fake_generate(**kw):
         captured.update(kw)
         return {"skip": False, "reason": "ok", "items": [
-            {"label": "ดูเทรนด์ 3 เดือน", "send": "ดูเทรนด์ 3 เดือน"},
-            {"label": "หมวดไหนเยอะสุด", "send": "หมวดไหนใช้เยอะสุด"},
+            {"label": "ใช้เกินไปไหม", "send": "เดือนนี้ใช้เกินไปไหม"},
+            {"label": "เงินพอถึงสิ้นเดือนไหม", "send": "เงินจะพอใช้ถึงสิ้นเดือนไหม"},
         ]}
 
     monkeypatch.setattr(sf, "_generate", fake_generate)
@@ -54,7 +54,7 @@ def test_UT_GS01_analyst_turn_writes_suggestions_block(monkeypatch) -> None:
     block = out["suggestions_block"]
     assert block is not None and block["type"] == "suggestions"
     sends = [it["send"] for it in block["items"]]
-    assert sends == ["ดูเทรนด์ 3 เดือน", "หมวดไหนใช้เยอะสุด"]
+    assert sends == ["เดือนนี้ใช้เกินไปไหม", "เงินจะพอใช้ถึงสิ้นเดือนไหม"]
     # The node fed the LLM the real answer + this-turn tool data (flat-path
     # parity — no dropped DATA HOOK).
     assert captured["answer_text"] == "เดือนนี้ใช้ไป 12,500 บาทครับ"

@@ -289,6 +289,10 @@ def build_count(spec: QuerySpec, user_id: str) -> tuple[str, list]:
     return sql, params
 
 
+# Hard ceiling on listed rows, whatever `limit` the caller asks for.
+LIST_ROW_CAP = 100
+
+
 def build_list(spec: QuerySpec, user_id: str) -> tuple[str, list]:
     """Detailed rows. `order_by` + `limit` come from the planner so users can
     ask for "top 5 by amount" or "latest 20 by date" without a new metric.
@@ -305,7 +309,7 @@ def build_list(spec: QuerySpec, user_id: str) -> tuple[str, list]:
         if spec.order_by == "amount_desc"
         else "ORDER BY t.date DESC"
     )
-    cap = max(1, min(spec.limit or 50, 100))
+    cap = max(1, min(spec.limit or 50, LIST_ROW_CAP))
     sql = f"""
         SELECT
             t.sync_id            AS sync_id,
@@ -606,6 +610,40 @@ def build_fixed_costs(spec: QuerySpec, user_id: str) -> tuple[str, list]:
                    AND COALESCE(fc.name, t.category_name) ~* ${pat_idx}))
           {extra}
         GROUP BY 1, 3
+        ORDER BY amount DESC
+    """
+    return sql, params
+
+
+def build_spending_by_weekday(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """Expense per day of week (Bangkok time), THB. 1=Monday … 7=Sunday.
+
+    Why: "ฉันชอบใช้เงินหนักวันไหน" is an advisor habit question; the model
+    answered it by summing a list silently capped at 100 rows (Sunday 26,523
+    vs the real 38,146).
+    """
+    params = _base_params(spec, user_id)
+    params.append("expense")
+    type_idx = len(params)
+    extra = _common_filters(spec, params)
+    sql = f"""
+        SELECT
+            EXTRACT(ISODOW FROM t.date AT TIME ZONE 'Asia/Bangkok')::int AS weekday,
+            'THB'                                                    AS currency,
+            SUM({_AMOUNT_THB_EXPR})                                  AS amount,
+            COUNT(*)                                                 AS cnt,
+            COUNT(DISTINCT (t.date AT TIME ZONE 'Asia/Bangkok')::date) AS days_with_spend
+        FROM transactions t
+        {_wallet_join()}
+        {_currency_join()}
+        WHERE 1=1 {_wallet_user_check()}
+          AND t.date >= $2
+          AND t.date <  ($3::date + INTERVAL '1 day')
+          AND t.type = ${type_idx}
+          AND t.is_deleted = false
+          AND t.status = 'confirmed'
+          {extra}
+        GROUP BY 1
         ORDER BY amount DESC
     """
     return sql, params
@@ -1032,7 +1070,7 @@ def build_budget_transactions(spec: QuerySpec, user_id: str) -> tuple[str, list]
         if spec.order_by == "amount_desc"
         else "ORDER BY t.date DESC"
     )
-    cap = max(1, min(spec.limit or 50, 100))
+    cap = max(1, min(spec.limit or 50, LIST_ROW_CAP))
 
     sql = f"""
         WITH scoped_budgets AS (
@@ -1308,7 +1346,7 @@ def build_goal_transactions(spec: QuerySpec, user_id: str) -> tuple[str, list]:
         if spec.order_by == "amount_desc"
         else "ORDER BY t.date DESC"
     )
-    cap = max(1, min(spec.limit or 50, 100))
+    cap = max(1, min(spec.limit or 50, LIST_ROW_CAP))
 
     sql = f"""
         WITH goals AS (
@@ -1355,6 +1393,7 @@ _BUILDERS = {
     "sum_by_category": build_sum_by_category,
     "sum_by_wallet": build_sum_by_wallet,
     "fixed_costs": build_fixed_costs,
+    "spending_by_weekday": build_spending_by_weekday,
     "sum_by_tag": build_sum_by_tag,
     "wallet_list": build_wallet_list,
     "category_list": build_category_list,

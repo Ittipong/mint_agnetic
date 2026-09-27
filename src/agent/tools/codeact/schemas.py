@@ -29,6 +29,7 @@ Metric = Literal[
     "sum_by_wallet",
     "sum_by_tag",
     "fixed_costs",
+    "spending_by_weekday",
     # Discovery (entity catalogs as data)
     "wallet_list",
     "category_list",
