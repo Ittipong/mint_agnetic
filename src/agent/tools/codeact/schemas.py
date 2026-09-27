@@ -77,6 +77,9 @@ class ResolvedEntity(BaseModel):
     # For category expansion: additional category NAMES to include in SQL filter
     # (e.g., user asks "เดินทาง" → expand_ids = ["แท็กซี่", "BTS/MRT"]).
     expand_ids: list[str] = Field(default_factory=list)
+    # Category only: match by the report's parent grouping (the category OR its
+    # parent carries this name) instead of the leaf name alone.
+    group_match: bool = False
 
 
 class QuerySpec(BaseModel):

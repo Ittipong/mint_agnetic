@@ -19,11 +19,12 @@ WHAT FLAT DOES NOT DO (removed by request)
   Both still run on the PREBUILT path via `post_model_hook` (validators/numerical).
   Tests for that behavior (UT-G04/G05/G06) pin `react_impl="prebuilt"`.
 
-PARITY NOTE (streaming)
-  The agent model is built with `disable_streaming=True` so `stream_mode=
-  "messages"` emits ONE complete AIMessage per step — matching the prebuilt
-  subgraph boundary, so the SSE adapter's narration-vs-answer router behaves
-  identically (no narration leaking into the answer bubble).
+STREAMING
+  The agent model streams tokens, so the final answer reaches the user as it is
+  written instead of all at once (~7s of silence on analyst turns before).
+  Narration-vs-answer routing of the streamed chunks lives in the SSE adapter
+  (`sse_adapter._MessageRouter`), which holds a message's opening text until a
+  tool_call proves it is narration or its length proves it is the answer.
 
 This module deliberately does NOT compile a graph. It exposes `wire_flat_react`
 which adds its nodes/edges onto the caller's outer `StateGraph` builder, keeping
@@ -64,31 +65,50 @@ def _make_agent_node(chat_model: Any, prompt: Callable[[AgentState], list]) -> C
     rendered system prompt + windowed history (the SAME `_make_prompt` callable
     `graph.py` passes the prebuilt, so prompt behavior is identical).
 
-    STREAMING PARITY (R1): the prebuilt subgraph delivered each AIMessage to
-    `stream_mode="messages"` as a COMPLETE message at the boundary, so the SSE
-    adapter's narration-vs-answer router (`_yield_message_event`: content+tool_call
-    → status_token; tool-call-free content → answer_token) always saw the message
-    whole. A live token stream breaks that — early content chunks of a
-    narration-with-tool_call message arrive BEFORE the tool_call, so the adapter
-    mis-routes the narration ("กำลังรวมยอด…") into the answer bubble. We disable
-    token streaming on the agent model so messages-mode emits ONE complete
-    message per step — exact prebuilt parity for routing.
+    Tokens stream through `stream_mode="messages"` as AIMessageChunks; the SSE
+    adapter decides per message whether its text is narration or the answer.
     """
-    # Disable token streaming so messages-mode emits a complete AIMessage per
-    # step (see STREAMING PARITY above). model_copy keeps the original (used by
-    # the prebuilt path) untouched.
-    try:
-        agent_model = chat_model.model_copy(update={"disable_streaming": True})
-    except Exception:  # noqa: BLE001 — fall back to the as-is model
-        agent_model = chat_model
-    model_with_tools = agent_model.bind_tools(ALL_TOOLS)
+    model_with_tools = chat_model.bind_tools(ALL_TOOLS)
 
     async def agent_node(state: AgentState) -> dict:
+        _maybe_start_chips(state)
         messages = prompt(state)
         response = await model_with_tools.ainvoke(messages)
         return {"messages": [response]}
 
     return agent_node
+
+
+def _maybe_start_chips(state: AgentState) -> None:
+    """Start the follow-up chip call alongside this agent step.
+
+    Only after a tool round — that step usually writes the final answer, and
+    the tool data is what the chips are guessed from. ADD turns get no chips.
+    If this step calls another tool instead, the next step restarts the call
+    (the older one is cancelled). `gen_suggestions` picks the result up.
+    """
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    from src.agent.suggest_followups import asked_before, start_speculative, tool_data_of
+
+    messages = state.get("messages") or []
+    if not messages or not isinstance(messages[-1], ToolMessage):
+        return
+    user_text = ""
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            user_text = m.content if isinstance(m.content, str) else ""
+            break
+        if any(tc.get("name") == "propose_transaction"
+               for tc in getattr(m, "tool_calls", None) or []):
+            return
+    start_speculative(
+        state.get("thread_id") or "",
+        user_text=user_text,
+        tool_data=tool_data_of(state),
+        user_context=state.get("user_context"),
+        asked_before=asked_before(messages),
+    )
 
 
 # Logical exit sentinel — the router decides "run tools" vs "leave the loop"

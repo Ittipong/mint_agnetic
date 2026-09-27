@@ -655,3 +655,130 @@ def test_UT_S14_validator_reject_no_dev_code_in_prod(monkeypatch) -> None:
     assert "ยืนยันความถูกต้องของตัวเลข" in text
     assert "[DEV]" not in text
     assert "__validator_failed__" not in text
+
+
+# ---------------------------------------------------------------------------
+# UT-S17..S20 — streamed agent chunks (flat impl streams tokens): the router
+# holds a message's opening text until a tool_call or its length decides it.
+# Chunks of one message share an `id`, exactly as LangGraph's messages mode
+# delivers a streamed ChatOpenAI response.
+# ---------------------------------------------------------------------------
+
+
+def _stream_chunk(msg_id: str, content: str, *, tool_call: str | None = None) -> tuple:
+    kwargs: dict = {"content": content, "id": msg_id}
+    if tool_call is not None:
+        kwargs["tool_call_chunks"] = [
+            {"name": tool_call, "args": "", "id": "c1", "index": 0}
+        ]
+    return ("messages", (AIMessageChunk(**kwargs), {}))
+
+
+def test_UT_S17_streamed_narration_before_tool_call_is_narration() -> None:
+    """UT-S17: Gemini streams "กำลังคำ" + "นวณ…\\n\\n" and only THEN the tool_call
+    chunk. The whole sentence is ONE narration_token (trailing newlines
+    trimmed) and nothing reaches answer_token or the answer block."""
+    graph = _FakeGraph([
+        _stream_chunk("m1", "กำลังคำ"),
+        _stream_chunk("m1", "นวณยอดใช้จ่ายแยกตามหมวดให้สักครู่นะครับ\n\n"),
+        _stream_chunk("m1", "", tool_call="run_python"),
+        _stream_chunk("m1", ""),
+        ("updates", {"agent": {}}),
+        _stream_chunk("m2", "ช้อปปิ้งเยอะสุดครับ"),
+        ("updates", {"agent": {}}),
+    ])
+    out = asyncio.run(_collect(stream_chat(graph, {"thread_id": "t17"}, {})))
+    narration = [e["data"] for e in out if e["event"] == "narration_token"]
+    answer = [e["data"] for e in out if e["event"] == "answer_token"]
+    assert narration == ["กำลังคำนวณยอดใช้จ่ายแยกตามหมวดให้สักครู่นะครับ"]
+    assert answer == ["ช้อปปิ้งเยอะสุดครับ"]
+    blocks = [json.loads(e["data"]) for e in out if e["event"] == "block"]
+    assert {"type": "answer", "text": "ช้อปปิ้งเยอะสุดครับ"} in blocks
+
+
+def test_UT_S18_long_answer_streams_before_message_ends() -> None:
+    """UT-S18: a long tool-call-free answer must reach the wire while the
+    model is still writing — the first answer_token is emitted BEFORE the
+    message's last chunk is fed, not held until the end."""
+    first = "ก" * 170   # past the commit threshold on its own
+    graph_events = [
+        ("updates", {"tools": {}}),  # after a tool round: data is in hand
+        _stream_chunk("m1", first),
+        _stream_chunk("m1", "ข" * 20),
+        _stream_chunk("m1", "ค" * 20),
+    ]
+    graph = _FakeGraph(graph_events)
+    out = asyncio.run(_collect(stream_chat(graph, {"thread_id": "t18"}, {})))
+    answer = [e["data"] for e in out if e["event"] == "answer_token"]
+    # Three separate tokens = streamed, not one flushed blob.
+    assert answer == [first, "ข" * 20, "ค" * 20]
+    blocks = [json.loads(e["data"]) for e in out if e["event"] == "block"]
+    assert blocks[0] == {"type": "answer", "text": first + "ข" * 20 + "ค" * 20}
+
+
+def test_UT_S19_short_answer_released_when_message_ends() -> None:
+    """UT-S19: a short answer (under the threshold, no tool_call) is held
+    only until its node finishes, then released as the answer — before the
+    blocks that node staged."""
+    graph = _FakeGraph([
+        _stream_chunk("m1", "สวัสดี"),
+        _stream_chunk("m1", "ครับ"),
+        ("updates", {"agent": {}}),
+    ])
+    out = asyncio.run(_collect(stream_chat(graph, {"thread_id": "t19"}, {})))
+    assert [e["event"] for e in out][:2] == ["answer_token", "block"]
+    assert out[0]["data"] == "สวัสดีครับ"
+    assert not [e for e in out if e["event"] == "narration_token"]
+
+
+def test_UT_S20_full_message_of_streamed_id_not_re_emitted() -> None:
+    """UT-S20: if the complete AIMessage of an already-streamed id also shows
+    up on the messages stream, the answer must not be duplicated."""
+    from langchain_core.messages import AIMessage
+
+    graph = _FakeGraph([
+        _stream_chunk("m1", "ยอดรวมครับ"),
+        ("messages", (AIMessage(content="ยอดรวมครับ", id="m1"), {})),
+    ])
+    out = asyncio.run(_collect(stream_chat(graph, {"thread_id": "t20"}, {})))
+    answer = [e["data"] for e in out if e["event"] == "answer_token"]
+    assert answer == ["ยอดรวมครับ"]
+
+
+def test_UT_S21_first_step_guess_before_tool_call_never_reaches_answer() -> None:
+    """UT-S21: chip-chain round 4 — in the FIRST step (no tool yet) Gemini wrote
+    a whole invented answer ("เงินเดือน 32,000 …", >160 chars) and only then
+    its tool_call. Before any tool round the length rule must not release
+    it: it is narration, and only its first line may show."""
+    guess = "กำลังดูรายละเอียดให้ครับ\n\n" + "- เงินเดือน 32,000 บาท (15 ก.ย.)\n" * 8
+    graph = _FakeGraph([
+        _stream_chunk("m1", guess[:120]),
+        _stream_chunk("m1", guess[120:]),
+        _stream_chunk("m1", "", tool_call="run_python"),
+        ("updates", {"agent": {}}),
+        ("updates", {"tools": {}}),
+        _stream_chunk("m2", "เงินเดือน 42,000 บาท (25 ก.ย.)"),
+    ])
+    out = asyncio.run(_collect(stream_chat(graph, {"thread_id": "t21"}, {})))
+    answer = "".join(e["data"] for e in out if e["event"] == "answer_token")
+    narration = [e["data"] for e in out if e["event"] == "narration_token"]
+    assert "32,000" not in answer
+    assert answer == "เงินเดือน 42,000 บาท (25 ก.ย.)"
+    assert narration == ["กำลังดูรายละเอียดให้ครับ"]
+
+
+def test_UT_S22_leaked_text_is_dropped_from_the_saved_answer() -> None:
+    """UT-S22: after a tool round, text already released as answer can still be
+    followed by a tool_call. The saved answer block must not keep it."""
+    long = "ข" * 170
+    graph = _FakeGraph([
+        ("updates", {"tools": {}}),
+        _stream_chunk("m1", long),
+        _stream_chunk("m1", "", tool_call="run_python"),
+        ("updates", {"agent": {}}),
+        ("updates", {"tools": {}}),
+        _stream_chunk("m2", "คำตอบจริง"),
+    ])
+    out = asyncio.run(_collect(stream_chat(graph, {"thread_id": "t22"}, {})))
+    blocks = [json.loads(e["data"]) for e in out if e["event"] == "block"]
+    assert {"type": "answer", "text": "คำตอบจริง"} in blocks

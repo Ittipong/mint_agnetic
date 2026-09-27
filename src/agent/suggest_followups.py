@@ -50,6 +50,7 @@ Env contract:
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import os
 import re
@@ -140,24 +141,34 @@ When tapped, a chip's `send` text is re-sent verbatim AS THE USER'S next
 message — so it must read as something the user would naturally type.
 
 Output JSON ONLY, this exact shape:
-{{"skip": true|false, "reason": "<short>", "items": [{{"label": "<thai short, tappable>", "send": "<thai full message the user would send>"}}]}}
+{{"skip": true|false, "reason": "<short>", "items": [{{"kind": "deeper"|"wider"|"reply", "repeats": "<the earlier question or shown figure this chip duplicates, or empty>", "label": "<thai short, tappable>", "send": "<thai full message the user would send>"}}]}}
 
 FIRST decide the MODE by looking at the assistant's answer:
 
 MODE-QUICKREPLY — the answer ENDS WITH / CONTAINS a clarifying QUESTION back to
 the user (e.g. "ยอดเท่าไรครับ", "รายจ่ายคงที่เดือนละเท่าไร", "อยากเก็บกี่บาท").
   The user now owes an ANSWER, not a new question. So make the chips the
-  ANSWERS the user is most likely to give — 2-3 of them, covering these shapes:
-    1. A reasonable representative value / range (e.g. "ประมาณ 10,000").
+  ANSWERS the user is most likely to give (kind="reply") — 2-3 of them:
+    1. Hand it back to the assistant to work out FROM THE USER'S DATA
+       (e.g. "ช่วยคำนวณจากข้อมูลของฉัน") — ALWAYS include this one.
     2. A "none / not applicable" reply (e.g. "ไม่มีรายจ่ายคงที่").
-    3. Hand it back to the assistant (e.g. "ช่วยประมาณให้หน่อย").
+    3. A representative value ONLY when the answer truly lives in the user's
+       head (a plan, a preference). If the asked figure can be derived from
+       their stored data (fixed costs, income, average spend…), DO NOT offer a
+       guessed number — a tapped guess becomes a "fact" the next answer builds
+       a whole plan on.
+  NEVER a "not now / skip / ยังไม่…ตอนนี้" chip — tapping it wastes a turn.
+  Write 2 replies, then add 1 kind="wider" QUESTION (see MODE-NORMAL) as a way
+  out — otherwise reply chips trap the user in endless "ตึงไป / สูงกว่านี้"
+  back-and-forth with the assistant.
   CRITICAL anti-misroute rule: the `label` is short, but the `send` MUST carry
   the TOPIC of the question so the next turn is read as a continuation, not as a
   new transaction to record. NEVER let `send` be a bare number.
     Q "รายจ่ายคงที่เดือนละเท่าไร"
-      ✓ label="ประมาณ 10,000"  send="รายจ่ายคงที่ประมาณเดือนละ 10,000 บาท"
+      ✓ label="คำนวณจากข้อมูลของฉัน"  send="ช่วยคำนวณรายจ่ายคงที่จากข้อมูลของฉันให้หน่อย"
       ✓ label="ไม่มีรายจ่ายคงที่"  send="ไม่มีรายจ่ายคงที่ประจำ"
-      ✓ label="ช่วยประมาณให้"  send="ช่วยประมาณรายจ่ายคงที่ให้หน่อย"
+      ✗ label="ประมาณ 10,000"  (rent/bills are in the data — never guess them)
+      ✗ label="ยังไม่เช็คตอนนี้"  (a "not now" chip dead-ends the chat)
       ✗ send="10000"   (bare number → mis-read as ADD a 10000 transaction)
   In MODE-QUICKREPLY the user's intended answer lives in THE USER'S HEAD ON
   PURPOSE — that is what a chip is FOR here. The ANSWER-LOCATION TEST below does
@@ -165,9 +176,19 @@ the user (e.g. "ยอดเท่าไรครับ", "รายจ่าย
 
 MODE-NORMAL — the answer is NOT a question back (a statement / analysis / advice
 / a greeting). Each chip is a QUESTION the user would plausibly want to ASK the
-assistant NEXT. Freely guess 2-3, inferred from this turn's answer and data.
-THINK LIKE THE USER: "after hearing this, what would I naturally want to know
-next?" The ANSWER-LOCATION TEST and TRANSFORM rule below apply to this mode.
+assistant NEXT. Write exactly 3, as a MIX:
+  • 2 × kind="deeper" — drill into THIS answer: why, which items, vs last
+    month, which one to act on. THINK LIKE THE USER: "after hearing this, what
+    would I naturally want to know next?"
+  • 1 × kind="wider" — step SIDEWAYS to an angle the user would not think to
+    ask, but would enjoy. It must still be answerable from THEIR OWN data:
+      – what-if: "ถ้าลดช้อปปิ้งลงครึ่งนึง ไปญี่ปุ่นได้เร็วขึ้นกี่เดือน"
+      – habit / pattern: "วันไหนของสัปดาห์ที่ฉันใช้เงินเยอะสุด",
+        "ร้านที่ฉันจ่ายบ่อยที่สุดคือที่ไหน"
+      – connect topics: spending → a goal, a card bill, a budget
+      – self-comparison: "เดือนนี้เป็นเดือนที่ใช้เยอะสุดของปีไหม"
+    Surprising and personal beats generic. Not advice-from-the-internet.
+The ANSWER-LOCATION TEST and TRANSFORM rule below apply to this mode.
 
 SKIP RULES — set skip=true and items=[] ONLY when (both modes):
   - the user is in crisis / self-harm / despair, OR
@@ -200,6 +221,20 @@ HARD RULES (both modes):
     BANNED: "ตั้งงบประมาณ", "บันทึกรายจ่าย", "สร้างเป้าหมายออม", "เพิ่มกระเป๋า".
     (Advice like "ควรออมเดือนละเท่าไรดี" IS allowed — it asks the assistant.)
   - Never suggest editing/deleting a CONFIRMED transaction (chat can't).
+  - Stay on THE USER'S OWN MONEY. Never chips about external products,
+    specific funds/stocks, other apps, or where to open an account — and no
+    product-shopping questions either ("ลงทุนอะไรดี", "บัญชีดอกเบี้ยสูงมีแบบไหน",
+    "ธนาคารไหนดี"). "ควรแบ่งไปลงทุนเท่าไหร่จากรายได้ของฉัน" is fine: it is
+    about their numbers.
+  - NEVER re-suggest anything in "already asked in this chat" below — not the
+    same wording, and not the same question in other words (same metric +
+    period + scope = same question; "วันสรุปยอด" = "วันตัดรอบบัญชี").
+    For EVERY chip fill "repeats": quote the earlier question — or the figure
+    this answer/tool data already shows — that it duplicates, else "". Be
+    honest: a chip with a non-empty "repeats" is thrown away, so write
+    another one instead.
+  - Neutral wording. No worry/self-judgement framing ("ผมแย่ไหม",
+    "จะเป็นอะไรไหม") — ask about the numbers, not about the user.
 
 MODE-NORMAL HARD RULES:
   - QUESTIONS the user asks the ASSISTANT — to KNOW / ANALYZE / get ADVICE.
@@ -216,6 +251,7 @@ QUALITY RULES:
     when relevant — make it feel personal, not generic.
 
 CONTEXT
+already asked in this chat (oldest first): {asked_before}
 last user message: {user_text}
 assistant answer: {answer_text}
 this-turn tool data: {tool_data}
@@ -236,6 +272,8 @@ async def build_suggestions_block(
     tool_data: str = "(none)",
     user_context: Optional[dict] = None,
     proposal_emitted: bool = False,
+    asked_before: Optional[list[str]] = None,
+    speculative: Optional["asyncio.Task"] = None,
 ) -> Optional[dict]:
     """Return a validated `suggestions` block, or None to emit nothing.
 
@@ -250,6 +288,11 @@ async def build_suggestions_block(
                        more personal questions.
       proposal_emitted: True when a transaction_proposal[/group] block was
                         forwarded this turn → ADD turn → skip.
+      asked_before:    the user's earlier questions in this thread — chips must
+                       not repeat them (the generator used to see one turn only).
+      speculative:     a chip call started while the answer was still being
+                       written (`start_speculative`). Used unless the answer
+                       ends by asking the user back, which needs reply chips.
     """
     try:
         if not is_enabled():
@@ -271,12 +314,18 @@ async def build_suggestions_block(
         # context) must never break chip generation.
         _emit_pending()
 
-        result = await _generate(
-            user_text=user_text,
-            answer_text=answer_text,
-            tool_data=tool_data or "(none)",
-            user_catalog=_summarize_catalog(user_context),
-        )
+        result = None
+        if speculative is not None and not asks_back(answer_text):
+            result = await speculative
+            slog("suggest", f"speculative chips {'used' if result else 'failed → regenerate'}")
+        if result is None:
+            result = await _generate(
+                user_text=user_text,
+                answer_text=answer_text,
+                tool_data=tool_data or "(none)",
+                user_catalog=_summarize_catalog(user_context),
+                asked_before=asked_before,
+            )
         if result is None:
             # LLM failed / timed out. Chips are nice-to-have → emit nothing.
             slog("suggest", "skip — LLM unavailable (no fallback)")
@@ -285,7 +334,9 @@ async def build_suggestions_block(
             slog("suggest", f"skip — LLM gate ({result.get('reason')!r})")
             return None
 
-        items = _finalize(result.get("items", []))
+        # The question just asked is a repeat too (a chip once echoed it).
+        items = _finalize(result.get("items", []),
+                          asked_before=[*(asked_before or []), user_text])
         if not items:
             slog("suggest", "skip — nothing to emit after assembly")
             return None
@@ -341,6 +392,93 @@ def _loads_lenient(content: str) -> Any:
     py = re.sub(r"\bfalse\b", "False", py)
     py = re.sub(r"\bnull\b", "None", py)
     return ast.literal_eval(py)
+
+
+# Earlier questions sent to the chip prompt. Six covers a full chip chain.
+_ASKED_BEFORE_MAX = 6
+
+
+def asked_before(messages: list) -> list[str]:
+    """The user's earlier questions in this thread, oldest first (excluding the
+    current one). Internal `[INTENT:…]` markers are not questions."""
+    from langchain_core.messages import HumanMessage
+
+    texts = [
+        m.content for m in messages
+        if isinstance(m, HumanMessage) and isinstance(m.content, str)
+        and m.content.strip() and not m.content.startswith("[INTENT:")
+    ]
+    return texts[:-1][-_ASKED_BEFORE_MAX:]
+
+
+def tool_data_of(state: dict) -> str:
+    """This turn's tool outputs, flattened for the chip prompt."""
+    return "\n".join(
+        f"[{o.get('tool', '?')}] {o.get('stdout') or o.get('result') or ''}"
+        for o in (state.get("tool_outputs_this_turn") or [])
+        if isinstance(o, dict) and (o.get("stdout") or o.get("result"))
+    ) or "(none)"
+
+
+# The answer still being written when the chips are started speculatively.
+_SPECULATIVE_ANSWER = (
+    "(not written yet. It WILL present every row and total in the tool data "
+    "below, so any chip whose answer is already in the tool data — the same "
+    "list, the top item, a figure already shown — is a repeat: drop it. "
+    "Use MODE-NORMAL.)"
+)
+_SPECULATIVE: dict[str, asyncio.Task] = {}
+
+# The answer asks the user back when its last line is a question. Thai often
+# drops the "?", so the common question words at the line end count too.
+_ASKS_BACK_RE = re.compile(
+    r"(\?|？|ไหม|มั้ย|เท่าไร|เท่าไหร่|อะไร|ยังไง|อย่างไร|หรือเปล่า|ไหน|กี่\S*)"
+    r"\s*(ครับ|คะ|ค่ะ|คับ|นะครับ)?\s*[?？]?\s*\**\s*$"
+)
+
+
+def asks_back(answer_text: str) -> bool:
+    """True when the answer ends by asking the user something (reply chips)."""
+    lines = [ln.strip() for ln in (answer_text or "").splitlines() if ln.strip()]
+    return bool(lines) and bool(_ASKS_BACK_RE.search(lines[-1]))
+
+
+def start_speculative(
+    key: str,
+    *,
+    user_text: str,
+    tool_data: str,
+    user_context: Optional[dict],
+    asked_before: Optional[list[str]],
+) -> None:
+    """Start the chip call NOW, while the agent writes its answer.
+
+    Why: chips waited for the finished answer and landed ~1.8s after it
+    (docs/qa_chip_chain_2026-09-27.md). The answer mostly restates the tool
+    data, so the tool data is enough to guess the next questions. Called when
+    an agent step starts after tool results; a newer call for the same key
+    cancels the older one (the agent went for another tool round)."""
+    if not is_enabled() or not key:
+        return
+    cancel_speculative(key)
+    _SPECULATIVE[key] = asyncio.create_task(_generate(
+        user_text=user_text,
+        answer_text=_SPECULATIVE_ANSWER,
+        tool_data=tool_data or "(none)",
+        user_catalog=_summarize_catalog(user_context),
+        asked_before=asked_before,
+    ))
+
+
+def take_speculative(key: str) -> Optional[asyncio.Task]:
+    """Hand over (and forget) the speculative chip call for this turn."""
+    return _SPECULATIVE.pop(key, None)
+
+
+def cancel_speculative(key: str) -> None:
+    task = _SPECULATIVE.pop(key, None)
+    if task is not None and not task.done():
+        task.cancel()
 
 
 def _emit_pending() -> None:
@@ -421,20 +559,28 @@ def _has_card_debt(wallet: dict) -> bool:
 # live runs still produced "เพิ่มบัตรเครดิต" / "ตั้งเป้าหมายออมเงิน" — tapping
 # one only earns a "do it in the app" redirect, a dead end.
 _APP_ONLY_CHIP = re.compile(
-    r"^\s*(เพิ่ม|สร้าง|ตั้ง|ลบ|แก้ไข|แก้|ย้าย|โอน|export|ส่งออก)\s*"
-    r"(กระเป๋า|บัญชี|บัตร|เป้า|งบ|รายการประจำ|หมวด|แท็ก|รายการ|ข้อมูล)"
+    r"^\s*(ช่วย)?\s*(เพิ่ม|สร้าง|ตั้ง|ลบ|แก้ไข|แก้|ย้าย|โอน|export|ส่งออก)\s*"
+    r"(กระเป๋า|บัญชี|บัตร|เป้า|งบ|รายการประจำ|หมวด|แท็ก|รายการ|ข้อมูล|แจ้งเตือน|เตือน)"
+    # Reminders: the chat cannot schedule one ("เตือนเมื่อถึงวันสรุปยอด").
+    r"|^\s*(ช่วย)?\s*(ตั้ง)?\s*(แจ้ง)?เตือน"
 )
+
+
+# "Not now" replies: tapping one only earns "ok, ask me anytime" — a dead turn.
+_NOT_NOW_CHIP = re.compile(r"^\s*(ยังไม่|ไม่ต้อง|ไว้ก่อน|ไว้ทีหลัง|ไม่เป็นไร)")
 
 
 def _is_app_only(chip: dict) -> bool:
     return bool(_APP_ONLY_CHIP.match(chip["label"]) or _APP_ONLY_CHIP.match(chip["send"]))
 
 
-def _finalize(items: list[Any]) -> list[dict]:
-    """Normalize LLM items into `{label, send}`, drop app-only action chips,
-    dedup, cap at _MAX_ITEMS."""
-    out: list[dict] = []
-    seen: set[str] = set()
+def _finalize(items: list[Any], *, asked_before: Optional[list[str]] = None) -> list[dict]:
+    """Normalize LLM items into `{label, send}`, drop app-only action chips and
+    word-for-word repeats of earlier questions, keep at most one "wider" chip
+    (placed last, after the drill-downs), dedup, cap at _MAX_ITEMS."""
+    kept: list[tuple[str, dict]] = []
+    seen: set[str] = {_key(q) for q in (asked_before or []) if q}
+    wider = 0
     for raw in items:
         chip = _norm_chip(raw)
         if chip is None:
@@ -442,14 +588,25 @@ def _finalize(items: list[Any]) -> list[dict]:
         if _is_app_only(chip):
             slog("suggest", f"dropped app-only chip {chip['label']!r}")
             continue
+        if _NOT_NOW_CHIP.match(chip["label"]):
+            slog("suggest", f"dropped not-now chip {chip['label']!r}")
+            continue
         key = _key(chip["send"])
         if key in seen:
+            slog("suggest", f"dropped repeat chip {chip['label']!r}")
             continue
+        kind = str(raw.get("kind") or "") if isinstance(raw, dict) else ""
+        if isinstance(raw, dict) and str(raw.get("repeats") or "").strip():
+            slog("suggest", f"dropped self-flagged repeat {chip['label']!r} ~ {raw['repeats']!r}")
+            continue
+        if kind == "wider":
+            if wider:
+                continue
+            wider += 1
         seen.add(key)
-        out.append(chip)
-        if len(out) >= _MAX_ITEMS:
-            break
-    return out
+        kept.append((kind, chip))
+    kept.sort(key=lambda kc: kc[0] == "wider")  # stable: drill-downs first
+    return [chip for _, chip in kept[:_MAX_ITEMS]]
 
 
 def _norm_chip(raw: Any) -> Optional[dict]:
@@ -484,6 +641,7 @@ async def _generate(
     answer_text: str,
     tool_data: str,
     user_catalog: str,
+    asked_before: Optional[list[str]] = None,
 ) -> Optional[dict]:
     """Run the chip generator. Returns the parsed dict, or None on any
     failure (caller then emits nothing)."""
@@ -493,6 +651,7 @@ async def _generate(
         return None
 
     prompt = _PROMPT_TEMPLATE.format(
+        asked_before=json.dumps(asked_before or [], ensure_ascii=False),
         user_text=user_text or "(none)",
         answer_text=(answer_text or "")[:1500],
         tool_data=tool_data,
@@ -555,7 +714,13 @@ async def _generate(
 
 
 __all__ = [
+    "asked_before",
+    "asks_back",
+    "tool_data_of",
     "build_suggestions_block",
+    "cancel_speculative",
+    "start_speculative",
+    "take_speculative",
     "is_add_block",
     "is_enabled",
 ]

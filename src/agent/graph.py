@@ -186,6 +186,9 @@ def _make_model():
         # Temperature 0 = deterministic for tool-calling + numerical answers.
         # Per-turn empathy comes from the prompt, not from sampling noise.
         temperature=0.0,
+        # The flat agent node streams tokens (flat_react.py); ask OpenRouter
+        # for the usage chunk so the session log keeps its token counts.
+        stream_usage=True,
         extra_body=extra_body or None,
         # Bridge LangChain callbacks → SessionLogger so every ReAct LLM step +
         # every tool call (incl. CodeAct run_python) shows up in
@@ -366,7 +369,9 @@ async def _gen_suggestions(state: AgentState) -> dict:
     nice-to-have (`build_suggestions_block` swallows its own failures).
     """
     from langchain_core.messages import AIMessage as _AIMessage
-    from src.agent.suggest_followups import build_suggestions_block
+    from src.agent.suggest_followups import (
+        asked_before, build_suggestions_block, take_speculative, tool_data_of,
+    )
 
     messages = state.get("messages") or []
     answer_text = _last_text(
@@ -374,20 +379,23 @@ async def _gen_suggestions(state: AgentState) -> dict:
         lambda m: isinstance(m, _AIMessage) and not getattr(m, "tool_calls", None),
     )
     user_text = _last_text(messages, lambda m: isinstance(m, HumanMessage))
+    # Started by the flat agent node while the answer was being written.
+    speculative = take_speculative(state.get("thread_id") or "")
 
-    tool_data = "\n".join(
-        f"[{o.get('tool', '?')}] {o.get('stdout') or o.get('result') or ''}"
-        for o in (state.get("tool_outputs_this_turn") or [])
-        if isinstance(o, dict) and (o.get("stdout") or o.get("result"))
-    ) or "(none)"
-
-    block = await build_suggestions_block(
-        user_text=user_text,
-        answer_text=answer_text,
-        tool_data=tool_data,
-        user_context=state.get("user_context"),
-        proposal_emitted=_add_turn(state, messages),
-    )
+    try:
+        block = await build_suggestions_block(
+            user_text=user_text,
+            answer_text=answer_text,
+            tool_data=tool_data_of(state),
+            user_context=state.get("user_context"),
+            proposal_emitted=_add_turn(state, messages),
+            asked_before=asked_before(messages),
+            speculative=speculative,
+        )
+    finally:
+        # A skipped turn (ADD / crisis / reply chips) never awaited it.
+        if speculative is not None and not speculative.done():
+            speculative.cancel()
     return {"suggestions_block": block}
 
 

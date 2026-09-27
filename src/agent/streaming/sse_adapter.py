@@ -264,6 +264,127 @@ def _yield_message_event(chunk: Any) -> Optional[dict]:
     return {"event": event, "data": text}
 
 
+# A streamed message whose opening text reaches this many characters with no
+# tool_call yet is the answer. Narration is 5-12 Thai words (~60 chars, prompt
+# "PROGRESS NARRATION"), so 160 leaves headroom without holding the answer long.
+_ANSWER_COMMIT_CHARS = 160
+# The narration bubble shows at most this much: a model that writes a whole
+# guessed answer before its tool call must not get that guess on screen.
+_NARRATION_MAX_CHARS = 160
+
+
+def _narration_head(text: str) -> str:
+    """First paragraph of the narration, capped — never a guessed answer."""
+    head = (text or "").strip().split("\n", 1)[0].strip()
+    return head[:_NARRATION_MAX_CHARS]
+
+
+class _MessageRouter:
+    """Route one turn's STREAMED agent chunks to narration vs answer.
+
+    Why: the flat agent node streams tokens, and Gemini writes the narration
+    ("กำลังรวมยอดให้นะครับ") BEFORE the tool_call chunks of the same message
+    arrive (~200ms later). A per-chunk decision would push that narration into
+    the answer bubble. So each message's opening text is HELD until one of:
+      - a tool_call chunk arrives      → the held text was narration
+      - the held text passes `_ANSWER_COMMIT_CHARS` → it is the answer; release
+        it and pass every later chunk straight through
+      - the message ends (`flush`)     → no tool_call came → it is the answer
+    Complete AIMessages and id-less chunks (prebuilt subgraph boundary,
+    direct_propose, tests) keep the one-shot `_yield_message_event` routing.
+
+    The length rule applies only AFTER a tool round this turn. In the first
+    step the model has no data yet; a chain test caught it writing a whole
+    invented answer ("เงินเดือน 32,000 …") before its tool call, and that must
+    stay unreleased narration. If text still leaks (a tool_call after release),
+    a `_retract` event tells `stream_chat` to drop it from the saved answer.
+    """
+
+    __slots__ = ("_id", "_held", "_mode", "_seen", "_after_tools", "_released")
+
+    def __init__(self) -> None:
+        self._id: Optional[str] = None
+        self._held: list[str] = []
+        self._mode: Optional[str] = None  # None=undecided | "narration" | "answer"
+        self._seen: set[str] = set()
+        self._after_tools = False
+        self._released: list[str] = []  # answer text released for this message
+
+    def tools_ran(self) -> None:
+        """A tool round finished — later steps answer from real data."""
+        self._after_tools = True
+
+    def feed(self, chunk: Any) -> list[dict]:
+        """Take one `messages` stream entry; return the events it releases."""
+        if not isinstance(chunk, tuple) or len(chunk) != 2:
+            return []
+        msg = chunk[0]
+        msg_id = getattr(msg, "id", None)
+        if not isinstance(msg, AIMessageChunk) or not msg_id:
+            # The full message of an already-streamed id must not re-emit.
+            if isinstance(msg, AIMessage) and msg_id and msg_id in self._seen:
+                return []
+            ev = _yield_message_event(chunk)
+            return self.flush() + ([ev] if ev else [])
+
+        out: list[dict] = []
+        if msg_id != self._id:
+            out += self.flush()
+            self._id = msg_id
+            self._seen.add(msg_id)
+        text = msg.content if isinstance(msg.content, str) else ""
+        has_tool_call = _message_has_tool_calls(msg)
+
+        if self._mode == "answer":
+            if has_tool_call:
+                slog("sse_adapter",
+                     "tool_call after answer text was released — narration "
+                     f"longer than {_ANSWER_COMMIT_CHARS} chars leaked into answer")
+                out.append({"event": "_retract", "data": "".join(self._released)})
+                self._mode, self._released = "narration", []
+                return out
+            text = _strip_internal_markers(text)
+            if text:
+                self._released.append(text)
+                out.append({"event": "answer_token", "data": text})
+            return out
+        if self._mode == "narration":
+            return out  # text after the tool_call starts is never shown
+        if text:
+            self._held.append(text)
+        if has_tool_call:
+            self._mode = "narration"
+            held = _narration_head(_strip_internal_markers("".join(self._held)))
+            self._held = []
+            if held:
+                out.append({"event": "narration_token", "data": held})
+        elif self._after_tools and sum(len(t) for t in self._held) >= _ANSWER_COMMIT_CHARS:
+            self._mode = "answer"
+            out += self._release_answer()
+        return out
+
+    def flush(self) -> list[dict]:
+        """End the current message; undecided held text is the answer."""
+        out = self._release_answer() if self._mode is None else []
+        self._id, self._held, self._mode, self._released = None, [], None, []
+        return out
+
+    def _release_answer(self) -> list[dict]:
+        held = _strip_internal_markers("".join(self._held))
+        self._held = []
+        if held:
+            self._released.append(held)
+        return [{"event": "answer_token", "data": held}] if held else []
+
+
+def _drop_suffix(chunks: list[str], leaked: str) -> list[str]:
+    """Remove `leaked` from the end of the joined answer chunks."""
+    joined = "".join(chunks)
+    if leaked and joined.endswith(leaked):
+        joined = joined[: len(joined) - len(leaked)]
+    return [joined] if joined else []
+
+
 def _yield_custom_event(chunk: Any) -> Optional[dict]:
     """Translate one `custom` event into a wire token dict.
 
@@ -370,19 +491,24 @@ async def stream_chat(
     # `final_text`, so the guard skips).
     soft_warn_footer: Optional[str] = None
 
+    router = _MessageRouter()
+
     try:
         async for stream_mode, chunk in graph.astream(
             initial_state,
             config=config,
             stream_mode=["messages", "custom", "updates"],
         ):
-            # ── messages stream — answer tokens + narration status ─────────
+            # ── messages stream — answer tokens + narration ────────────────
             if stream_mode == "messages":
-                ev = _yield_message_event(chunk)
-                if ev is not None:
+                for ev in router.feed(chunk):
+                    if ev["event"] == "_retract":
+                        # Leaked pre-tool text: keep it out of the saved answer.
+                        answer_chunks = _drop_suffix(answer_chunks, ev["data"])
+                        continue
                     # Only the real answer (tool-call-free content) feeds the
-                    # final answer block. Narration routed to `status_token`
-                    # is ephemeral and must NEVER reach the history answer.
+                    # final answer block. Narration is ephemeral and must
+                    # NEVER reach the history answer.
                     if ev["event"] == "answer_token":
                         answer_chunks.append(ev["data"])
                     yield ev
@@ -417,8 +543,15 @@ async def stream_chat(
 
             # ── updates stream — drain emitted_blocks_this_turn tail ──────
             if stream_mode == "updates":
+                # A node finished → any message it streamed has ended; release
+                # held text so the answer lands before the node's blocks.
+                for ev in router.flush():
+                    answer_chunks.append(ev["data"])
+                    yield ev
                 if not isinstance(chunk, dict):
                     continue
+                if "tools" in chunk:  # flat_react's ToolNode finished a round
+                    router.tools_ran()
                 # chunk shape: {node_name: state_delta_dict}
                 for _node_name, delta in chunk.items():
                     if not isinstance(delta, dict):
@@ -479,6 +612,9 @@ async def stream_chat(
             # forward-compatible without an error path here.
 
         # ── End of graph — flush final answer + done ──────────────────────
+        for ev in router.flush():
+            answer_chunks.append(ev["data"])
+            yield ev
         # Re-strip the assembled answer: per-token filtering catches the common
         # case (a marker echoed as one complete message), but if a provider
         # split the marker across streaming chunks, the seam only closes here.

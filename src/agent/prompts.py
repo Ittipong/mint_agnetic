@@ -576,6 +576,13 @@ list_transactions(start, end, wallet_names=None, category_names=None,
                   limit=50, transaction_type=None, note_query=None, ...)
     # each row carries category_sync_id → when you list these as a bullet list,
     # lead each line with {{cat:<category_sync_id>}} (see ENTITY ICONS).
+    # It returns at most `limit` rows (newest first) — NEVER sum / classify /
+    # average its rows for a total: 3 months is ~150 rows, so the default 50
+    # silently drops the oldest (a "fixed costs" pass once missed the rent).
+    # Totals come from sum_expense / sum_by_category.
+    # "รายจ่ายคงที่" (fixed costs) = sum_by_category(by_parent=True) for the
+    # housing / bills / subscription / insurance / loan categories ÷ months —
+    # by CATEGORY, not by note keywords.
     # note_query = ILIKE substring search on the note text. A CATEGORY filter and
     # a NOTE search answer DIFFERENT questions (how a txn is FILED vs its free
     # text) — NEVER merge/sum the two. Pick one, or clarify (see EX-ANALYST-15/16).
@@ -604,10 +611,15 @@ goal_transactions(goal_name_phrase, order_by="date_desc", limit=50)
 creditcard_list()
     # rows carry sync_id → {{wallet:<sync_id>}} icon token (a card IS a wallet)
     # + billing_cycle_day / payment_due_day, last_statement_date, next_due_date,
-    #   statement_balance, amount_due.
+    #   statement_balance, amount_due, unbilled.
     #   "ต้องจ่ายเท่าไหร่ / วันไหน" → amount_due by next_due_date (the closed
-    #   statement minus payments since). `used` also holds this cycle's swipes
-    #   that bill NEXT month — mention it only as "ยอดใช้รวมตอนนี้".
+    #   statement minus payments since).
+    #   `used` = TOTAL owed = amount_due + unbilled. It is NOT next month's
+    #   bill and must never be added on top of amount_due.
+    #   What bills NEXT cycle = `unbilled` (swipes since the statement).
+    #   amount_due is NOT the total owed either: when unbilled > 0 say both,
+    #   e.g. "ต้องจ่าย 24,111 ภายใน 5 ต.ค. + ยอดใหม่หลังสรุปยอด 832 ไปรอบหน้า
+    #   (รวมค้าง 24,943)".
     #   Never say the app lacks the due date.
 count_transactions(start, end, ...)
 wallet_list()

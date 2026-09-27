@@ -112,6 +112,14 @@ class ReActSessionLogCallback(BaseCallbackHandler):
                 text = json.dumps(text, ensure_ascii=False, default=str)
             tool_calls = getattr(msg, "tool_calls", None) or []
             usage = (response.llm_output or {}).get("token_usage") or {}
+            # A streamed call has no `llm_output` usage — it rides on the merged
+            # message's `usage_metadata` instead (needs `stream_usage=True`).
+            meta = getattr(msg, "usage_metadata", None) or {}
+            if not usage and meta:
+                usage = {
+                    "prompt_tokens": meta.get("input_tokens", "?"),
+                    "completion_tokens": meta.get("output_tokens", "?"),
+                }
             usage_str = (
                 f"prompt={usage.get('prompt_tokens', '?')} "
                 f"completion={usage.get('completion_tokens', '?')}"

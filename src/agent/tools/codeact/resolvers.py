@@ -289,6 +289,21 @@ def _expand_subcategories(primary, all_entries) -> list[str]:
     return sorted(kept)
 
 
+def is_root_dominant(name: str, all_entries) -> bool:
+    """True when `name` is more often a top-level category than a sub-category
+    in this user's catalog (ties → root).
+
+    Such a name is filtered like the app report's "แยกตามหมวด" — a transaction
+    counts when its category OR its parent carries the name — so "ช้อปปิ้ง"
+    includes its nested "อาหาร"/"ซุปเปอร์มาร์เก็ต" children and "อาหาร" does not
+    pull those back out. A mostly-nested name ("น้ำมัน", "เสื้อผ้า") is a leaf
+    match on every copy. Same majority test as `_expand_subcategories`.
+    """
+    roots = sum(1 for c in all_entries if c.name == name and not c.parent_id)
+    children = sum(1 for c in all_entries if c.name == name and c.parent_id)
+    return roots > 0 and roots >= children
+
+
 def _decide(
     kind: str,
     query: str,

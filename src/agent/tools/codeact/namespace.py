@@ -119,12 +119,16 @@ class _Wrappers:
         # Categories filter by name (denormalized) — sync_id is informational.
         if not names:
             return []
+        from src.agent.tools.codeact.resolvers import is_root_dominant
+
+        pool = self._catalog.categories_all or self._catalog.categories
         return [
             ResolvedEntity(
-                sync_id="",  # not used: SQL filters on category_name
+                sync_id="",  # not used: SQL filters on names
                 display_name=name,
                 kind="category",
                 score=1.0,
+                group_match=is_root_dominant(name, pool),
             )
             for name in names
         ]
@@ -374,7 +378,7 @@ class _Wrappers:
             also searches `destination_note` so transfers are caught.
           - `has_note=True/False` filters by note presence.
         """
-        return self._exec(
+        rows = self._exec(
             self._spec(
                 metric="list",
                 start=start,
@@ -391,6 +395,15 @@ class _Wrappers:
                 has_note=has_note,
             )
         )
+        if limit and len(rows) >= limit:
+            # stdout reaches the LLM. Summing a capped list once turned KTC's
+            # 15,524 into 14,574 and a fixed-cost pass lost the rent.
+            print(
+                f"[list_transactions] TRUNCATED at limit={limit}: older rows are "
+                "missing. Do NOT sum/count/average these rows — use sum_expense, "
+                "sum_by_category, sum_by_wallet or count_transactions for totals."
+            )
+        return rows
 
     def balance(
         self,
@@ -445,9 +458,12 @@ class _Wrappers:
 
         Each row: {sync_id, name, credit_limit, used, available, currency,
         billing_cycle_day, payment_due_day, last_statement_date, next_due_date,
-        statement_balance, amount_due, cache_updated_at}. `amount_due` = the
-        closed statement minus payments since — the figure to pay by
-        next_due_date (None when the card has no billing day). `used` mirrors the backend's cached_used_amount.
+        statement_balance, amount_due, unbilled, cache_updated_at}. `amount_due`
+        = the closed statement minus payments since — the figure to pay by
+        next_due_date (None when the card has no billing day). `unbilled` = the
+        swipes since that statement, which bill next cycle (`used` − the
+        statement still owed). `used` mirrors the backend's cached_used_amount
+        and is the TOTAL owed: amount_due + unbilled.
         When the cache has never been written it stays NULL (and `available`
         is NULL too) — never substitute a 0 or initial_used here, an unknown
         usage must read as unknown so the user can see the cache is stale.
@@ -469,7 +485,7 @@ class _Wrappers:
             # "ต้องจ่ายเท่าไหร่" = what the closed statement billed minus what was
             # paid since, NOT the live `used` (which also holds the open cycle's
             # swipes that bill next month).
-            r["statement_balance"] = r["amount_due"] = None
+            r["statement_balance"] = r["amount_due"] = r["unbilled"] = None
             if r["last_statement_date"] is not None:
                 spec = self._spec(metric="creditcard_statement",
                                   start=date(1900, 1, 1), end=r["last_statement_date"])
@@ -481,6 +497,11 @@ class _Wrappers:
                     paid = Decimal(str(st[0]["paid_since_statement"] or 0))
                     r["statement_balance"] = bal
                     r["amount_due"] = max(bal - paid, Decimal(0))
+                    # Unclamped owed-on-statement, so an overpayment lowers the
+                    # next cycle instead of vanishing. The LLM once read the
+                    # total `used` (24,943) as "next cycle" on top of 24,111 due.
+                    if r.get("used") is not None:
+                        r["unbilled"] = Decimal(str(r["used"])) - (bal - paid)
         return rows
 
     def budget_transactions(

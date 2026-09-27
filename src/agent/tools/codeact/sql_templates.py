@@ -52,32 +52,41 @@ def _wallet_filter(spec: QuerySpec, params: list[Any]) -> str:
 
 
 def _category_filter(spec: QuerySpec, params: list[Any]) -> str:
-    """Filter by display name, not sync_id.
+    """Filter by category NAME (categories are cloned per wallet, so a sync_id
+    only covers one wallet), following the category tree.
 
-    Categories are duplicated per wallet (each wallet owns its own copy of the
-    system categories), so a single sync_id only covers transactions in one
-    wallet. We filter on `transactions.category_name` (denormalized) instead
-    so 'อาหาร' matches across every wallet.
+    - `group_match` names (mostly top-level in this catalog, e.g. "ช้อปปิ้ง"):
+      a transaction matches when its category's parent name — or, for a
+      top-level category, its own name — is the name. That is exactly the app
+      report's "แยกตามหมวด" grouping, so a chat total equals the report and
+      every real child counts, including a nested "อาหาร" that a name list
+      could not safely include.
+    - other names (sub-categories like "เสื้อผ้า", or unknown): leaf match on
+      `t.category_name`, every copy.
 
-    For category hierarchy expansion (e.g., "เดินทาง" → "แท็กซี่", "BTS/MRT"),
-    expand_ids contains the sub-category names that should be included.
+    Chip-chain QA found "ช้อปปิ้ง" answered as 16,900 / 24,214 / 25,345 in one
+    thread before this (docs/qa_chip_chain_2026-09-27.md).
     """
     if not spec.categories:
         return ""
-    names = [c.display_name for c in spec.categories]
-    # Include expanded sub-category names for hierarchy matching
+    group: list[str] = []
+    leaf: list[str] = []
     for c in spec.categories:
-        if c.expand_ids:
-            names.extend(c.expand_ids)
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_names = []
-    for n in names:
-        if n not in seen:
-            seen.add(n)
-            unique_names.append(n)
-    params.append(unique_names)
-    return f"AND t.category_name = ANY(${len(params)}::text[])"
+        (group if c.group_match else leaf).append(c.display_name)
+        leaf.extend(n for n in c.expand_ids if n)
+    parts: list[str] = []
+    if group:
+        params.append(list(dict.fromkeys(group)))
+        parts.append(
+            "COALESCE((SELECT COALESCE(fp.name, fc.name) FROM categories fc "
+            "LEFT JOIN categories fp ON fp.sync_id = fc.parent_sync_id "
+            "WHERE fc.sync_id = t.category_sync_id LIMIT 1), t.category_name)"
+            f" = ANY(${len(params)}::text[])"
+        )
+    if leaf:
+        params.append(list(dict.fromkeys(leaf)))
+        parts.append(f"t.category_name = ANY(${len(params)}::text[])")
+    return f"AND ({' OR '.join(parts)})"
 
 
 def _tag_filter(spec: QuerySpec, params: list[Any]) -> str:
@@ -504,7 +513,7 @@ def build_sum_by_wallet(spec: QuerySpec, user_id: str) -> tuple[str, list]:
     if spec.convert_to_thb:
         sql = f"""
             SELECT
-                {_wallet_name_expr().replace(' AS wallet_name', ' AS bucket')} AS bucket,
+                {_wallet_name_expr().replace(' AS wallet_name', ' AS bucket')},
                 MAX(t.wallet_sync_id)    AS wallet_sync_id,
                 'THB'                    AS currency,
                 SUM({_AMOUNT_THB_EXPR}) AS amount,
@@ -525,7 +534,7 @@ def build_sum_by_wallet(spec: QuerySpec, user_id: str) -> tuple[str, list]:
     else:
         sql = f"""
             SELECT
-                {_wallet_name_expr().replace(' AS wallet_name', ' AS bucket')} AS bucket,
+                {_wallet_name_expr().replace(' AS wallet_name', ' AS bucket')},
                 MAX(t.wallet_sync_id)             AS wallet_sync_id,
                 COALESCE(t.currency_code, 'THB') AS currency,
                 SUM(t.amount::numeric)            AS amount,

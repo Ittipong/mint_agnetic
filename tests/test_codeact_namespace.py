@@ -838,6 +838,35 @@ def test_UT_NS_CC01_creditcard_list_has_due_date_and_amount_due(monkeypatch):
     assert ns_mod._day_of_month_on_or_before(date(2026, 1, 3), 20) == date(2025, 12, 20)
 
 
+def test_UT_NS_CC02_creditcard_list_splits_used_into_due_and_unbilled(monkeypatch):
+    """UT-NS-CC02: dev DB 2026-09-27 — KTC statement (Sep 20) 24,111, nothing
+    paid since, then Tops 982 and a 150 cashback → used 24,943. The chat said
+    "another 24,943 bills next cycle"; the next cycle is only 832. `unbilled`
+    must be 832 and amount_due + unbilled must equal used."""
+
+    async def fake_run_query(spec, user_id):
+        if spec.metric == "creditcard_statement":
+            return [{"statement_balance": Decimal("24111"),
+                     "paid_since_statement": Decimal("0")}]
+        return [{"sync_id": "cc-1", "name": "บัตร KTC",
+                 "credit_limit": Decimal("80000"), "used": Decimal("24943"),
+                 "available": Decimal("55057"), "currency": "THB",
+                 "billing_cycle_day": 20, "payment_due_day": 5}]
+
+    monkeypatch.setattr(ns_mod, "_run_query", fake_run_query)
+
+    async def run():
+        ns = build_namespace(user_id="u-1", catalog=_catalog(),
+                             today=date(2026, 9, 27),
+                             main_loop=asyncio.get_running_loop())
+        return await asyncio.to_thread(ns["creditcard_list"])
+
+    row = asyncio.run(run())[0]
+    assert row["amount_due"] == Decimal("24111")
+    assert row["unbilled"] == Decimal("832")
+    assert row["amount_due"] + row["unbilled"] == row["used"]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # UT-NS-CAT01 — sum_by_category(by_parent=True) folds sub-categories
 # ─────────────────────────────────────────────────────────────────────────────
@@ -875,3 +904,86 @@ def test_UT_NS_CAT01_sum_by_category_parent_level(monkeypatch):
 
     asyncio.run(run())
     assert seen == ["leaf", "parent", "parent"]
+
+
+def test_UT_NS_WAL01_sum_by_wallet_sql_has_one_bucket_alias():
+    """UT-NS-WAL01: chip-chain round 5 — every sum_by_wallet call failed with
+    `PostgresSyntaxError: syntax error at or near "AS"` because the template
+    emitted `… AS bucket AS bucket`. The model then summed a capped
+    list_transactions and reported KTC Aug 14,574 (DB 15,524). Verified
+    against dev DB after the fix: Aug KTC 15,524, Sep KTC 22,055."""
+    from src.agent.tools.codeact.schemas import QuerySpec, TimeRange
+    from src.agent.tools.codeact.sql_templates import build_sum_by_wallet
+
+    for thb in (True, False):
+        spec = QuerySpec(metric="sum_by_wallet", convert_to_thb=thb,
+                         time_range=TimeRange(start=date(2026, 8, 1), end=date(2026, 8, 31),
+                                              granularity="day", confidence=1.0))
+        sql, _ = build_sum_by_wallet(spec, "u-1")
+        assert "AS bucket AS bucket" not in sql
+        assert sql.count(" AS bucket") == 1
+
+
+def test_UT_NS_LIST01_truncated_list_warns_the_llm(monkeypatch, capsys):
+    """UT-NS-LIST01: a list_transactions result that hits `limit` prints a
+    TRUNCATED warning (sandbox stdout reaches the LLM); a short one does not."""
+
+    async def fake_run_query(spec, user_id):
+        return [{"amount": 1}] * (spec.limit or 0 if spec.limit == 3 else 2)
+
+    monkeypatch.setattr(ns_mod, "_run_query", fake_run_query)
+
+    async def run(limit):
+        ns = build_namespace(user_id="u-1", catalog=_catalog(), today=date(2026, 9, 27),
+                             main_loop=asyncio.get_running_loop())
+        return await asyncio.to_thread(
+            ns["list_transactions"], start="2026-07-01", end="2026-09-27", limit=limit)
+
+    asyncio.run(run(3))
+    assert "TRUNCATED at limit=3" in capsys.readouterr().out
+    asyncio.run(run(50))
+    assert "TRUNCATED" not in capsys.readouterr().out
+
+
+def test_UT_NS_CAT02_category_filter_follows_the_tree(monkeypatch):
+    """UT-NS-CAT02: chip-chain QA — "ช้อปปิ้ง" came back as 16,900 / 24,214 /
+    25,345 in one thread because SQL matched a flat NAME list. A mostly-root
+    name must match by the report grouping (its category OR parent carries the
+    name); a mostly-nested name stays a leaf match. Verified on dev DB
+    2026-09-27: Sep ช้อปปิ้ง 25,345 / 8 items, Aug 7,244 (was "none"),
+    อาหาร 2,165 — all equal to the app report."""
+    from src.agent.entity_catalog import CategoryEntry, EntityCatalog
+    from src.agent.tools.codeact.sql_templates import build_sum_expense
+
+    shop_g = CategoryEntry("g-shop", "ช้อปปิ้ง", "expense")
+    shop_c = CategoryEntry("c-shop", "ช้อปปิ้ง", "expense")
+    food_g = CategoryEntry("g-food", "อาหาร", "expense")
+    food_g2 = CategoryEntry("g2-food", "อาหาร", "expense")
+    food_c = CategoryEntry("c-food", "อาหาร", "expense", parent_id="c-shop")
+    clothes = CategoryEntry("c-clothes", "เสื้อผ้า", "expense", parent_id="c-shop")
+    cat = EntityCatalog(categories=[shop_g, food_g, clothes],
+                        categories_all=[shop_g, shop_c, food_g, food_g2, food_c, clothes])
+
+    seen = []
+
+    async def fake_run_query(spec, user_id):
+        seen.append(spec)
+        return [{"amount": 0}]
+
+    monkeypatch.setattr(ns_mod, "_run_query", fake_run_query)
+
+    async def run():
+        ns = build_namespace(user_id="u-1", catalog=cat, today=date(2026, 9, 27),
+                             main_loop=asyncio.get_running_loop())
+        return await asyncio.to_thread(
+            ns["sum_expense"], start="2026-09-01", end="2026-09-30",
+            category_names=["ช้อปปิ้ง", "อาหาร", "เสื้อผ้า"])
+
+    asyncio.run(run())
+    flags = {c.display_name: c.group_match for c in seen[0].categories}
+    # อาหาร: root×2 vs child×1 → report grouping (nested copy stays shopping).
+    assert flags == {"ช้อปปิ้ง": True, "อาหาร": True, "เสื้อผ้า": False}
+
+    sql, params = build_sum_expense(seen[0], "u-1")
+    assert "COALESCE(fp.name, fc.name)" in sql
+    assert ["ช้อปปิ้ง", "อาหาร"] in params and ["เสื้อผ้า"] in params

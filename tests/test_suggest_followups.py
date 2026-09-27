@@ -314,3 +314,142 @@ def test_UT_SUG_APPONLY_action_chips_the_chat_cannot_do_are_dropped():
         {"label": "ตั้งแต่ต้นเดือนใช้ไปเท่าไหร่", "send": "ตั้งแต่ต้นเดือนใช้ไปเท่าไหร่"},
     ])
     assert [c["label"] for c in out] == ["ควรออมเดือนละเท่าไหร่", "ตั้งแต่ต้นเดือนใช้ไปเท่าไหร่"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UT-SG20..SG25 — chip-chain fixes (docs/qa_chip_chain_2026-09-27.md)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_UT_SG20_repeat_of_an_earlier_question_is_dropped():
+    """UT-SG20: a 6-tap chain offered "เดือนนี้หมวดไหนใช้จ่ายเยอะที่สุด" again
+    after the thread already asked it. A word-for-word repeat of an earlier
+    question must be dropped (spacing differences included)."""
+    out = sf._finalize(
+        [
+            {"kind": "deeper", "label": "หมวดไหนเยอะสุด", "send": "เดือนนี้หมวดไหน ใช้จ่ายเยอะที่สุด"},
+            {"kind": "deeper", "label": "เทียบเดือนก่อน", "send": "ช้อปปิ้งเทียบเดือนก่อนเป็นยังไง"},
+        ],
+        asked_before=["เดือนนี้ใช้จ่ายไปเท่าไหร่", "เดือนนี้หมวดไหนใช้จ่ายเยอะที่สุด"],
+    )
+    assert [c["label"] for c in out] == ["เทียบเดือนก่อน"]
+
+
+def test_UT_SG21_mix_keeps_one_wider_chip_and_puts_it_last():
+    """UT-SG21: the owner wants drill-downs mixed with ONE sideways question.
+    Extra "wider" chips are dropped and the wider one always renders last."""
+    out = sf._finalize([
+        {"kind": "wider", "label": "วันไหนใช้เยอะสุด", "send": "วันไหนของสัปดาห์ที่ฉันใช้เงินเยอะสุด"},
+        {"kind": "deeper", "label": "ทำไมช้อปปิ้งสูง", "send": "ทำไมช้อปปิ้งเดือนนี้สูง"},
+        {"kind": "wider", "label": "ร้านประจำ", "send": "ร้านที่ฉันจ่ายบ่อยที่สุดคือที่ไหน"},
+        {"kind": "deeper", "label": "เทียบเดือนก่อน", "send": "เทียบกับเดือนก่อน"},
+    ])
+    assert [c["label"] for c in out] == ["ทำไมช้อปปิ้งสูง", "เทียบเดือนก่อน", "วันไหนใช้เยอะสุด"]
+
+
+def test_UT_SG22_asks_back_detects_thai_questions_without_question_mark():
+    """UT-SG22: reply chips need the real answer, so a speculative chip call is
+    only reused when the answer does NOT end by asking the user back."""
+    assert sf.asks_back("รายจ่ายคงที่ประมาณเท่าไรครับ?")
+    assert sf.asks_back("สรุปยอดให้แล้วนะครับ\n\nอยากลองเช็คดูไหมครับ")
+    assert not sf.asks_back("เดือนนี้ใช้ไป **44,399 บาท** ครับ")
+    assert not sf.asks_back("")
+
+
+def test_UT_SG23_asked_before_skips_current_turn_and_intent_markers():
+    """UT-SG23: history for the prompt = earlier user questions only."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    msgs = [HumanMessage("q1"), AIMessage("a1"), HumanMessage("[INTENT:wallet_created]"),
+            AIMessage("a2"), HumanMessage("q2"), AIMessage("a3"), HumanMessage("current")]
+    assert sf.asked_before(msgs) == ["q1", "q2"]
+
+
+async def _spec_result(v):
+    return v
+
+
+def test_UT_SG24_speculative_chips_used_when_answer_is_a_statement():
+    """UT-SG24: chips started during the answer are reused — no second LLM call."""
+    import asyncio
+
+    calls = []
+
+    async def fake_generate(**kw):
+        calls.append(kw)
+        return _gen(items=[{"label": "B", "send": "B?"}])
+
+    async def run():
+        task = asyncio.ensure_future(_spec_result(_gen(items=[{"label": "A", "send": "A?"}])))
+        with patch.object(sf, "_generate", fake_generate), \
+             patch.dict("os.environ", {"SUGGESTIONS_ENABLED": "1"}):
+            return await sf.build_suggestions_block(
+                user_text="เดือนนี้ใช้ไปเท่าไร", answer_text="ใช้ไป 44,399 บาทครับ",
+                speculative=task)
+
+    block = asyncio.run(run())
+    assert [c["label"] for c in block["items"]] == ["A"]
+    assert calls == []
+
+
+def test_UT_SG25_answer_that_asks_back_regenerates_reply_chips():
+    """UT-SG25: when the answer ends with a question to the user, the
+    speculative (MODE-NORMAL) chips are wrong — regenerate with the answer."""
+    import asyncio
+
+    calls = []
+
+    async def fake_generate(**kw):
+        calls.append(kw)
+        return _gen(items=[{"kind": "reply", "label": "คำนวณจากข้อมูลของฉัน",
+                            "send": "ช่วยคำนวณรายจ่ายคงที่จากข้อมูลของฉันให้หน่อย"}])
+
+    async def run():
+        task = asyncio.ensure_future(_spec_result(_gen(items=[{"label": "A", "send": "A?"}])))
+        with patch.object(sf, "_generate", fake_generate), \
+             patch.dict("os.environ", {"SUGGESTIONS_ENABLED": "1"}):
+            return await sf.build_suggestions_block(
+                user_text="อยากออมเพิ่ม", answer_text="รายจ่ายคงที่เดือนละเท่าไรครับ",
+                speculative=task)
+
+    block = asyncio.run(run())
+    assert [c["label"] for c in block["items"]] == ["คำนวณจากข้อมูลของฉัน"]
+    assert len(calls) == 1 and calls[0]["answer_text"] == "รายจ่ายคงที่เดือนละเท่าไรครับ"
+
+
+def test_UT_SG26_self_flagged_repeat_and_reminder_chips_are_dropped():
+    """UT-SG26: round-3 chains still re-offered questions in other words and
+    offered "ตั้งแจ้งเตือนวันสรุปยอด" twice (the chat can't set reminders —
+    both taps dead-ended). The LLM's own `repeats` flag and reminder chips
+    are dropped in code."""
+    out = sf._finalize([
+        {"kind": "deeper", "repeats": "เดือนที่แล้วหมวดหมู่ไหนที่ฉันใช้จ่ายเยอะที่สุด",
+         "label": "หมวดที่ใช้เยอะสุด", "send": "หมวดหมู่ที่ฉันใช้จ่ายเยอะที่สุดในเดือนที่แล้วคืออะไร"},
+        {"kind": "deeper", "label": "ตั้งแจ้งเตือนวันสรุปยอด", "send": "ช่วยตั้งแจ้งเตือนวันสรุปยอดบัตรเครดิตให้ฉันหน่อย"},
+        {"kind": "wider", "label": "เตือนเมื่อถึงวันสรุปยอด", "send": "เตือนเมื่อถึงวันสรุปยอด"},
+        {"kind": "deeper", "repeats": "", "label": "ค่าเช่าเทียบปีก่อน", "send": "ค่าที่อยู่อาศัยเทียบกับเดือนก่อน"},
+    ])
+    assert [c["label"] for c in out] == ["ค่าเช่าเทียบปีก่อน"]
+
+
+def test_UT_SG27_not_now_chips_are_dropped():
+    """UT-SG27: "ยังไม่ต้องการตอนนี้" reached the wire in round 4 despite the
+    prompt ban; tapping it earns a dead turn. Filtered in code."""
+    out = sf._finalize([
+        {"kind": "reply", "label": "ยังไม่ต้องการตอนนี้", "send": "ยังไม่ต้องการตอนนี้"},
+        {"kind": "reply", "label": "ไว้ก่อน", "send": "ไว้ก่อนนะ"},
+        {"kind": "reply", "label": "ช่วยวางแผนการโอนเงิน", "send": "ช่วยวางแผนการโอนเงินให้หน่อย"},
+    ])
+    assert [c["label"] for c in out] == ["ช่วยวางแผนการโอนเงิน"]
+
+
+async def test_UT_SG28_chip_equal_to_the_current_question_is_dropped():
+    """UT-SG28: round 7 offered "ยอดรวมเงินสดและบัญชีออมทรัพย์ของฉันตอนนี้เท่าไร"
+    as a chip on the very turn that asked it."""
+    q = "ยอดรวมเงินสดและบัญชีออมทรัพย์ของฉันตอนนี้เท่าไร"
+    block = await _build(
+        user_text=q,
+        gen_return=_gen(items=[{"label": "ยอดรวม", "send": q},
+                               {"label": "มาจากไหน", "send": "เงินใน KBank มาจากไหน"}]),
+    )
+    assert _sends(block) == ["เงินใน KBank มาจากไหน"]
