@@ -1092,3 +1092,50 @@ def test_UT_NS_WDAY01_spending_by_weekday_labels_days(monkeypatch):
 
     rows = asyncio.run(run())
     assert [r["weekday_th"] for r in rows] == ["วันอาทิตย์", "วันเสาร์"]
+
+
+def test_UT_NS_OUT01_month_end_outlook_never_subtracts_spent_so_far(monkeypatch):
+    """UT-NS-OUT01: "เงินจะพอใช้ถึงสิ้นเดือนไหม" was answered by subtracting the
+    month's PROJECTED TOTAL from the balance ("เหลือ 107,309") or by reading
+    the projection as money left ("เหลือเพียง 3,171"). Money already spent is
+    out of the balance: month_end = cash − typical_daily × days_left − fixed
+    not yet paid − card dues before month end. Dev DB 2026-09-28: cash
+    152,994, 90-day spend (Jul 1–Sep 28) 110,012 of which fixed 36,582 → ~816/day × 2,
+    Sep fixed already paid, KTC due 5 Oct (after month end) → 151,362."""
+    def fake(spec):
+        m = spec.metric
+        if m == "balance":
+            return [{"amount": Decimal("148341")}, {"amount": Decimal("3550")},
+                    {"amount": Decimal("1103")}]
+        if m == "sum_expense":
+            return [{"amount": Decimal("110012")}]
+        if m == "fixed_costs":
+            span = (spec.time_range.end - spec.time_range.start).days
+            return [{"amount": Decimal("12280" if span < 40 else "36582")}]
+        if m == "creditcard_list":
+            return [{"sync_id": "cc-1", "name": "KTC", "used": Decimal("24943"),
+                     "billing_cycle_day": 20, "payment_due_day": 5}]
+        if m == "creditcard_statement":
+            return [{"statement_balance": Decimal("24111"), "paid_since_statement": Decimal("0")}]
+        return []
+
+    async def fake_run_query(spec, user_id):
+        return fake(spec)
+
+    monkeypatch.setattr(ns_mod, "_run_query", fake_run_query)
+
+    async def run():
+        ns = build_namespace(user_id="u-1", catalog=_catalog(), today=date(2026, 9, 28),
+                             main_loop=asyncio.get_running_loop())
+        return await asyncio.to_thread(ns["month_end_outlook"])
+
+    r = asyncio.run(run())
+    assert r["cash_now"] == Decimal("152994")
+    assert r["days_left"] == 2
+    assert r["fixed_pending"] == 0                    # Sep fixed already recorded
+    assert r["card_due_before_month_end"] == 0        # KTC due 5 Oct
+    assert r["month_end_cash"] == Decimal("151362")   # 152,994 − 815.9 × 2
+    assert r["enough"] is True
+    # "ถ้าจ่ายบัตรเต็ม": KTC 24,111 is due after month end but still paid.
+    assert r["all_card_due"] == Decimal("24111")
+    assert r["month_end_cash_after_all_card_dues"] == Decimal("127251")

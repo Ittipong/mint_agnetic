@@ -13,7 +13,7 @@ DB_URL = next((l.split("=", 1)[1].strip() for l in open(_ENV) if l.startswith("D
 WRITTEN: list[str] = []  # sync_ids this run inserted — printed at the end for cleanup
 USER = os.environ.get("QA_USER", "ba91d8a5-46b2-46f7-aaf4-189a54e17fe9")
 WALLET = os.environ.get("QA_WALLET")  # the chat-input wallet pick, as the app sends it
-OUT = os.path.join(os.path.dirname(__file__), "results")
+OUT = os.environ.get("QA_OUT") or os.path.join(os.path.dirname(__file__), "results")
 os.makedirs(OUT, exist_ok=True)
 
 

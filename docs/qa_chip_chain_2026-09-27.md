@@ -203,12 +203,36 @@ Round 10: 0 dead ends; tone 0/28; 1 lookup chip of 78. Cost: chips arrive
 1.7 s (median) after the answer, up from 0.3 s, because 5 candidates take
 longer to write.
 
-Open (advisor answers carry more reasoning risk):
-- "เงินพอถึงสิ้นเดือนไหม" once subtracted the whole month's projected spend
-  from the current balance ("เหลือ 107,309"). Most of that spend is already out
-  of the balance.
-- "จ่ายเต็ม" once called the total owed (25,546) "ยอดที่ต้องจ่าย"; the amount
-  due is 24,714.
-- The advice chain can still drift into investing, and the agent sometimes asks
-  the user something the data already holds (whether they have an emergency
-  fund).
+## Advisor answers made correct, with the lookup baseline kept (2026-09-28)
+
+Test sets (`evals/chat_loop`, all over the tunnel, scored by `check.py`):
+- **Baseline**: the 80 lookup scenarios of core / breadth / regression, i.e.
+  "data the user could open themselves". `check.py` values were re-pinned to
+  the 09-28 data: 12 values drifted with new rows and the rolling windows
+  (Sep 44,334 → 44,399, budget now 320 over, "yesterday" = 09-27). Each drifted
+  answer was confirmed against the DB before re-pinning.
+- **Advisor**: `scenarios_advisor.json`, 14 questions with DB-verified values
+  and `forbid_re` patterns for the known wrong phrasings.
+
+| | before fixes | after |
+|---|---|---|
+| baseline checks | 46/46 | **46/46** |
+| advisor checks | 11/14 | **14/14** |
+| errors | 0 | 0 |
+
+Fixes:
+- `month_end_outlook()`: cash_now − typical daily variable spend (90 days) ×
+  days left − fixed bills not yet paid − card dues before month end, plus
+  `month_end_cash_after_all_card_dues`. Before, "พอถึงสิ้นเดือนไหม" read the
+  projected month total as money left ("เหลือเพียง 3,171"). Now: 152,994 →
+  151,362, and 126,648 after paying both cards in full. UT-NS-OUT01.
+- Prompt R9b LOOK-BEFORE-YOU-ASK: look up the user's money (emergency fund,
+  cards, income, fixed costs) before asking about it. "ควรมีเงินสำรองเท่าไหร่"
+  now starts from the 60,000 already saved.
+- Prompt R9c JUDGE-AGAINST-A-YARDSTICK: "…เกินไปไหม" compares with last month
+  and the usual amount (25,345 vs 7,244).
+- Card wording: "ยอดที่ต้องจ่าย" is amount_due (24,111 + 603), never the total
+  owed.
+
+Re-run: `QA_OUT=<dir>/<set> chat_qa.py scenarios_<set>.json`, then `check.py <dir>`.
+Values are date-bound. Re-pin them from the DB when the data or the date moves.

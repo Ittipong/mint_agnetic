@@ -320,6 +320,76 @@ class _Wrappers:
             "rows": rows,
         }
 
+    def month_end_outlook(self, *, as_of: str | date | None = None) -> dict:
+        """"เงินจะพอใช้ถึงสิ้นเดือนไหม" — spendable cash left at month end.
+
+        month_end_cash = cash_now − typical_daily × days_left − fixed_pending
+                         − card_due_before_month_end
+
+        - cash_now: general wallets only (goals are savings, cards are debt).
+          Money already spent this month is ALREADY out of cash_now — never
+          subtract spent-so-far or a projected month total from it (the chat
+          once did: "เหลือ 107,309" instead of ~152,000).
+        - typical_daily: variable spend (expense − fixed costs) over the last
+          90 days ÷ 90, so a one-off (an iPad) is diluted, not extrapolated.
+        - fixed_pending: this month's usual fixed costs not yet recorded.
+        - card_due_before_month_end: statement amounts due by month end;
+          month_end_cash_after_all_card_dues also pays every other statement.
+        No future income is added (conservative). Returns all components.
+        """
+        from datetime import timedelta as _td
+
+        today = self._to_date(as_of) if as_of else self._today
+        nxt = (today.replace(day=28) + _td(days=4)).replace(day=1)
+        month_end = nxt - _td(days=1)
+        days_left = (month_end - today).days
+
+        # balance() reads general wallets only — spendable cash.
+        cash_now = sum((Decimal(str(r.get("amount") or 0))
+                        for r in self.balance(convert_to_thb=True)), Decimal(0))
+
+        start90 = today - _td(days=89)
+        spent90 = sum((Decimal(str(r.get("amount") or 0)) for r in
+                       self.sum_expense(start=start90, end=today, convert_to_thb=True)),
+                      Decimal(0))
+        fixed90 = self.fixed_costs(start=start90, end=today)
+        typical_daily = (spent90 - fixed90["total"]) / Decimal(90)
+
+        fixed_month = self.fixed_costs(start=today.replace(day=1), end=today)
+        fixed_pending = max(fixed90["monthly_avg"] - fixed_month["total"], Decimal(0))
+
+        card_due = Decimal(0)
+        all_card_due = Decimal(0)
+        cards_due = []
+        for c in self.creditcard_list():
+            due, when = c.get("amount_due"), c.get("next_due_date")
+            if not due:
+                continue
+            all_card_due += Decimal(str(due))
+            cards_due.append({"name": c["name"], "amount_due": due, "due": when})
+            if when and when <= month_end:
+                card_due += Decimal(str(due))
+
+        variable_left = typical_daily * days_left
+        month_end_cash = cash_now - variable_left - fixed_pending - card_due
+        q = Decimal("1")
+        return {
+            "as_of": today, "month_end": month_end, "days_left": days_left,
+            "cash_now": cash_now.quantize(q),
+            "typical_daily_spend": typical_daily.quantize(q),
+            "variable_spend_left": variable_left.quantize(q),
+            "fixed_pending": fixed_pending.quantize(q),
+            "card_due_before_month_end": card_due.quantize(q),
+            "cards_due": cards_due,
+            "month_end_cash": month_end_cash.quantize(q),
+            "enough": month_end_cash > 0,
+            # "ถ้าจ่ายบัตรเต็ม เหลือพอไหม": every statement paid, whatever its
+            # due date (the chat once answered without subtracting them).
+            "all_card_due": all_card_due.quantize(q),
+            "month_end_cash_after_all_card_dues":
+                (month_end_cash - (all_card_due - card_due)).quantize(q),
+        }
+
     def spending_by_weekday(
         self,
         *,
@@ -1220,6 +1290,7 @@ def build_namespace(
         "sum_by_wallet":       w.sum_by_wallet,
         "fixed_costs":         w.fixed_costs,
         "spending_by_weekday": w.spending_by_weekday,
+        "month_end_outlook":   w.month_end_outlook,
         "sum_by_tag":          w.sum_by_tag,
         "list_transactions":   w.list_transactions,
         "balance":             w.balance,
