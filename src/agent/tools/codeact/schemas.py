@@ -28,6 +28,7 @@ Metric = Literal[
     "sum_by_category",
     "sum_by_wallet",
     "sum_by_tag",
+    "fixed_costs",
     # Discovery (entity catalogs as data)
     "wallet_list",
     "category_list",

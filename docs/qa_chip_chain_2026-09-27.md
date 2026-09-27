@@ -160,9 +160,18 @@ Live results:
 - Round 8: `chip_chain.py` tone report 0/28. First answer 4.8 s, chips 0.3 s
   after the answer, turn 5.6 s (medians).
 
-## Still open
+## Fixed costs — deterministic helper (fixed 2026-09-28)
 
-- Round 8, C4 hop 1: "รายจ่ายคงที่ ~9,871/เดือน" counted housing only
-  (29,613 ÷ 3). With bills and subscriptions it is 12,565, which round 7 got
-  right. The prompt defines fixed costs by category, but the model does not
-  always apply it. A `fixed_costs()` helper would make it deterministic.
+The LLM used to classify "รายจ่ายคงที่" itself and got 1,156, 9,871 and 12,565
+on the same data. The new `fixed_costs(start, end)` uses a fixed rule in SQL:
+- the transaction's OWN category `system_key` is in `home` (rent is filed on
+  the root), `bills`, `bills_utilities`, `cc_utilities`, `cc_subscription`,
+  `cc_insurance` or `cc_installment`. `home_cleaning` / `home_furniture` are
+  variable;
+- user-made categories without a key count when their name matches
+  ค่าเช่า/ผ่อน/ประกัน/ค่าไฟ/….
+
+It averages by whole months (a calendar month = 1, a rolling 3 months = 3).
+Checked on the dev DB for Jun 28–Sep 27: rent 28,500 + bills 6,273 +
+subscriptions 1,809 = 36,582, which is 12,194 a month. Live, 6 of 6 answers
+used the helper: average 12,194, September 12,280, variable 24,525. UT-NS-FIX01.

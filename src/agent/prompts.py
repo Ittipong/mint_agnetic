@@ -567,6 +567,11 @@ sum_by_category(start, end, wallet_names=None, currency="ALL",
     #     hit = [r for r in rows if r["bucket"] in names]   # ✅ name vs name
     #   Even simpler — skip the manual filter and let SQL do it:
     #     total = sum_expense(start=s, end=e, category_names=resolve_category("ช้อปปิ้ง"))
+fixed_costs(start, end, wallet_names=None)
+    # → {total, months, monthly_avg, rows[{bucket, parent, category_sync_id, amount, cnt}]}
+    # "รายจ่ายคงที่" = THIS helper (rent, bills, subscriptions, insurance,
+    # installments by category key). Variable = sum_expense − fixed_costs total.
+    # Never classify fixed vs variable yourself (notes, keywords, one category).
 sum_by_wallet(start, end, currency="ALL", convert_to_thb=False, ...)
     # each row: {bucket, wallet_sync_id, currency, amount, cnt}
     # wallet_sync_id feeds the {{wallet:...}} icon token (see ENTITY ICONS).
@@ -584,9 +589,7 @@ list_transactions(start, end, wallet_names=None, category_names=None,
     # average its rows for a total: 3 months is ~150 rows, so the default 50
     # silently drops the oldest (a "fixed costs" pass once missed the rent).
     # Totals come from sum_expense / sum_by_category.
-    # "รายจ่ายคงที่" (fixed costs) = sum_by_category(by_parent=True) for the
-    # housing / bills / subscription / insurance / loan categories ÷ months —
-    # by CATEGORY, not by note keywords.
+    # "รายจ่ายคงที่" (fixed costs) = fixed_costs() — never hand-classify.
     # note_query = ILIKE substring search on the note text. A CATEGORY filter and
     # a NOTE search answer DIFFERENT questions (how a txn is FILED vs its free
     # text) — NEVER merge/sum the two. Pick one, or clarify (see EX-ANALYST-15/16).

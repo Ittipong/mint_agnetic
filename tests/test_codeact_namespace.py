@@ -987,3 +987,43 @@ def test_UT_NS_CAT02_category_filter_follows_the_tree(monkeypatch):
     sql, params = build_sum_expense(seen[0], "u-1")
     assert "COALESCE(fp.name, fc.name)" in sql
     assert ["ช้อปปิ้ง", "อาหาร"] in params and ["เสื้อผ้า"] in params
+
+
+def test_UT_NS_FIX01_fixed_costs_rule_and_monthly_average(monkeypatch):
+    """UT-NS-FIX01: "รายจ่ายคงที่" was classified by the LLM — 1,156/month
+    (note keywords over a capped list) and 9,871 (housing only) for data whose
+    fixed costs are 36,582 over Jun 28–Sep 27 (rent 28,500 + bills 6,273 +
+    subscriptions 1,809; dev DB 2026-09-28). fixed_costs() uses a fixed
+    category-key rule in SQL and averages by whole months: ÷3 → 12,194."""
+    from src.agent.tools.codeact.sql_templates import (
+        FIXED_COST_SYSTEM_KEYS, build_fixed_costs,
+    )
+
+    specs = []
+
+    async def fake_run_query(spec, user_id):
+        specs.append(spec)
+        return [
+            {"bucket": "ที่อยู่อาศัย", "parent": "ที่อยู่อาศัย", "amount": Decimal("28500"), "cnt": 3},
+            {"bucket": "ค่าไฟ", "parent": "ค่าบิล", "amount": Decimal("3576"), "cnt": 3},
+            {"bucket": "ค่าบิล", "parent": "ค่าบิล", "amount": Decimal("2697"), "cnt": 3},
+            {"bucket": "Subscription", "parent": "Subscription", "amount": Decimal("1809"), "cnt": 9},
+        ]
+
+    monkeypatch.setattr(ns_mod, "_run_query", fake_run_query)
+
+    async def run(s, e):
+        ns = build_namespace(user_id="u-1", catalog=_catalog(), today=date(2026, 9, 28),
+                             main_loop=asyncio.get_running_loop())
+        return await asyncio.to_thread(ns["fixed_costs"], start=s, end=e)
+
+    r = asyncio.run(run("2026-06-28", "2026-09-27"))
+    assert r["total"] == Decimal("36582")
+    assert r["months"] == 3
+    assert r["monthly_avg"] == Decimal("12194.00")
+    assert asyncio.run(run("2026-09-01", "2026-09-30"))["months"] == 1
+
+    sql, params = build_fixed_costs(specs[0], "u-1")
+    # Rent lives on the `home` root; its cleaning/furniture children are variable.
+    assert "home" in FIXED_COST_SYSTEM_KEYS and "home_cleaning" not in FIXED_COST_SYSTEM_KEYS
+    assert "fc.system_key = ANY(" in sql

@@ -290,6 +290,36 @@ class _Wrappers:
         spec.category_level = "parent" if by_parent else "leaf"
         return self._exec(spec)
 
+    def fixed_costs(
+        self,
+        *,
+        start: str | date,
+        end: str | date,
+        wallet_names: list[str] | None = None,
+    ) -> dict:
+        """Fixed monthly costs (rent, bills, subscriptions, insurance,
+        installments) in THB: {total, months, monthly_avg, rows}. Each row:
+        {bucket (leaf category), parent, category_sync_id, amount, cnt}.
+        `months` = the window in months (a near-whole count is rounded: a
+        calendar month = 1, a rolling "3 เดือน" = 3). Use this — never classify
+        fixed vs variable yourself."""
+        rows = self._exec(self._spec(
+            metric="fixed_costs", start=start, end=end, wallet_names=wallet_names,
+        ))
+        s, e = self._to_date(start), self._to_date(end)
+        months = Decimal(max((e - s).days + 1, 1)) / Decimal("30.4375")
+        # A calendar month (30 d → 0.99) or "3 เดือน" (92 d → 3.02) is a whole
+        # number of months to a person — average by that, not by days.
+        if abs(months - round(months)) <= Decimal("0.1") and round(months) >= 1:
+            months = Decimal(round(months))
+        total = sum((Decimal(str(r["amount"] or 0)) for r in rows), Decimal(0))
+        return {
+            "total": total,
+            "months": round(months, 2),
+            "monthly_avg": round(total / months, 2) if rows else Decimal(0),
+            "rows": rows,
+        }
+
     def sum_by_wallet(
         self,
         *,
@@ -1158,6 +1188,7 @@ def build_namespace(
         "sum_expense":         w.sum_expense,
         "sum_by_category":     w.sum_by_category,
         "sum_by_wallet":       w.sum_by_wallet,
+        "fixed_costs":         w.fixed_costs,
         "sum_by_tag":          w.sum_by_tag,
         "list_transactions":   w.list_transactions,
         "balance":             w.balance,

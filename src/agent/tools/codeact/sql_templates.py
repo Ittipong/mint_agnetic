@@ -554,6 +554,63 @@ def build_sum_by_wallet(spec: QuerySpec, user_id: str) -> tuple[str, list]:
     return sql, params
 
 
+# Fixed costs = what the user pays every month regardless of choices. Keyed on
+# the transaction's OWN category system_key: rent is filed on the `home` root
+# itself, while `home_cleaning` / `home_furniture` children are variable.
+FIXED_COST_SYSTEM_KEYS = [
+    "home", "bills", "bills_utilities", "cc_utilities",
+    "cc_subscription", "cc_insurance", "cc_installment",
+]
+# User-made categories carry no system_key — classify those by NAME.
+FIXED_COST_NAME_PATTERN = (
+    "ค่าเช่า|ผ่อน|ประกัน|ค่าไฟ|ค่าน้ำ|ค่าเน็ต|อินเทอร์เน็ต|ค่าโทรศัพท์|subscription|สมาชิก"
+)
+
+
+def build_fixed_costs(spec: QuerySpec, user_id: str) -> tuple[str, list]:
+    """Expense in fixed-cost categories, per leaf category, in THB.
+
+    Why a template: the LLM classified "fixed" itself — once by note keywords
+    over a 50-row list (missed the rent → 1,156/month), once counting housing
+    only (9,871 vs 12,194). A fixed rule gives the same answer every time.
+    """
+    params = _base_params(spec, user_id)
+    params.append("expense")
+    type_idx = len(params)
+    params.append(FIXED_COST_SYSTEM_KEYS)
+    keys_idx = len(params)
+    params.append(FIXED_COST_NAME_PATTERN)
+    pat_idx = len(params)
+    extra = _common_filters(spec, params)
+    sql = f"""
+        SELECT
+            COALESCE(fc.name, t.category_name, '(uncategorized)') AS bucket,
+            MAX(t.category_sync_id)                              AS category_sync_id,
+            COALESCE(fp.name, fc.name, t.category_name)          AS parent,
+            'THB'                                                AS currency,
+            SUM({_AMOUNT_THB_EXPR})                              AS amount,
+            COUNT(*)                                             AS cnt
+        FROM transactions t
+        {_wallet_join()}
+        {_currency_join()}
+        LEFT JOIN categories fc ON fc.sync_id = t.category_sync_id
+        LEFT JOIN categories fp ON fp.sync_id = fc.parent_sync_id
+        WHERE 1=1 {_wallet_user_check()}
+          AND t.date >= $2
+          AND t.date <  ($3::date + INTERVAL '1 day')
+          AND t.type = ${type_idx}
+          AND t.is_deleted = false
+          AND t.status = 'confirmed'
+          AND (fc.system_key = ANY(${keys_idx}::text[])
+               OR (fc.system_key IS NULL
+                   AND COALESCE(fc.name, t.category_name) ~* ${pat_idx}))
+          {extra}
+        GROUP BY 1, 3
+        ORDER BY amount DESC
+    """
+    return sql, params
+
+
 def build_sum_by_tag(spec: QuerySpec, user_id: str) -> tuple[str, list]:
     """Group total expense (default) by tag. Joins transaction_tags + tags.
 
@@ -1297,6 +1354,7 @@ _BUILDERS = {
     "count": build_count,
     "sum_by_category": build_sum_by_category,
     "sum_by_wallet": build_sum_by_wallet,
+    "fixed_costs": build_fixed_costs,
     "sum_by_tag": build_sum_by_tag,
     "wallet_list": build_wallet_list,
     "category_list": build_category_list,
