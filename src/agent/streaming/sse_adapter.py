@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import traceback
 from typing import Any, AsyncIterator, Optional
 
@@ -58,6 +59,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 from src.agent.session_logger import slog, slog_error
 from src.agent.streaming.user_errors import error_event
 from src.agent.streaming.block_emitter import emit_block, validate_block
+from src.agent.streaming.tone_guard import strip_unasked_empathy
 from src.agent.validators.numerical import _WARNING_MARKER
 
 
@@ -268,6 +270,11 @@ def _yield_message_event(chunk: Any) -> Optional[dict]:
 # tool_call yet is the answer. Narration is 5-12 Thai words (~60 chars, prompt
 # "PROGRESS NARRATION"), so 160 leaves headroom without holding the answer long.
 _ANSWER_COMMIT_CHARS = 160
+# The answer's first paragraph is held until it is complete (or this long) so
+# the tone guard can drop an empathy opener the user did not ask for.
+_OPENER_WINDOW_CHARS = 400
+_FIRST_PARAGRAPH_DONE = re.compile(r"\n\n\s*\S")
+
 # The narration bubble shows at most this much: a model that writes a whole
 # guessed answer before its tool call must not get that guess on screen.
 _NARRATION_MAX_CHARS = 160
@@ -300,9 +307,11 @@ class _MessageRouter:
     a `_retract` event tells `stream_chat` to drop it from the saved answer.
     """
 
-    __slots__ = ("_id", "_held", "_mode", "_seen", "_after_tools", "_released")
+    __slots__ = ("_id", "_held", "_mode", "_seen", "_after_tools", "_released",
+                 "_user_text")
 
-    def __init__(self) -> None:
+    def __init__(self, user_text: str = "") -> None:
+        self._user_text = user_text
         self._id: Optional[str] = None
         self._held: list[str] = []
         self._mode: Optional[str] = None  # None=undecided | "narration" | "answer"
@@ -358,7 +367,7 @@ class _MessageRouter:
             self._held = []
             if held:
                 out.append({"event": "narration_token", "data": held})
-        elif self._after_tools and sum(len(t) for t in self._held) >= _ANSWER_COMMIT_CHARS:
+        elif self._after_tools and self._opener_ready():
             self._mode = "answer"
             out += self._release_answer()
         return out
@@ -369,12 +378,34 @@ class _MessageRouter:
         self._id, self._held, self._mode, self._released = None, [], None, []
         return out
 
+    def _opener_ready(self) -> bool:
+        """Long enough to be the answer, and its first paragraph is complete
+        (so the tone guard sees the whole opener before anything streams)."""
+        joined = "".join(self._held)
+        if len(joined) < _ANSWER_COMMIT_CHARS:
+            return False
+        return bool(_FIRST_PARAGRAPH_DONE.search(joined)) or len(joined) >= _OPENER_WINDOW_CHARS
+
     def _release_answer(self) -> list[dict]:
         held = _strip_internal_markers("".join(self._held))
+        guarded = strip_unasked_empathy(held, self._user_text)
+        if guarded != held:
+            slog("sse_adapter", f"dropped unasked empathy opener: {held[:80]!r}")
+        held = guarded
         self._held = []
         if held:
             self._released.append(held)
         return [{"event": "answer_token", "data": held}] if held else []
+
+
+def _last_user_text(state: dict) -> str:
+    """The user's message this turn (dict or message object)."""
+    for m in reversed(state.get("messages") or []):
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "type", "")
+        if role in ("user", "human"):
+            c = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+            return c if isinstance(c, str) else ""
+    return ""
 
 
 def _drop_suffix(chunks: list[str], leaked: str) -> list[str]:
@@ -491,7 +522,7 @@ async def stream_chat(
     # `final_text`, so the guard skips).
     soft_warn_footer: Optional[str] = None
 
-    router = _MessageRouter()
+    router = _MessageRouter(user_text=_last_user_text(initial_state))
 
     try:
         async for stream_mode, chunk in graph.astream(

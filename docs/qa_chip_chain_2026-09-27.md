@@ -139,7 +139,30 @@ Round 7: 28/28 turns correct, including the fixed-cost total (ที่อยู
 + ค่าบิล 6,273 + Subscription 1,809 over Jun 28–Sep 27). Chips arrive 0.3 s
 (median) after the answer.
 
+## Tone — unasked empathy openers (fixed)
+
+In 196 chain answers, 3 opened by telling a calm user they were worried or
+under pressure. Example: "ควรจ่ายบัตร KTC เท่าไหร่ดี" → "ฟังแล้วเข้าใจเลยครับว่า … น่ากังวลใจ".
+All 3 were card or overspending questions. R12 already forbade this, so a code
+guard was added:
+- `streaming/tone_guard.py` drops a short first paragraph that projects a
+  feeling (น่ากังวล / กังวลใจ / กดดัน / ไม่ใช่ความล้มเหลว / หนักใจ / ฟังแล้วเข้าใจ)
+  when the user's message voiced none (เครียด / ไม่ไหว / ตึง / กังวล / เป็นอะไรไหม …).
+- The router holds an answer until its first paragraph is complete, so the
+  guard sees the whole opener before anything streams.
+- Plain "เข้าใจเลยครับ" acknowledgments stay.
+- R12 also gained the real misfire as a ❌ example. UT-S23/24, UT-TG01–03.
+
+Live results:
+- The 3 questions that misfired, asked 3 times each: 9/9 now lead with the
+  numbers.
+- "เครียดมาก หนี้บัตรเยอะ ทำไงดี" kept its empathy 3/3.
+- Round 8: `chip_chain.py` tone report 0/28. First answer 4.8 s, chips 0.3 s
+  after the answer, turn 5.6 s (medians).
+
 ## Still open
 
-Tone: the agent still sometimes opens with empathy ("น่ากังวลใจ") on neutral
-questions. That comes from the agent prompt, not the chips.
+- Round 8, C4 hop 1: "รายจ่ายคงที่ ~9,871/เดือน" counted housing only
+  (29,613 ÷ 3). With bills and subscriptions it is 12,565, which round 7 got
+  right. The prompt defines fixed costs by category, but the model does not
+  always apply it. A `fixed_costs()` helper would make it deterministic.

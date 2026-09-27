@@ -700,7 +700,9 @@ def test_UT_S18_long_answer_streams_before_message_ends() -> None:
     """UT-S18: a long tool-call-free answer must reach the wire while the
     model is still writing — the first answer_token is emitted BEFORE the
     message's last chunk is fed, not held until the end."""
-    first = "ก" * 170   # past the commit threshold on its own
+    # Past the commit threshold, with its first paragraph complete (the tone
+    # guard holds an answer until it has seen the whole opening paragraph).
+    first = "ก" * 100 + "\n\n" + "ก" * 70
     graph_events = [
         ("updates", {"tools": {}}),  # after a tool round: data is in hand
         _stream_chunk("m1", first),
@@ -782,3 +784,39 @@ def test_UT_S22_leaked_text_is_dropped_from_the_saved_answer() -> None:
     out = asyncio.run(_collect(stream_chat(graph, {"thread_id": "t22"}, {})))
     blocks = [json.loads(e["data"]) for e in out if e["event"] == "block"]
     assert {"type": "answer", "text": "คำตอบจริง"} in blocks
+
+
+def test_UT_S23_unasked_empathy_opener_is_dropped() -> None:
+    """UT-S23: chip-chain round 6 — "ควรจ่ายบัตร KTC เท่าไหร่ดี" (no feeling
+    voiced) opened with "ฟังแล้วเข้าใจเลยครับว่ายอด 24,111 … น่ากังวลใจ". R12
+    forbids it; the opener paragraph is dropped before it reaches the user
+    and the saved answer."""
+    opener = "ฟังแล้วเข้าใจเลยครับว่ายอด 24,111 บาทเป็นก้อนที่ค่อนข้างใหญ่และน่ากังวลใจ"
+    body = "แนะนำจ่ายเต็ม **24,111 บาท** ก่อน 5 ต.ค. ครับ " + "ข" * 150
+    graph = _FakeGraph([
+        ("updates", {"tools": {}}),
+        _stream_chunk("m1", opener + "\n\n"),
+        _stream_chunk("m1", body),
+    ])
+    state = {"thread_id": "t23", "messages": [{"role": "user", "content": "ควรจ่ายบัตร KTC เท่าไหร่ดี"}]}
+    out = asyncio.run(_collect(stream_chat(graph, state, {})))
+    answer = "".join(e["data"] for e in out if e["event"] == "answer_token")
+    assert "น่ากังวล" not in answer
+    assert answer.startswith("แนะนำจ่ายเต็ม")
+    blocks = [json.loads(e["data"]) for e in out if e["event"] == "block"]
+    assert blocks[0]["text"].startswith("แนะนำจ่ายเต็ม")
+
+
+def test_UT_S24_empathy_kept_when_the_user_voiced_a_feeling() -> None:
+    """UT-S24: "ยอดนี้ตึงไปหน่อย" voices a feeling — the same kind of opener
+    is welcome there (R12 empathy-first) and must stay."""
+    opener = "เข้าใจเลยครับ การออมที่ตึงเกินไปจนรู้สึกกดดันมักทำได้ไม่นาน"
+    body = "ลองลดเหลือ **10,000 บาท** ต่อเดือนครับ " + "ข" * 150
+    graph = _FakeGraph([
+        ("updates", {"tools": {}}),
+        _stream_chunk("m1", opener + "\n\n" + body),
+    ])
+    state = {"thread_id": "t24", "messages": [{"role": "user", "content": "ยอด 14,000 นี้ตึงไปหน่อย"}]}
+    out = asyncio.run(_collect(stream_chat(graph, state, {})))
+    answer = "".join(e["data"] for e in out if e["event"] == "answer_token")
+    assert answer.startswith("เข้าใจเลยครับ")

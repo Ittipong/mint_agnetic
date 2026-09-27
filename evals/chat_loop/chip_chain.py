@@ -119,7 +119,23 @@ def main():
     a = ap.parse_args()
     seeds = {k: v for k, v in SEEDS.items() if not a.only or k in a.only}
     with ThreadPoolExecutor(a.parallel) as pool:
-        list(pool.map(lambda kv: run_chain(kv[0], kv[1], a.hops, a.pick), seeds.items()))
+        results = list(pool.map(lambda kv: run_chain(kv[0], kv[1], a.hops, a.pick), seeds.items()))
+    tone_report(results)
+
+
+def tone_report(results):
+    """Count answers that open by ascribing a feeling the user never voiced
+    (R12 — docs/qa_chip_chain_2026-09-27.md)."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+    from src.agent.streaming.tone_guard import _PROJECTED_FEELING, user_voiced_feeling
+
+    turns = [t for r in results for t in r["turns"]]
+    bad = [t for t in turns
+           if _PROJECTED_FEELING.search(t["answer"].lstrip().split("\n\n", 1)[0])
+           and not user_voiced_feeling(t["msg"])]
+    print(f"tone: {len(bad)}/{len(turns)} answers open with an unasked feeling", flush=True)
+    for t in bad:
+        print(f"  - {t['msg'][:50]!r} → {t['answer'][:80]!r}", flush=True)
 
 
 if __name__ == "__main__":
