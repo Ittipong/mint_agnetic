@@ -18,7 +18,12 @@ Signals, in order:
          history, generic examples when they have none.
 
 Each item carries `kind` and `reason`, so taps can be measured per signal
-once the client echoes it back (`origin` on /chat/stream).
+once the client echoes it back (`origin` on /chat/stream). Record chips (log,
+example) also carry the category (`category_id` = the user's category sync_id,
+`category_name`) so the client can draw the category icon, and every chip may
+carry `hint` — the one line that says why it is shown ("ใช้ไป 103% ของงบ").
+`label` is always exactly what `send` sends: a chip that shows one sentence
+and sends another reads as the app putting words in the user's mouth.
 """
 
 from __future__ import annotations
@@ -41,13 +46,18 @@ MAX_ASK = 2
 MIN_ITEMS = 3
 MONTHLY_MAX_PER_MONTH = 1.5   # ≤ this many per month = a monthly item
 
+EXAMPLE_HINT = "ตัวอย่าง · แตะแล้วแก้ยอดได้"
+# category_name = a default category every new user has; build_starters swaps in
+# that user's own sync_id (a user who renamed it just gets no icon).
 EXAMPLES = [
-    {"label": "กาแฟ 60", "send": "กาแฟ 60", "kind": "example", "reason": "example"},
-    {"label": "ข้าวเที่ยง 80", "send": "ข้าวเที่ยง 80", "kind": "example", "reason": "example"},
+    {"label": "กาแฟ 60", "send": "กาแฟ 60", "kind": "example", "reason": "example",
+     "category_id": None, "category_name": "กาแฟ", "hint": EXAMPLE_HINT},
+    {"label": "ข้าวเที่ยง 80", "send": "ข้าวเที่ยง 80", "kind": "example", "reason": "example",
+     "category_id": None, "category_name": "ร้านอาหาร", "hint": EXAMPLE_HINT},
     {"label": "เดือนนี้ใช้ไปเท่าไหร่", "send": "เดือนนี้ใช้ไปเท่าไหร่", "kind": "example",
-     "reason": "example"},
+     "reason": "example", "hint": None},
     {"label": "Nimo ทำอะไรได้บ้าง", "send": "Nimo ทำอะไรได้บ้าง", "kind": "example",
-     "reason": "example"},
+     "reason": "example", "hint": None},
 ]
 
 
@@ -59,6 +69,7 @@ class TxRow:
     logged_at: datetime   # when it was recorded (local) — habit hour
     tx_date: date         # the transaction's own date (local)
     category: str = ""    # one chip per category keeps the row varied
+    category_id: str = "" # the category's sync_id — the client draws its icon
 
 
 def _fmt_amount(a: Decimal) -> str:
@@ -102,6 +113,7 @@ def habit_chips(rows: list[TxRow], now: datetime) -> list[dict]:
             if abs(today.day - usual_day) > 1:
                 continue
             score, why = 100 + len(items), f"monthly:day{usual_day}"
+            hint = f"ปกติจดวันที่ {usual_day}"
         else:
             if any(i.tx_date == today for i in items):
                 continue
@@ -110,11 +122,14 @@ def habit_chips(rows: list[TxRow], now: datetime) -> list[dict]:
             if in_window == 0:
                 continue
             score, why = in_window * 3 + len(items), f"habit:{in_window}/{len(items)}@{now.hour}h"
+            hint = "ปกติจดเวลานี้"
         text = f"{latest.label} {_fmt_amount(usual)}"
         if kind == "income":
             text = f"ได้{latest.label} {_fmt_amount(usual)}" if not latest.label.startswith("ได้") else text
-        cat = Counter(i.category for i in items).most_common(1)[0][0]
-        scored.append((score, {"label": text, "send": text, "kind": "log", "reason": why}, cat))
+        cat, cat_id = Counter((i.category, i.category_id) for i in items).most_common(1)[0][0]
+        scored.append((score, {"label": text, "send": text, "kind": "log", "reason": why,
+                               "category_id": cat_id or None, "category_name": cat or None,
+                               "hint": hint}, cat))
 
     # Best chip per category: three coffee shops in the morning is one choice.
     scored.sort(key=lambda s: s[0], reverse=True)
@@ -143,18 +158,19 @@ def ask_chips(cards: list[dict], budgets: list[dict], today: date) -> list[dict]
         if days <= CARD_DUE_DAYS:
             name = c["name"]
             when = "วันนี้" if days == 0 else f"อีก {days} วัน"
+            text = f"{name} รอบนี้ต้องจ่ายเท่าไหร่"
             out.append((50 - days, {
-                "label": f"{name} ต้องจ่ายเท่าไหร่",
-                "send": f"{name} รอบนี้ต้องจ่ายเท่าไหร่ ครบกำหนดวันไหน",
-                "kind": "ask", "reason": f"card_due:{when}"}))
+                "label": text, "send": text, "kind": "ask", "reason": f"card_due:{when}",
+                "hint": "ครบกำหนดวันนี้" if days == 0 else f"ครบกำหนดใน {days} วัน"}))
     for b in budgets:
         pct = Decimal(str(b.get("pct_used") or 0))
         if pct < BUDGET_WARN_PCT:
             continue
         name = b["name"] if str(b["name"]).startswith("งบ") else f"งบ{b['name']}"
-        label = f"{name}เกินไปเท่าไหร่" if pct >= 100 else f"{name}เหลือเท่าไหร่"
-        out.append((int(pct), {"label": label, "send": f"{name}เดือนนี้เหลือเท่าไหร่",
-                               "kind": "ask", "reason": f"budget:{int(pct)}%"}))
+        text = f"{name}เดือนนี้เกินไปเท่าไหร่" if pct >= 100 else f"{name}เดือนนี้เหลือเท่าไหร่"
+        out.append((int(pct), {"label": text, "send": text, "kind": "ask",
+                               "reason": f"budget:{int(pct)}%",
+                               "hint": f"ใช้ไป {int(pct)}% ของงบ"}))
     out.sort(key=lambda s: s[0], reverse=True)
     return [c for _, c in out[:MAX_ASK]]
 
@@ -163,9 +179,9 @@ def ask_chips(cards: list[dict], budgets: list[dict], today: date) -> list[dict]
 # their own data beat a generic "กาแฟ 60".
 HISTORY_FILL = [
     {"label": "สัปดาห์นี้ใช้ไปเท่าไหร่", "send": "สัปดาห์นี้ใช้ไปเท่าไหร่", "kind": "ask",
-     "reason": "fill:history"},
+     "reason": "fill:history", "hint": None},
     {"label": "เดือนนี้ใช้ไปกับอะไรบ้าง", "send": "เดือนนี้ใช้ไปกับอะไรบ้าง", "kind": "ask",
-     "reason": "fill:history"},
+     "reason": "fill:history", "hint": None},
 ]
 
 
@@ -188,7 +204,8 @@ _TX_SQL = """
            COALESCE(NULLIF(btrim(t.note), ''), t.category_name, '') AS label,
            (t.created_at AT TIME ZONE 'Asia/Bangkok') AS logged_at,
            (t.date AT TIME ZONE 'Asia/Bangkok')::date AS tx_date,
-           COALESCE(t.category_name, '') AS category
+           COALESCE(t.category_name, '') AS category,
+           COALESCE(t.category_sync_id::text, '') AS category_id
     FROM transactions t
     WHERE t.created_by_user_id = $1::uuid AND t.is_deleted = false
       AND t.status = 'confirmed' AND t.type IN ('expense', 'income')
@@ -200,6 +217,18 @@ _CARD_SQL = """
     SELECT name, payment_due_day, cached_used_amount::numeric AS used
     FROM creditcard_wallets WHERE user_id = $1::uuid AND deleted_at IS NULL
 """
+_CAT_SQL = """
+    SELECT name, sync_id::text AS sync_id FROM categories
+    WHERE user_id = $1::uuid AND deleted_at IS NULL AND type = 'expense'
+"""
+
+
+def resolve_example_categories(items: list[dict], cats: dict[str, str]) -> list[dict]:
+    """Point example chips at THIS user's category of the same name."""
+    for i in items:
+        if i["kind"] == "example" and i.get("category_name"):
+            i["category_id"] = cats.get(i["category_name"])
+    return items
 
 
 async def build_starters(user_id: str, *, limit: int = 5,
@@ -218,14 +247,16 @@ async def build_starters(user_id: str, *, limit: int = 5,
         async with pool.acquire() as conn:
             tx = await conn.fetch(_TX_SQL, user_id, today - timedelta(days=LOOKBACK_DAYS))
             cards = [dict(r) for r in await conn.fetch(_CARD_SQL, user_id)]
+            cats = {r["name"]: r["sync_id"] for r in await conn.fetch(_CAT_SQL, user_id)}
         rows = [TxRow(r["type"], Decimal(r["amount"]), r["label"] or "",
-                      r["logged_at"], r["tx_date"], r["category"]) for r in tx]
+                      r["logged_at"], r["tx_date"], r["category"], r["category_id"]) for r in tx]
         budgets = await _run_query(QuerySpec(
             metric="budget_remaining",
             time_range=TimeRange(start=today, end=today, granularity="day", confidence=1.0),
         ), user_id)
         items = assemble(habit_chips(rows, now), ask_chips(cards, budgets, today), limit,
                          has_history=len(rows) >= MIN_OCCURRENCES)
+        resolve_example_categories(items, cats)
     except Exception as exc:  # noqa: BLE001 — chips are nice-to-have
         slog("starters", f"failed, serving examples: {type(exc).__name__}: {exc}")
         items = [dict(e) for e in EXAMPLES[:limit]]
@@ -233,4 +264,5 @@ async def build_starters(user_id: str, *, limit: int = 5,
     return items
 
 
-__all__ = ["EXAMPLES", "HISTORY_FILL", "TxRow", "ask_chips", "assemble", "build_starters", "habit_chips"]
+__all__ = ["EXAMPLES", "HISTORY_FILL", "TxRow", "ask_chips", "assemble", "build_starters", "habit_chips",
+           "resolve_example_categories"]

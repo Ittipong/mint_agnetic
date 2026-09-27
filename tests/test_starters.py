@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from src.agent.starters import BKK, EXAMPLES, TxRow, ask_chips, assemble, habit_chips
+from src.agent.starters import (BKK, EXAMPLES, TxRow, ask_chips, assemble, habit_chips,
+                                resolve_example_categories)
 
 NOW = datetime(2026, 9, 26, 8, 30, tzinfo=BKK)   # Saturday morning
 
@@ -62,9 +63,10 @@ def test_UT_ST05_card_due_soon_and_budget_near_limit_become_questions():
                {"name": "เที่ยว", "pct_used": Decimal("40")}]
     chips = ask_chips(cards, budgets, date(2026, 9, 26))
     labels = [c["label"] for c in chips]
-    assert labels == ["งบอาหารเกินไปเท่าไหร่", "บัตร KTC ต้องจ่ายเท่าไหร่"]
+    assert labels == ["งบอาหารเดือนนี้เกินไปเท่าไหร่", "บัตร KTC รอบนี้ต้องจ่ายเท่าไหร่"]
     assert all(c["kind"] == "ask" for c in chips)
     assert chips[1]["reason"] == "card_due:อีก 2 วัน"
+    assert [c["hint"] for c in chips] == ["ใช้ไป 103% ของงบ", "ครบกำหนดใน 2 วัน"]
 
 
 def test_UT_ST06_examples_fill_up_to_three_only():
@@ -112,3 +114,28 @@ def test_UT_ST09_one_chip_per_category_and_history_fill():
     items = assemble(chips, [], 5, has_history=True)
     assert [i["kind"] for i in items] == ["log", "ask", "ask"]
     assert "กาแฟ 60" not in [i["label"] for i in items]
+
+
+def test_UT_ST10_chip_shows_exactly_what_it_sends():
+    """A chip that shows one sentence and sends another puts words in the
+    user's mouth — every label must equal its send."""
+    cards = [{"name": "บัตร KTC", "payment_due_day": 28, "used": Decimal("24943")}]
+    budgets = [{"name": "อาหาร", "pct_used": Decimal("85")}]
+    rows = _rows("Café Amazon", 65, 8, range(1, 6))
+    items = (habit_chips(rows, NOW) + ask_chips(cards, budgets, date(2026, 9, 26))
+             + assemble([], [], 5) + assemble([], [], 5, has_history=True))
+    assert items and all(i["label"] == i["send"] for i in items)
+
+
+def test_UT_ST11_record_chips_carry_category_and_why():
+    """Record chips name their category (sync_id + name) so the client can draw
+    the icon, and say why they are shown."""
+    rows = [TxRow("expense", Decimal(65), "Café Amazon", (NOW - timedelta(days=d)).replace(tzinfo=None),
+                  (NOW - timedelta(days=d)).date(), "กาแฟ", "cat-coffee") for d in range(1, 6)]
+    chip = habit_chips(rows, NOW)[0]
+    assert (chip["category_id"], chip["category_name"], chip["hint"]) == ("cat-coffee", "กาแฟ", "ปกติจดเวลานี้")
+
+    items = resolve_example_categories(assemble([], [], 3), {"กาแฟ": "u-coffee", "อาหาร": "u-food"})
+    assert [i.get("category_id") for i in items] == ["u-coffee", None, None]   # no ร้านอาหาร for this user
+    assert items[0]["hint"] == "ตัวอย่าง · แตะแล้วแก้ยอดได้"
+    assert EXAMPLES[0]["category_id"] is None   # resolving never mutates the shared examples
