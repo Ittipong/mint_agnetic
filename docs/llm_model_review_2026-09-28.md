@@ -47,3 +47,39 @@ there.
 `REACT_PROVIDER_ORDER` (e.g. `deepseek`) and `REACT_REASONING=off`. Changing
 `.env` needs `launchctl kickstart -k gui/$(id -u)/uk.minttechdev.chat-agent-v3`;
 touching a `.py` does not reload `.env`. Check `model=` on react.llm log lines.
+
+## Other OpenRouter models that could replace Gemini (same day)
+
+Screen: OpenRouter `/models` catalog, filtered for tools + response_format,
+≥128K context, and a price in this tier. Excluded: China-hosted (DeepSeek,
+Qwen, Xiaomi, GLM, InclusionAI; PDPA), `:batch` models (async), and models
+far too small. Claude Haiku 4.5 was also dropped at 4× today's price.
+
+Quick screen on advisor + starters (28 turns, 23 checks), reasoning off.
+The served model was verified from `model=` in the session logs.
+
+| model | result | why |
+|---|---|---|
+| **openai/gpt-6-luna** | 21/23 (both misses correct in substance) | finalist |
+| google/gemini-2.5-flash-lite | 9/23 | not capable enough |
+| upstage/solar-mini4 | 9/23, p90 31 s | not capable enough, single provider |
+| mistralai/mistral-small-2603 | Qwen answered 74/84 calls | "rate-limited upstream" on OpenRouter's shared quota |
+| openai/gpt-5-nano | every call failed | "Reasoning is mandatory" — always thinks, so slow |
+
+Full 5 sets (112 turns, 69 checks), same harness as the A/B above:
+
+| | Gemini 3.1 Flash-Lite + cache | **GPT-6 Luna + cache** |
+|---|---|---|
+| checks | 69/69 | 66/69 — every number correct; one weaker answer* |
+| $ per 1k turns (all roles) | 4.06 | **2.78 (−32%)** |
+| turn median / p90 | 6.2 s / 9.0 s | 6.5 s / 9.7 s |
+| ReAct call median / p90 | 2.1 s / 4.3 s | 2.4 s / 4.1 s |
+| cache hits | 100% | 100% |
+| served by | Google | OpenAI / Azure (7 endpoints) |
+
+\*"ใช้เงินเกินทุกเดือนเลยไหม": Luna pulled a 3-month total, then said it
+could not tell per month instead of fetching the months. The other two misses
+state correct numbers in another form (220,314 = 6 × 36,719; 151,362 / 126,648).
+
+Luna is the only replacement that clears the bar. It is released 2026-09 (new),
+so pricing and behaviour may still shift.
