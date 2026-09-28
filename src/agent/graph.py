@@ -177,6 +177,17 @@ def _make_model():
     extra_body: dict = {}
     if fallbacks:
         extra_body["models"] = [model_name] + fallbacks
+    # Optional upstream pin for the REACT model (e.g. "deepseek"): DeepSeek's
+    # own endpoint caches the prompt; other upstreams of the same model cost
+    # more and some run fp4. Falls back to any upstream if the pin is down.
+    order = [p.strip() for p in (os.getenv("REACT_PROVIDER_ORDER") or "").split(",") if p.strip()]
+    if order:
+        extra_body["provider"] = {"order": order, "allow_fallbacks": True}
+    # REACT_REASONING=off disables hidden thinking on reasoning-capable models
+    # (DeepSeek v4.1-flash thinks by default: 4.7× the output tokens of Gemini,
+    # p90 call 10.2s vs 4.3s in the 2026-09-28 A/B).
+    if (os.getenv("REACT_REASONING") or "").strip().lower() == "off":
+        extra_body["reasoning"] = {"enabled": False}
     return ChatOpenAI(
         model=model_name,
         base_url=base_url,

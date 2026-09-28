@@ -126,7 +126,10 @@ class ReActSessionLogCallback(BaseCallbackHandler):
             if cached is None:
                 cached = ((usage.get("prompt_tokens_details") or {}).get("cached_tokens")
                           if isinstance(usage, dict) else None)
+            served_by = ((getattr(msg, "response_metadata", None) or {}).get("model_name")
+                         or (response.llm_output or {}).get("model_name") or "?")
             usage_str = (
+                f"model={served_by} "
                 f"prompt={usage.get('prompt_tokens', '?')} "
                 f"completion={usage.get('completion_tokens', '?')} "
                 f"cached={cached if cached is not None else '?'}"
