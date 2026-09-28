@@ -55,26 +55,27 @@ EXAMPLES = [
 ]
 
 # Advisor questions in a friend's voice (owner, 2026-09-28: Nimo is a money
-# advisor and a friend who never judges). The app's screens already show
-# totals and lists, so the empty chat shows what only a conversation can:
-# judgment, what-ifs, plans, a heads-up. Still the same for everyone and no
-# amounts or presumptions ("มีหนี้บัตรหลายใบ") — they must read right for any
-# user. "Nimo ทำอะไรได้บ้าง" stays last (question_chips moves it first for a
-# user with no history).
+# advisor and a friend who never judges). THE SCREEN TEST: if any app screen
+# answers it (totals, where money went, goal / budget progress, insights), it
+# does not belong here — the owner rejected a first advisor list for still
+# re-reading screen data ("เงินเดือนหายไปไหนหมด", "งบเดือนนี้ยังไหวไหม"). Each
+# question needs the user's data PLUS judgment or a plan. Same for everyone,
+# no amounts, no presumptions ("มีหนี้บัตรหลายใบ"). "Nimo ทำอะไรได้บ้าง" stays
+# last (question_chips moves it first for a user with no history).
 QUESTIONS = [
-    "เดือนนี้ใช้เงินโอเคไหม",
-    "เงินจะพอใช้ถึงสิ้นเดือนไหม",
-    "อยากเก็บเงินเพิ่ม ควรเริ่มลดตรงไหน",
-    "เงินเดือนหายไปไหนหมด",
-    "เดือนนี้มีอะไรผิดปกติไหม",
-    "ฉันชอบใช้เงินหนักช่วงไหน",
+    "เงินเดือนออกแล้ว ควรแบ่งใช้แบ่งเก็บยังไงดี",
+    "ควรปิดหนี้บัตรก่อน หรือเก็บเงินก่อนดี",
     "จ่ายบัตรเต็มหรือขั้นต่ำดี",
+    "อยากซื้อของชิ้นใหญ่ ควรเก็บก่อนหรือผ่อนดี",
+    "ผ่อนอะไรเพิ่มได้อีกเท่าไหร่ ถึงจะไม่ตึง",
     "ควรมีเงินสำรองเท่าไหร่ถึงจะอุ่นใจ",
-    "เป้าเก็บเงินจะทันไหม",
-    "ถ้าเก็บเพิ่มเดือนละนิด อีกปีจะมีเท่าไหร่",
-    "งบเดือนนี้ยังไหวไหม",
-    "เงินเดือนออกแล้ว แบ่งใช้แบ่งเก็บยังไงดี",
-    "ช่วยดูหน่อย การเงินตอนนี้เป็นไงบ้าง",
+    "อยากเก็บเงินเพิ่ม ควรเริ่มลดตรงไหน",
+    "ควรตั้งงบแต่ละหมวดเท่าไหร่ดี",
+    "เงินเหลือแต่ละเดือน ควรเอาไปทำอะไรดี",
+    "อยากเกษียณสบาย ต้องเริ่มเก็บเดือนละเท่าไหร่",
+    "ถ้ารายได้ลดลง ควรปรับตัวยังไง",
+    "นิสัยใช้เงินของฉันตรงไหนควรปรับ",
+    "เงินจะพอใช้ถึงสิ้นเดือนไหม",
     "Nimo ทำอะไรได้บ้าง",
 ]
 

@@ -157,3 +157,16 @@ def test_UT_ST11_record_chips_carry_category_and_why():
     assert [i.get("category_id") for i in items[:2]] == ["u-coffee", None]   # no ร้านอาหาร for this user
     assert items[0]["hint"] == "ตัวอย่าง · แตะแล้วแก้ยอดได้"
     assert EXAMPLES[0]["category_id"] is None   # resolving never mutates the shared examples
+
+
+def test_UT_ST09_starter_questions_are_advice_not_screen_lookups():
+    """UT-ST09: owner 2026-09-28 — the empty-chat questions still re-read what
+    app screens show. Every question must pass the chip lookup filter, and
+    the rejected screen-questions must not come back."""
+    from src.agent.suggest_followups import is_lookup_chip
+
+    assert not [q for q in QUESTIONS if is_lookup_chip(q)]
+    rejected = {"เงินเดือนหายไปไหนหมด", "เดือนนี้มีอะไรผิดปกติไหม", "งบเดือนนี้ยังไหวไหม",
+                "เป้าเก็บเงินจะทันไหม", "ช่วยดูหน่อย การเงินตอนนี้เป็นไงบ้าง",
+                "เดือนนี้ใช้ไปเท่าไหร่", "หมวดไหนใช้เยอะที่สุดเดือนนี้"}
+    assert not rejected & set(QUESTIONS)
