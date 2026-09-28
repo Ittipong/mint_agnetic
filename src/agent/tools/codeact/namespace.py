@@ -320,6 +320,81 @@ class _Wrappers:
             "rows": rows,
         }
 
+    def money_snapshot(self, *, as_of: str | date | None = None) -> dict:
+        """The whole money picture in one call — the FIRST call for any advice
+        question (plans, decisions, "ควร…ไหม", "ไหวไหม").
+
+        Why: advice answers gathered whatever data the model thought of, then
+        filled gaps with guesses. It once said "ไม่เห็นหนี้บัตรในระบบ" with
+        24,943 owed on KTC (it never looked), and once invented "existing debt
+        = 30% of spending" for installment headroom (2026-09-28).
+
+        Returns (money as Decimal, monthly figures averaged over the last
+        3 months ending as_of):
+          income_avg, expense_avg, fixed_avg, variable_avg, free_cash_avg
+          cash_now                       — general wallets (spendable)
+          cards[{name, amount_due, next_due_date, unbilled, owed}],
+          card_due_total, card_owed_total
+          installments_avg               — existing monthly installments/loans
+                                           (fixed costs filed as ผ่อน/installment)
+          goals[...]                     — goal_progress() rows
+          emergency_fund                 — the goal named like เงินสำรอง/ฉุกเฉิน, or None
+          installment_room               — safe extra monthly installment:
+             min(40% of income − installments_avg, 50% of free_cash_avg)
+             (bank DTI ceiling, and keeping half the surplus for saving)
+          installment_room_binding       — "dti" or "cash_flow"
+        """
+        from src.agent.tools.codeact.resolvers import parse_period
+
+        today = self._to_date(as_of) if as_of else self._today
+        # Same window as parse_period("3 เดือนที่แล้ว") so the averages match
+        # every other answer (36,719 / 54,167 on 2026-09-28).
+        start, end = parse_period("3 เดือนที่แล้ว", today)
+
+        def _total(rows: list[dict]) -> Decimal:
+            return sum((Decimal(str(r.get("amount") or 0)) for r in rows), Decimal(0))
+
+        months = Decimal(3)
+        income_avg = _total(self.sum_income(start=start, end=end, convert_to_thb=True)) / months
+        expense_avg = _total(self.sum_expense(start=start, end=end, convert_to_thb=True)) / months
+        fixed = self.fixed_costs(start=start, end=end)
+        fixed_avg = fixed["total"] / months
+        installments_avg = sum(
+            (Decimal(str(r.get("amount") or 0)) for r in fixed["rows"]
+             if "ผ่อน" in str(r.get("bucket")) or "installment" in str(r.get("bucket")).lower()),
+            Decimal(0)) / months
+        free_cash_avg = income_avg - expense_avg
+        cash_now = _total(self.balance(convert_to_thb=True))
+
+        cards = []
+        for c in self.creditcard_list():
+            cards.append({"name": c.get("name"), "amount_due": c.get("amount_due"),
+                          "next_due_date": c.get("next_due_date"),
+                          "unbilled": c.get("unbilled"), "owed": c.get("used")})
+        due_total = sum((Decimal(str(c["amount_due"] or 0)) for c in cards), Decimal(0))
+        owed_total = sum((Decimal(str(c["owed"] or 0)) for c in cards), Decimal(0))
+
+        goals = self.goal_progress()
+        emergency = next((g for g in goals if any(k in str(g.get("name") or "")
+                                                   for k in ("สำรอง", "ฉุกเฉิน", "emergency"))), None)
+
+        dti_room = income_avg * Decimal("0.4") - installments_avg
+        cash_room = free_cash_avg * Decimal("0.5")
+        room = max(min(dti_room, cash_room), Decimal(0))
+        q = Decimal("1")
+        return {
+            "as_of": today, "window": f"{start} → {end}",
+            "income_avg": income_avg.quantize(q), "expense_avg": expense_avg.quantize(q),
+            "fixed_avg": fixed_avg.quantize(q), "variable_avg": (expense_avg - fixed_avg).quantize(q),
+            "free_cash_avg": free_cash_avg.quantize(q), "cash_now": cash_now.quantize(q),
+            "cards": cards, "card_due_total": due_total.quantize(q),
+            "card_owed_total": owed_total.quantize(q),
+            "installments_avg": installments_avg.quantize(q),
+            "goals": goals, "emergency_fund": emergency,
+            "installment_room": room.quantize(q),
+            "installment_room_binding": "dti" if dti_room <= cash_room else "cash_flow",
+        }
+
     def month_end_outlook(self, *, as_of: str | date | None = None) -> dict:
         """"เงินจะพอใช้ถึงสิ้นเดือนไหม" — spendable cash left at month end.
 
@@ -1291,6 +1366,7 @@ def build_namespace(
         "fixed_costs":         w.fixed_costs,
         "spending_by_weekday": w.spending_by_weekday,
         "month_end_outlook":   w.month_end_outlook,
+        "money_snapshot":      w.money_snapshot,
         "sum_by_tag":          w.sum_by_tag,
         "list_transactions":   w.list_transactions,
         "balance":             w.balance,

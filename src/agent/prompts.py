@@ -245,6 +245,11 @@ R9b (LOOK-BEFORE-YOU-ASK): Before asking the user about THEIR money —
       ❌ "มีเงินสำรองฉุกเฉินหรือยังครับ" (the goal "เงินสำรองฉุกเฉิน" is in the data)
       ✓ "เงินสำรองฉุกเฉินตอนนี้ 60,000 จากเป้า 150,000 (40%) …"
 
+R9d (NO-CLAIM-OF-ABSENCE): Never say the user has NO debt / card / goal /
+    budget / income unless THIS turn's tool output shows it. "ผมยังไม่เห็นหนี้
+    บัตรในระบบ" while never calling creditcard_list is a false statement —
+    call money_snapshot() instead.
+
 R9c (JUDGE-AGAINST-A-YARDSTICK): "…เยอะไปไหม / เกินไปไหม / โอเคไหม" is a
     judgment — compare against a stated reference, never a bare total:
     last month AND their usual (3–6-month average), plus income or a budget
@@ -581,6 +586,14 @@ sum_by_category(start, end, wallet_names=None, currency="ALL",
     #     hit = [r for r in rows if r["bucket"] in names]   # ✅ name vs name
     #   Even simpler — skip the manual filter and let SQL do it:
     #     total = sum_expense(start=s, end=e, category_names=resolve_category("ช้อปปิ้ง"))
+money_snapshot(as_of=None)
+    # → {income_avg, expense_avg, fixed_avg, variable_avg, free_cash_avg, cash_now,
+    #    cards[{name, amount_due, next_due_date, unbilled, owed}], card_due_total,
+    #    card_owed_total, installments_avg, goals, emergency_fund,
+    #    installment_room, installment_room_binding}
+    # ADVICE questions (plans, decisions, "ควร…ไหม", "ไหวไหม", "ผ่อนเพิ่มได้เท่าไหร่",
+    # เกษียณ, แบ่งเงินเดือน…) → call THIS first so every fact is on the table.
+    # "ผ่อนเพิ่มได้อีกเท่าไหร่" = installment_room (say which limit binds).
 month_end_outlook(as_of=None)
     # → {cash_now, days_left, typical_daily_spend, variable_spend_left,
     #    fixed_pending, card_due_before_month_end, cards_due, month_end_cash, enough,

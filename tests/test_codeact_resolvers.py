@@ -347,3 +347,24 @@ async def test_UT_RS05d_expand_keeps_legitimately_nested_child(monkeypatch):
     resolve_category = resolvers.make_resolve_category(_legit_nesting_catalog(), loop)
     names = await asyncio.to_thread(resolve_category, "เดินทาง")
     assert names == ["เดินทาง", "น้ำมัน"]  # fuel KEPT
+
+
+async def test_UT_RS06_exact_name_match_skips_the_llm(monkeypatch):
+    """UT-RS06: the rerank LLM answered 'ค่าไฟ' with 'ค่าสาธารณูปโภค' (no spend)
+    although 'ค่าไฟ' was a candidate, so a follow-up said "no records"
+    (2026-09-28). An exact name match (case/spacing ignored) is chosen
+    without asking the LLM."""
+    import asyncio
+    from src.agent.entity_catalog import CategoryEntry, EntityCatalog
+
+    async def boom(*_a, **_k):
+        raise AssertionError("LLM must not be called for an exact match")
+
+    monkeypatch.setattr(resolvers, "_llm_rerank", boom)
+    bills = CategoryEntry("c-bills", "ค่าบิล", "expense")
+    power = CategoryEntry("c-power", "ค่าไฟ", "expense", parent_id="c-bills")
+    utils = CategoryEntry("c-utils", "ค่าสาธารณูปโภค", "expense")
+    catalog = EntityCatalog(categories=[bills, power, utils], categories_all=[bills, power, utils])
+    loop = asyncio.get_running_loop()
+    resolve_category = resolvers.make_resolve_category(catalog, loop)
+    assert await asyncio.to_thread(resolve_category, " ค่าไฟ ") == ["ค่าไฟ"]

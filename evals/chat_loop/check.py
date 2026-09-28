@@ -63,7 +63,21 @@ E = {
                           "forbid_re": [r"ต้อง(จ่าย|ชำระ)[^\n]{0,15}(24,943|25,546)"]}},
  "A11_month_ok": {0: {"need": ["44,399"]}},
  "A12_shop_vs_last": {0: {"need": ["25,345", "7,244"]}},
- # A13: 151,362 − (KTC 24,111 + SCB M 603) = 126,648.
+  # ── Starter questions (scenarios_starters.json), DB facts 2026-09-28 ──
+ "Q01": {0: {"need": ["54,167"]}},
+ # Q02: paying the whole 25,546 owed OR the 24,111 due are both sound advice.
+ "Q02": {0: {"need": ["60,000"], "forbid_re": [r"(ไม่เห็น|ไม่มี)[^\n]{0,25}หนี้"]}},
+ "Q03": {0: {"need": ["24,111"], "forbid_re": [r"ต้อง(จ่าย|ชำระ)[^\n]{0,15}(24,943|25,546)"]}},
+ # Q05: no installments today → min(40%×54,167, 50%×17,448) = 8,724; the
+ # model once invented "existing debt = 30% of spending" → 10,651.
+ "Q05": {0: {"need": ["8,724"], "forbid": ["10,651"]}},
+ "Q06": {0: {"need": ["60,000"]}},
+ "Q07": {0: {"need": ["ช้อปปิ้ง"]}},
+ "Q09": {0: {"need": ["17,448"]}},
+ # Q10: KTC owes 24,943 — never "ไม่เห็นหนี้บัตร".
+ "Q10": {0: {"forbid_re": [r"(ไม่เห็น|ไม่มี)[^\n]{0,25}หนี้"]}},
+ "Q13": {0: {"need": ["151,362"]}},
+# A13: 151,362 − (KTC 24,111 + SCB M 603) = 126,648.
  "A13_enough_after_card": {0: {"need": ["126,648"], "forbid": ["107,309"]}},
  "A14_salary_where": {0: {"need": ["44,399"]}},
 }

@@ -337,17 +337,31 @@ def _decide(
     )
 
 
+def _exact_match(query: str, candidates: list[_Candidate]) -> _Candidate | None:
+    """The one candidate whose name IS the query (case / spacing ignored).
+
+    Not a fuzzy fast-path — only exact equality. Why: the rerank LLM once
+    answered 'ค่าไฟ' with 'ค่าสาธารณูปโภค' (0 spend) although 'ค่าไฟ' itself
+    was the first candidate, so "เดือนนี้ค่าไฟรวมเท่าไหร่" said "no records"
+    (chip-chain QA 2026-09-28). Several same-named candidates → the LLM
+    still decides.
+    """
+    key = "".join((query or "").split()).lower()
+    hits = [c for c in candidates if "".join(c.name.split()).lower() == key]
+    return hits[0] if len(hits) == 1 else None
+
+
 def _resolve_one(
     kind: str,
     query: str,
     candidates: list[_Candidate],
     main_loop: asyncio.AbstractEventLoop,
 ) -> _Candidate:
-    """LLM-ONLY resolution (SYNC facade for the sandbox worker thread).
+    """LLM resolution (SYNC facade for the sandbox worker thread).
 
-    Enumerates the catalog candidates and lets the planner LLM pick the
-    single best match. No fuzzy / string-similarity fast-path — every call
-    hits the LLM, handling typo / paraphrase / cross-language matches (e.g.
+    An exact name match wins outright (`_exact_match`); otherwise the planner
+    LLM picks the single best candidate. No fuzzy / string-similarity
+    fast-path — every non-exact call hits the LLM, handling typo / paraphrase / cross-language matches (e.g.
     'food' → 'อาหาร', 'true money' → 'TrueMonney') uniformly.
 
     Bridges to the main loop via `run_coroutine_threadsafe`; safe only from
@@ -358,6 +372,9 @@ def _resolve_one(
         raise ValueError(
             f"no {kind}s configured in catalog — cannot resolve {query!r}"
         )
+    exact = _exact_match(query, candidates)
+    if exact is not None:
+        return exact
     rerank = _rerank_sync(main_loop, kind, query, candidates)
     return _decide(kind, query, candidates, rerank)
 
@@ -376,6 +393,9 @@ async def _resolve_one_async(
         raise ValueError(
             f"no {kind}s configured in catalog — cannot resolve {query!r}"
         )
+    exact = _exact_match(query, candidates)
+    if exact is not None:
+        return exact
     try:
         rerank = await _llm_rerank(kind, query, candidates)
     except Exception:

@@ -1139,3 +1139,48 @@ def test_UT_NS_OUT01_month_end_outlook_never_subtracts_spent_so_far(monkeypatch)
     # "ถ้าจ่ายบัตรเต็ม": KTC 24,111 is due after month end but still paid.
     assert r["all_card_due"] == Decimal("24111")
     assert r["month_end_cash_after_all_card_dues"] == Decimal("127251")
+
+
+def test_UT_NS_SNAP01_money_snapshot_has_cards_and_real_installment_room(monkeypatch):
+    """UT-NS-SNAP01: advice answers said "ไม่เห็นหนี้บัตร" with 24,943 owed, and
+    invented "existing debt = 30% of spending" for installment headroom
+    (10,651). money_snapshot() hands over cards + goals, and installment_room
+    = min(40% income − installments, 50% of free cash). Dev DB 2026-09-28:
+    income 54,167, spend 36,719, no installments → min(21,667, 8,724) = 8,724."""
+    def fake(spec):
+        m = spec.metric
+        if m == "sum_income":
+            return [{"amount": Decimal("162500")}]
+        if m == "sum_expense":
+            return [{"amount": Decimal("110157")}]
+        if m == "fixed_costs":
+            return [{"bucket": "ที่อยู่อาศัย", "amount": Decimal("28500")},
+                    {"bucket": "Subscription", "amount": Decimal("1809")}]
+        if m == "balance":
+            return [{"amount": Decimal("152994")}]
+        if m == "creditcard_list":
+            return [{"sync_id": "cc-1", "name": "บัตร KTC", "used": Decimal("24943"),
+                     "billing_cycle_day": 20, "payment_due_day": 5}]
+        if m == "creditcard_statement":
+            return [{"statement_balance": Decimal("24111"), "paid_since_statement": Decimal("0")}]
+        if m == "goal_progress":
+            return [{"name": "เงินสำรองฉุกเฉิน", "balance": Decimal("60000"), "amount": Decimal("150000")}]
+        return []
+
+    async def fake_run_query(spec, user_id):
+        return fake(spec)
+
+    monkeypatch.setattr(ns_mod, "_run_query", fake_run_query)
+
+    async def run():
+        ns = build_namespace(user_id="u-1", catalog=_catalog(), today=date(2026, 9, 28),
+                             main_loop=asyncio.get_running_loop())
+        return await asyncio.to_thread(ns["money_snapshot"])
+
+    r = asyncio.run(run())
+    assert r["card_owed_total"] == Decimal("24943") and r["card_due_total"] == Decimal("24111")
+    assert r["emergency_fund"]["name"] == "เงินสำรองฉุกเฉิน"
+    assert r["installments_avg"] == 0
+    assert r["free_cash_avg"] == Decimal("17448")
+    assert r["installment_room"] == Decimal("8724")
+    assert r["installment_room_binding"] == "cash_flow"
