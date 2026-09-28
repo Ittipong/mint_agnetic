@@ -147,3 +147,17 @@ does not treat as a failure. Rejected; owner chose Gemini only.
 Result: about $3.4 → $2.5 per 1k turns (−26%) with the same models where
 quality mattered. Next lever is chip output (5 candidates × 4 fields ≈ 265
 tokens, 69% of a chip call).
+
+### Chips: exactly 3, no spares (2026-09-29)
+
+The prompt asked for 5 candidates and the app showed the first 3 that passed
+the filters. It now asks for exactly 3 (one decide / whatif / ahead) and
+drops the `repeats` field. max_tokens is 700 → 400. chip_chain on 2.5-flash:
+output 265 → 190 tokens, $0.00095 → $0.00079 per call (−17%, about −7% of
+the whole bill). 22/28 turns showed 3 chips, 6 showed 2, none showed 0. The
+owner accepts 2.
+
+Product-shopping chips ("แนะนำกองทุนรวม", "แนะนำหุ้น", "ควรลงทุนอะไรดี")
+slipped past the prompt ban in several runs, so code now drops them
+(`_PRODUCT_CHIP`). How much of their income to invest, and the provident
+fund, are still allowed.

@@ -566,3 +566,32 @@ async def test_UT_SG32_fixed_instructions_are_a_cached_system_prefix(monkeypatch
         assert per_turn not in sys1["content"][0]["text"]
         assert per_turn in user1["content"]
 
+
+
+async def test_UT_SG36_three_chips_no_spares(monkeypatch):
+    """UT-SG36: owner 2026-09-29 — ask for exactly 3 chips instead of 5
+    candidates (output was ~70% of a chip call's cost); 2 shown is acceptable
+    when a filter drops one. No `repeats` field in the requested shape."""
+    head, _, _ = sf._PROMPT_TEMPLATE.partition(sf._CONTEXT_MARKER)
+    assert "EXACTLY 3 ADVISOR chips" in head
+    assert '"repeats"' not in head
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    seen, client = _chip_server([_OK])
+    monkeypatch.setattr(sf.httpx, "AsyncClient", client)
+    await sf._generate(user_text="q", answer_text="a", tool_data="", user_catalog="")
+    assert seen[0]["max_tokens"] == 400
+
+
+def test_UT_SG37_product_shopping_chips_are_dropped():
+    """UT-SG37: "แนะนำกองทุนรวม" / "แนะนำหุ้น" / "ควรลงทุนอะไรดี" reached the
+    wire despite the prompt ban (09-28/29). Dropped in code — reply chips too.
+    How much of their own income to invest, and the provident fund, stay."""
+    out = sf._finalize([
+        {"kind": "reply", "label": "แนะนำกองทุนรวม", "send": "แนะนำกองทุนรวมให้หน่อย"},
+        {"kind": "reply", "label": "แนะนำหุ้น", "send": "แนะนำหุ้นให้หน่อย"},
+        {"kind": "decide", "label": "ควรลงทุนอะไรดี", "send": "ควรลงทุนอะไรดี"},
+        {"kind": "decide", "label": "ธนาคารไหนดอกเบี้ยดี", "send": "ธนาคารไหนให้ดอกเบี้ยดีสุด"},
+        {"kind": "whatif", "label": "แบ่งไปลงทุนเท่าไหร่", "send": "ควรแบ่งเงินไปลงทุนเท่าไหร่จากรายได้ของฉัน"},
+        {"kind": "ahead", "label": "เพิ่มกองทุนสำรองเลี้ยงชีพไหม", "send": "ควรเพิ่มเงินเข้ากองทุนสำรองเลี้ยงชีพไหม"},
+    ])
+    assert [c["label"] for c in out] == ["แบ่งไปลงทุนเท่าไหร่", "เพิ่มกองทุนสำรองเลี้ยงชีพไหม"]

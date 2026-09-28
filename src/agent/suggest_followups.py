@@ -141,7 +141,7 @@ When tapped, a chip's `send` text is re-sent verbatim AS THE USER'S next
 message — so it must read as something the user would naturally type.
 
 Output JSON ONLY, this exact shape:
-{{"skip": true|false, "reason": "<short>", "items": [{{"kind": "decide"|"whatif"|"ahead"|"reply", "repeats": "<the earlier question or shown figure this chip duplicates, or empty>", "label": "<thai short, tappable>", "send": "<thai full message the user would send>"}}]}}
+{{"skip": true|false, "reason": "<short>", "items": [{{"kind": "decide"|"whatif"|"ahead"|"reply", "label": "<thai short, tappable>", "send": "<thai full message the user would send>"}}]}}
 
 FIRST decide the MODE by looking at the assistant's answer:
 
@@ -177,8 +177,9 @@ the user (e.g. "ยอดเท่าไรครับ", "รายจ่าย
 MODE-NORMAL — the answer is NOT a question back (a statement / analysis / advice
 / a greeting). Nimo is the user's money ADVISOR and a friend who never judges.
 The app's screens already show every total, list, balance and due date — a
-chip that only re-reads those is wasted. Write 5 ADVISOR chip candidates, BEST
-FIRST (the app shows the first 3 that pass its filters), covering all 3 kinds:
+chip that only re-reads those is wasted. Write EXACTLY 3 ADVISOR chips, BEST
+FIRST, one of each kind (every chip is shown — no spares, so each must pass
+every rule below):
   • kind="decide" — so-what / should-I, about what this answer showed:
       "ช้อปเดือนนี้เกินไปไหม", "จ่ายบัตรเต็มเลยดีไหม", "ควรลดตรงไหนก่อน"
   • kind="whatif" — a what-if or a plan built on their numbers:
@@ -234,10 +235,9 @@ HARD RULES (both modes):
   - NEVER re-suggest anything in "already asked in this chat" below — not the
     same wording, and not the same question in other words (same metric +
     period + scope = same question; "วันสรุปยอด" = "วันตัดรอบบัญชี").
-    For EVERY chip fill "repeats": quote the earlier question — or the figure
-    this answer/tool data already shows — that it duplicates, else "". Be
-    honest: a chip with a non-empty "repeats" is thrown away, so write
-    another one instead.
+    Before writing a chip, check it against that list and against the
+    figures this answer/tool data already shows; if it duplicates one, write
+    a different angle instead.
   - Neutral wording. No worry/self-judgement framing ("ผมแย่ไหม",
     "จะเป็นอะไรไหม") — ask about the numbers, not about the user.
 
@@ -601,6 +601,17 @@ def is_lookup_chip(label: str) -> bool:
 # "Not now" replies: tapping one only earns "ok, ask me anytime" — a dead turn.
 _NOT_NOW_CHIP = re.compile(r"^\s*(ยังไม่|ไม่ต้อง|ไว้ก่อน|ไว้ทีหลัง|ไม่เป็นไร)")
 
+# Product shopping — Nimo advises on the user's OWN money, never picks funds,
+# stocks, coins, banks or apps. The prompt bans these, yet "แนะนำกองทุนรวม" /
+# "แนะนำหุ้น" / "ควรลงทุนอะไรดี" still reached the wire (chip chains 09-28/29).
+# "ควรแบ่งไปลงทุนเท่าไหร่" (how much of their income) stays allowed, and so does
+# the provident fund (a payroll deduction, not a product pick).
+_PRODUCT_CHIP = re.compile(
+    r"กองทุน(?!สำรองเลี้ยงชีพ)|หุ้น|คริปโต|บิทคอยน์|crypto|bitcoin"
+    r"|ลงทุน(อะไร|แบบไหน|ที่ไหน|ตัวไหน)|ธนาคารไหน|บัญชี(ดอกเบี้ยสูง|ไหนดี)|แอป(ไหน|อื่น)",
+    re.IGNORECASE,
+)
+
 
 def _is_app_only(chip: dict) -> bool:
     return bool(_APP_ONLY_CHIP.match(chip["label"]) or _APP_ONLY_CHIP.match(chip["send"]))
@@ -621,6 +632,9 @@ def _finalize(items: list[Any], *, asked_before: Optional[list[str]] = None) -> 
             continue
         if _NOT_NOW_CHIP.match(chip["label"]):
             slog("suggest", f"dropped not-now chip {chip['label']!r}")
+            continue
+        if _PRODUCT_CHIP.search(chip["label"]) or _PRODUCT_CHIP.search(chip["send"]):
+            slog("suggest", f"dropped product chip {chip['label']!r}")
             continue
         key = _key(chip["send"])
         if key in seen:
@@ -758,7 +772,8 @@ def _chips_body(messages: list[dict], model: str, fallbacks: list[str]) -> dict:
         # A touch of creativity for varied chips, but low enough to stay on-task.
         "temperature": 0.4,
         "response_format": {"type": "json_object"},
-        "max_tokens": 700,  # 5 candidates with kind + repeats fields
+        # 3 chips, no spares: output is ~70% of a chip call's cost (09-29).
+        "max_tokens": 400,
     }
     if fallbacks:
         body["models"] = [model, *fallbacks]
