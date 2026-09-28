@@ -437,3 +437,16 @@ def test_UT_P06_prompt_forbids_confirmation_without_propose_call():
     )
     # And it must warn against imitating an earlier ADD answer's wording.
     assert "do NOT imitate an" in SYSTEM_PROMPT
+
+
+
+def test_UT_P09_static_prefix_has_no_per_user_or_per_day_values():
+    """UT-P09: the date + user ID sat at 2.8% of the prompt, so every cache
+    was per-user-per-day (and Gemini cached nothing). They now live after
+    RUNTIME_MARKER, leaving one static prefix shared by all users."""
+    from src.agent.prompts import split_for_cache
+
+    a_static, a_tail = split_for_cache(render_system_prompt(today="2026-09-28", user_id="u-A"))
+    b_static, _ = split_for_cache(render_system_prompt(today="2026-10-01", user_id="u-B"))
+    assert a_static == b_static
+    assert "2026-09-28" in a_tail and "u-A" in a_tail

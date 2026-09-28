@@ -652,8 +652,12 @@ def test_UT_CR17c_card_note_reaches_the_react_prompt():
         "proposals": [{"proposal_id": "p1", "status": "confirmed",
                        "payload": {"amount": 75, "category": "กาแฟ"}}],
     })
-    assert "75 บาท กาแฟ — CONFIRMED" in msgs[0].content
-    assert 'get_app_capability("edit_confirmed_txn")' in msgs[0].content
+    # The system message is [static prefix (cache breakpoint), per-turn tail].
+    text = "".join(p["text"] for p in msgs[0].content)
+    assert "75 บาท กาแฟ — CONFIRMED" in text
+    assert 'get_app_capability("edit_confirmed_txn")' in text
+    # Card state lives in the per-turn tail, never in the cached prefix.
+    assert "75 บาท กาแฟ" not in msgs[0].content[0]["text"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

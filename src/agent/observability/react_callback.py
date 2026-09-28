@@ -120,9 +120,16 @@ class ReActSessionLogCallback(BaseCallbackHandler):
                     "prompt_tokens": meta.get("input_tokens", "?"),
                     "completion_tokens": meta.get("output_tokens", "?"),
                 }
+            # Prompt-cache hits (the static system prefix) — the main cost lever.
+            cached = ((meta.get("input_token_details") or {}).get("cache_read")
+                      if meta else None)
+            if cached is None:
+                cached = ((usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+                          if isinstance(usage, dict) else None)
             usage_str = (
                 f"prompt={usage.get('prompt_tokens', '?')} "
-                f"completion={usage.get('completion_tokens', '?')}"
+                f"completion={usage.get('completion_tokens', '?')} "
+                f"cached={cached if cached is not None else '?'}"
             )
             if tool_calls:
                 tc_brief = [

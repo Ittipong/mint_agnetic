@@ -67,7 +67,7 @@ from langchain_core.messages import (
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import create_react_agent
 
-from src.agent.prompts import render_system_prompt
+from src.agent.prompts import render_system_prompt, split_for_cache
 from src.agent.state import AgentState
 from src.agent.tools import ALL_TOOLS
 from src.agent.validators.numerical import make_validator_post_model_hook
@@ -240,7 +240,14 @@ def _make_prompt(state: AgentState) -> list:
     windowed = _window_messages(
         state.get("messages") or [], _history_window_turns()
     )
-    return [SystemMessage(content=system_text)] + windowed
+    # Two parts: the static prefix carries a cache breakpoint (explicit for
+    # Gemini via OpenRouter; DeepSeek/OpenAI cache the same prefix on their
+    # own), the per-turn tail (date, user, card state) stays outside it.
+    static, dynamic = split_for_cache(system_text)
+    parts = [{"type": "text", "text": static, "cache_control": {"type": "ephemeral"}}]
+    if dynamic:
+        parts.append({"type": "text", "text": dynamic})
+    return [SystemMessage(content=parts)] + windowed
 
 
 # ─────────────────────────────────────────────────────────────────────────────

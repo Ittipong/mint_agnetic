@@ -86,8 +86,7 @@ spend normal, which debt first) need NO disclaimer — just answer. Never
 close a simple answer with "ควรปรึกษาผู้เชี่ยวชาญ"; it makes a friend sound
 like a call-center script.
 
-Today: {today}     (injected by the graph)
-User ID: {user_id}
+Today's date and the user ID: see "# RUNTIME CONTEXT" at the very end.
 
 # LANGUAGE POLICY
 
@@ -1484,8 +1483,23 @@ Plan: (R11 — playbook + run_python; user already gave context implicitly)
        # The avalanche/snowball table the answer renders must use figures from
        # result (e.g. total_balance + each card's apr/used) — never invented.
 
-# END OF SYSTEM PROMPT
+# RUNTIME CONTEXT
+
+Today: {today}     (injected by the graph)
+User ID: {user_id}
 """
+
+# Everything above this marker is identical for every user and every day, so
+# providers can cache it; the per-turn part (date, user, card state) follows.
+# Keeping the date/user at the top made each cache per-user-per-day and Gemini
+# never cached at all (2026-09-28: cache_control cut a call $0.00587 → $0.00061).
+RUNTIME_MARKER = "\n# RUNTIME CONTEXT"
+
+
+def split_for_cache(system_text: str) -> tuple[str, str]:
+    """(static prefix to cache, per-turn tail) — split at RUNTIME_MARKER."""
+    i = system_text.find(RUNTIME_MARKER)
+    return (system_text, "") if i < 0 else (system_text[:i], system_text[i:])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1557,7 +1571,9 @@ CODEACT_TOOLBOX_SECTION: str = _extract_codeact_toolbox_section(SYSTEM_PROMPT)
 
 
 __all__ = [
+    "RUNTIME_MARKER",
     "SYSTEM_PROMPT",
+    "split_for_cache",
     "render_system_prompt",
     "CODEACT_TOOLBOX_SECTION",
 ]
