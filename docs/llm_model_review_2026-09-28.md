@@ -83,3 +83,67 @@ state correct numbers in another form (220,314 = 6 × 36,719; 151,362 / 126,648)
 
 Luna is the only replacement that clears the bar. It is released 2026-09 (new),
 so pricing and behaviour may still shift.
+
+## Round 3 (2026-09-28/29): cheap Chinese models, then a Gemini-only tune
+
+### Where the money goes, by role
+
+Session logs now carry `cost=` per call for every role (suggest, preamble,
+classify, propose; REACT tokens + cost). 16-turn mixed set, Gemini, before
+the chip cache:
+
+| role | model | share | $ / 1k turns |
+|---|---|---|---|
+| suggestion chips | gemini-2.5-flash | 57% | 1.93 |
+| REACT | gemini-3.1-flash-lite | 38% | 1.31 |
+| classify / preamble / propose | gemini-2.5-flash-lite | 5% | 0.16 |
+
+Chips were the biggest line because their ~2.3K-token fixed prompt was never
+cached (`cached=0` on every call) and 2.5-flash output costs $2.50/1M.
+REACT is cheap per call despite a 25K prompt: 97% of it is cached.
+
+### Cheap Chinese models (OpenRouter, pinned to the vendor's own provider)
+
+16-turn mixed set (numbers, add, advice; 14 checks). Gemini 3.1 Flash-Lite
+baseline: 14/14, 7.9 s median.
+
+| model | checks | median / p90 | verdict |
+|---|---|---|---|
+| qwen/qwen3.7-flash | 13/14 | 11.6 / 15.5 s | cheapest (~$0.48/1k REACT at official price), went to full test |
+| tencent/hy3 | 14/14 | 11.6 / 16.0 s | 59% cache hit → dearer than Gemini at official price |
+| xiaomi/mimo-v2.6-flash | 14/14 | 23.9 / 42.3 s | too slow |
+| qwen/qwen3.8-flash | 13/14 | 12.8 / 30.4 s | read the month-end projection as cash left |
+| z-ai/glm-5.3-flash | 12/14 | 39 / 114 s | reasoning cannot be disabled |
+| stepfun/step-3.7-flash | — | — | reasoning cannot be disabled; stopped |
+
+Qwen 3.7 Flash as REACT + chips on the full 5 sets: **65/69** (two wrong
+figures, one failed add, one agent-loop error), turn median 21.3 s vs 6.2 s.
+As chips it returned nothing: it thinks by default and spent all 700
+max_tokens on thinking (200 OK, empty content), which OpenRouter `models[]`
+does not treat as a failure. Rejected; owner chose Gemini only.
+
+### Gemini-only tune (what shipped)
+
+- REACT candidates: 2.5-flash-lite 8/14 (wrong balances/card figures);
+  3.5-flash-lite needs reasoning and costs more per token than 3.1. **Keep
+  3.1-flash-lite.**
+- Chips: the fixed instructions now go in a system message with
+  `cache_control`; the per-turn CONTEXT goes in the user message. 2280 tokens
+  cached on every call → $0.0017 → $0.00095 per call, same model and quality.
+- Chip model candidates (chip_chain, 4 seeds × 6 taps):
+
+  | chips | $ / call | chains | notes |
+  |---|---|---|---|
+  | **2.5-flash + cache** | 0.00095 | 28/28 turns | varied; 2/80 lookup chips |
+  | 2.5-flash-lite + cache | 0.00022 | 26/28 | repeats "เงินจะพอถึงสิ้นเดือนไหม" nearly every hop |
+  | 2.5-flash-lite + "already offered" filter | 0.00022 | 22/28 | still repeats after 2 turns; more dead ends — filter dropped |
+  | 3.1-flash-lite | 0.00122 | 27/28 | prompt too short to be cached → dearer than 2.5-flash |
+
+- A chip reply that is empty or not JSON now retries once on the first
+  fallback model while the 4 s budget lasts (`SUGGESTIONS_REASONING=off` is
+  available for reasoning models).
+- Fallbacks for every role are Gemini-only (owner's call: one vendor).
+
+Result: about $3.4 → $2.5 per 1k turns (−26%) with the same models where
+quality mattered. Next lever is chip output (5 candidates × 4 fields ≈ 265
+tokens, 69% of a chip call).

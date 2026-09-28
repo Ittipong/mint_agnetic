@@ -25,6 +25,7 @@ from typing import AsyncIterator
 
 import httpx
 
+from src.agent.llm_openrouter import _log_usage
 from src.agent.session_logger import slog, slog_error
 
 
@@ -84,6 +85,8 @@ def _build_request(user_message: str) -> tuple[str, dict, dict]:
         "temperature": 0.3,
         "max_tokens": 80,
         "stream": True,
+        # Trailing usage chunk → per-role cost in the session log.
+        "stream_options": {"include_usage": True},
     }
     return url, headers, body
 
@@ -125,6 +128,8 @@ async def astream_preamble(user_message: str) -> AsyncIterator[str]:
                         chunk = json.loads(payload)
                     except json.JSONDecodeError:
                         continue
+                    if chunk.get("usage"):
+                        _log_usage("preamble", _default_model(), chunk["usage"])
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue

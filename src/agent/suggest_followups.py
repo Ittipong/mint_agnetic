@@ -58,7 +58,7 @@ from typing import Any, Optional
 
 import httpx
 
-from src.agent.llm_openrouter import _resolve_provider
+from src.agent.llm_openrouter import _log_usage, _resolve_provider
 from src.agent.session_logger import slog, slog_block, slog_error
 
 
@@ -690,31 +690,97 @@ async def _generate(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    messages = _chips_messages(prompt)
     primary = _model()
     fallbacks = [m for m in _fallback_models() if m != primary]
-    body: dict = {
-        "model": primary,
-        "messages": [{"role": "user", "content": prompt}],
-        # A touch of creativity for varied chips, but low enough to stay on-task.
-        "temperature": 0.4,
-        "response_format": {"type": "json_object"},
-        "max_tokens": 700,  # 5 candidates with kind + repeats fields
-    }
-    if fallbacks:
-        body["models"] = [primary, *fallbacks]
-    provider = _resolve_provider()
-    if provider is not None:
-        body["provider"] = provider
     url = _base_url().rstrip("/") + "/chat/completions"
-
     slog_block(
         "suggest",
         f"PROMPT model={primary} timeout={_timeout_s()}s",
         f"user={user_text!r}",
     )
 
+    # OpenRouter's `models[]` only falls back on a request ERROR. A 200 with
+    # empty/garbled content (e.g. a reasoning model burning max_tokens on
+    # thinking) sails through, so retry once on the next model client-side —
+    # but only while the original time budget lasts: chips must not hold `done`.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _timeout_s()
+    chain = [primary, *fallbacks]
+    for i, model in enumerate(chain[:2]):
+        remaining = deadline - loop.time()
+        if i > 0:
+            if remaining < _MIN_RETRY_S:
+                slog("suggest", f"no time left to retry on {model} ({remaining:.1f}s)")
+                return None
+            slog("suggest", f"retry on fallback {model}")
+        parsed = await _request_chips(url, headers, messages, model, chain[i + 1:], remaining)
+        if parsed is not None:
+            break
+    else:
+        return None
+
+    skip = bool(parsed.get("skip"))
+    items = parsed.get("items")
+    if not isinstance(items, list):
+        items = []
+    return {"skip": skip, "reason": parsed.get("reason"), "items": items}
+
+
+_MIN_RETRY_S = 1.5  # below this a retry can't finish inside the chip budget
+
+
+_CONTEXT_MARKER = "\nCONTEXT\n"
+
+
+def _chips_messages(prompt: str) -> list[dict]:
+    """Split the rendered prompt into a cacheable system prefix (the fixed
+    instructions, ~2.3K tokens) and a per-turn user message (CONTEXT block).
+
+    Gemini on OpenRouter only caches content marked with `cache_control` —
+    before this split every chip call paid full price for the same prefix
+    (cached=0 on all calls, 2026-09-28)."""
+    head, sep, tail = prompt.partition(_CONTEXT_MARKER)
+    if not sep:
+        return [{"role": "user", "content": prompt}]
+    return [
+        {"role": "system", "content": [
+            {"type": "text", "text": head, "cache_control": {"type": "ephemeral"}},
+        ]},
+        {"role": "user", "content": sep.lstrip("\n") + tail},
+    ]
+
+
+def _chips_body(messages: list[dict], model: str, fallbacks: list[str]) -> dict:
+    body: dict = {
+        "model": model,
+        "messages": messages,
+        # A touch of creativity for varied chips, but low enough to stay on-task.
+        "temperature": 0.4,
+        "response_format": {"type": "json_object"},
+        "max_tokens": 700,  # 5 candidates with kind + repeats fields
+    }
+    if fallbacks:
+        body["models"] = [model, *fallbacks]
+    provider = _resolve_provider()
+    if provider is not None:
+        body["provider"] = provider
+    # Reasoning models (qwen3.7-flash) think by default and can spend the whole
+    # max_tokens on thinking → empty content → no chips. Chips need no thinking.
+    if (os.getenv("SUGGESTIONS_REASONING") or "").strip().lower() == "off":
+        body["reasoning"] = {"enabled": False}
+    return body
+
+
+async def _request_chips(
+    url: str, headers: dict, messages: list[dict], model: str,
+    fallbacks: list[str], timeout_s: float,
+) -> Optional[dict]:
+    """One chip request. Returns the parsed dict, or None when the call fails
+    or the reply is empty / not a JSON object."""
+    body = _chips_body(messages, model, fallbacks)
     try:
-        async with httpx.AsyncClient(timeout=_timeout_s()) as client:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
             r = await client.post(url, headers=headers, json=body)
             r.raise_for_status()
             data = r.json()
@@ -722,7 +788,8 @@ async def _generate(
     except Exception as exc:  # noqa: BLE001 — every failure → None → emit nothing
         slog_error("suggest", exc)
         return None
-
+    # Per-call cost so the bill can be split by role.
+    _log_usage("suggest", data.get("model") or model, data.get("usage"))
     try:
         parsed = _loads_lenient(content)
     except (TypeError, ValueError, SyntaxError) as exc:
@@ -734,12 +801,7 @@ async def _generate(
     if not isinstance(parsed, dict):
         slog("suggest", f"parse returned non-dict: {type(parsed).__name__}")
         return None
-
-    skip = bool(parsed.get("skip"))
-    items = parsed.get("items")
-    if not isinstance(items, list):
-        items = []
-    return {"skip": skip, "reason": parsed.get("reason"), "items": items}
+    return parsed
 
 
 __all__ = [

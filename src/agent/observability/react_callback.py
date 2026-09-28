@@ -132,7 +132,8 @@ class ReActSessionLogCallback(BaseCallbackHandler):
                 f"model={served_by} "
                 f"prompt={usage.get('prompt_tokens', '?')} "
                 f"completion={usage.get('completion_tokens', '?')} "
-                f"cached={cached if cached is not None else '?'}"
+                f"cached={cached if cached is not None else '?'} "
+                f"cost={usage.get('cost', '?') if isinstance(usage, dict) else '?'}"
             )
             if tool_calls:
                 tc_brief = [

@@ -467,3 +467,102 @@ async def test_UT_SG28_chip_equal_to_the_current_question_is_dropped():
                                {"label": "มาจากไหน", "send": "เงินใน KBank มาจากไหน"}]),
     )
     assert _sends(block) == ["เงินใน KBank มาจากไหน"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UT-SG29..31 — chips on a reasoning model (qwen3.7-flash, 2026-09-28): it spent
+# all max_tokens thinking → 200 with empty content → zero chips, and OpenRouter
+# `models[]` never fell back because the request did not ERROR.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import json
+
+import httpx as _httpx
+
+_REAL_CLIENT = _httpx.AsyncClient
+
+
+def _chip_server(replies: list[str]):
+    """Fake OpenRouter: answers each request with the next content string and
+    records the request bodies."""
+    seen: list[dict] = []
+
+    def handler(request: _httpx.Request) -> _httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body)
+        content = replies[len(seen) - 1]
+        return _httpx.Response(200, json={
+            "model": body["model"],
+            "choices": [{"message": {"content": content}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 700},
+        })
+
+    def client(*a, **kw):
+        kw["transport"] = _httpx.MockTransport(handler)
+        return _REAL_CLIENT(*a, **kw)
+
+    return seen, client
+
+
+async def _gen_with(monkeypatch, replies, **env):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    monkeypatch.setenv("SUGGESTIONS_MODEL", "qwen/qwen3.7-flash")
+    monkeypatch.setenv("SUGGESTIONS_FALLBACK_MODELS", '["google/gemini-2.5-flash-lite"]')
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    seen, client = _chip_server(replies)
+    monkeypatch.setattr(sf.httpx, "AsyncClient", client)
+    out = await sf._generate(user_text="q", answer_text="a", tool_data="", user_catalog="")
+    return out, seen
+
+
+_OK = json.dumps({"skip": False, "items": [{"label": "L", "send": "S"}]})
+
+
+async def test_UT_SG29_empty_reply_retries_on_the_fallback_model(monkeypatch):
+    """UT-SG29: primary returns 200 + empty content → one retry on the first
+    fallback model, and its chips are used."""
+    out, seen = await _gen_with(monkeypatch, ["", _OK])
+    assert [b["model"] for b in seen] == ["qwen/qwen3.7-flash", "google/gemini-2.5-flash-lite"]
+    assert out is not None and out["items"] == [{"label": "L", "send": "S"}]
+
+
+async def test_UT_SG30_reasoning_off_env_disables_thinking(monkeypatch):
+    """UT-SG30: SUGGESTIONS_REASONING=off sends reasoning.enabled=false; unset
+    sends nothing (models that cannot disable it would 400)."""
+    _, seen = await _gen_with(monkeypatch, [_OK], SUGGESTIONS_REASONING="off")
+    assert seen[0]["reasoning"] == {"enabled": False}
+    monkeypatch.delenv("SUGGESTIONS_REASONING")
+    _, seen = await _gen_with(monkeypatch, [_OK])
+    assert "reasoning" not in seen[0]
+
+
+async def test_UT_SG31_no_retry_when_the_time_budget_is_spent(monkeypatch):
+    """UT-SG31: chips must not hold the turn's `done` — with less than the
+    minimum retry window left, an empty reply gives up instead of retrying."""
+    out, seen = await _gen_with(monkeypatch, ["", _OK], SUGGESTIONS_TIMEOUT_S="1.0")
+    assert out is None
+    assert len(seen) == 1
+
+
+async def test_UT_SG32_fixed_instructions_are_a_cached_system_prefix(monkeypatch):
+    """UT-SG32: the chip prompt's fixed instructions go in a system message
+    marked cache_control, and nothing per-turn leaks into it — otherwise the
+    prefix changes every call and Gemini never caches it (cached=0, 09-28)."""
+    monkeypatch.setenv("SUGGESTIONS_MODEL", "google/gemini-2.5-flash-lite")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    seen, client = _chip_server([_OK, _OK])
+    monkeypatch.setattr(sf.httpx, "AsyncClient", client)
+    await sf._generate(user_text="ค่ากาแฟเดือนนี้", answer_text="1,240 บาท",
+                       tool_data="TD-1", user_catalog="CAT-1")
+    await sf._generate(user_text="งบอาหารเหลือเท่าไหร่", answer_text="3,000 บาท",
+                       tool_data="TD-2", user_catalog="CAT-2")
+    sys1, user1 = seen[0]["messages"]
+    sys2, _ = seen[1]["messages"]
+    assert sys1["role"] == "system" and user1["role"] == "user"
+    assert sys1["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert sys1["content"][0]["text"] == sys2["content"][0]["text"]
+    for per_turn in ("ค่ากาแฟเดือนนี้", "1,240 บาท", "TD-1", "CAT-1"):
+        assert per_turn not in sys1["content"][0]["text"]
+        assert per_turn in user1["content"]
+
