@@ -180,6 +180,10 @@ class AgentState(TypedDict, total=False):
     # and emits it AFTER the answer block — keeping generation in the graph and
     # the adapter a pure ordering/forwarding layer. Reset each turn by pre_turn.
     suggestions_block: Optional[dict]
+    # `send` texts of chips already shown in this thread (newest last, capped).
+    # Carried across turns — NOT reset by pre_turn — so the next hop's chips
+    # don't bring the same question back in other words.
+    shown_chips: list[str]
 
     # — observability —
     trace_id: str                              # LangSmith run_id

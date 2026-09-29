@@ -108,6 +108,7 @@ def _maybe_start_chips(state: AgentState) -> None:
         tool_data=tool_data_of(state),
         user_context=state.get("user_context"),
         asked_before=asked_before(messages),
+        shown_before=state.get("shown_chips") or [],
     )
 
 

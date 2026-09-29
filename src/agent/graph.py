@@ -388,7 +388,8 @@ async def _gen_suggestions(state: AgentState) -> dict:
     """
     from langchain_core.messages import AIMessage as _AIMessage
     from src.agent.suggest_followups import (
-        asked_before, build_suggestions_block, take_speculative, tool_data_of,
+        asked_before, build_suggestions_block, remember_shown, take_speculative,
+        tool_data_of,
     )
 
     messages = state.get("messages") or []
@@ -408,13 +409,19 @@ async def _gen_suggestions(state: AgentState) -> dict:
             user_context=state.get("user_context"),
             proposal_emitted=_add_turn(state, messages),
             asked_before=asked_before(messages),
+            shown_before=state.get("shown_chips") or [],
             speculative=speculative,
         )
     finally:
         # A skipped turn (ADD / crisis / reply chips) never awaited it.
         if speculative is not None and not speculative.done():
             speculative.cancel()
-    return {"suggestions_block": block}
+    if block is None:
+        return {"suggestions_block": None}
+    return {
+        "suggestions_block": block,
+        "shown_chips": remember_shown(state.get("shown_chips"), block),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

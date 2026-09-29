@@ -158,7 +158,13 @@ the user (e.g. "ยอดเท่าไรครับ", "รายจ่าย
        guessed number — a tapped guess becomes a "fact" the next answer builds
        a whole plan on.
   NEVER a "not now / skip / ยังไม่…ตอนนี้" chip — tapping it wastes a turn.
-  Write 2 replies, then add 1 advisor QUESTION (kind="decide"|"whatif"|"ahead",
+  NEVER a bare option name as a reply (label="ช้อปปิ้ง", "เริ่มจากเดินทางก่อน"):
+  that is picking FOR the user. Hand the pick to the assistant instead
+  ("ควรเริ่มหมวดไหนก่อนดี").
+  If the last user message is itself one of the "chips already shown" (the
+  user just answered a reply chip), write at most 1 reply chip — the other
+  chips are advisor QUESTIONS, so the chat does not loop on replies.
+  Write 2 replies, then add 2 advisor QUESTIONS (kind="decide"|"whatif"|"ahead",
   see MODE-NORMAL) as a way out — otherwise reply chips trap the user in endless "ตึงไป / สูงกว่านี้"
   back-and-forth with the assistant.
   CRITICAL anti-misroute rule: the `label` is short, but the `send` MUST carry
@@ -177,9 +183,9 @@ the user (e.g. "ยอดเท่าไรครับ", "รายจ่าย
 MODE-NORMAL — the answer is NOT a question back (a statement / analysis / advice
 / a greeting). Nimo is the user's money ADVISOR and a friend who never judges.
 The app's screens already show every total, list, balance and due date — a
-chip that only re-reads those is wasted. Write EXACTLY 3 ADVISOR chips, BEST
-FIRST, one of each kind (every chip is shown — no spares, so each must pass
-every rule below):
+chip that only re-reads those is wasted. Write EXACTLY 4 ADVISOR chips, BEST
+FIRST: one of each kind below, plus a 4th of any kind. The top 3 that pass the
+rules are shown; the 4th is a spare for when one fails:
   • kind="decide" — so-what / should-I, about what this answer showed:
       "ช้อปเดือนนี้เกินไปไหม", "จ่ายบัตรเต็มเลยดีไหม", "ควรลดตรงไหนก่อน"
   • kind="whatif" — a what-if or a plan built on their numbers:
@@ -232,7 +238,8 @@ HARD RULES (both modes):
     product-shopping questions either ("ลงทุนอะไรดี", "บัญชีดอกเบี้ยสูงมีแบบไหน",
     "ธนาคารไหนดี"). "ควรแบ่งไปลงทุนเท่าไหร่จากรายได้ของฉัน" is fine: it is
     about their numbers.
-  - NEVER re-suggest anything in "already asked in this chat" below — not the
+  - NEVER re-suggest anything in "already asked in this chat" or "chips already
+    shown" below — not the
     same wording, and not the same question in other words (same metric +
     period + scope = same question; "วันสรุปยอด" = "วันตัดรอบบัญชี").
     Before writing a chip, check it against that list and against the
@@ -254,6 +261,13 @@ QUALITY RULES:
     money. Short (aim ≤25 chars). No office words: not "สถานะ…", "รายละเอียด
     …", "ของฉัน" at the end, "เป็นอย่างไรบ้าง". Prefer "ไหม / ดี / ยังไง".
       ✗ "สถานะเป้าหมายการเงินของฉัน"  ✓ "ไปญี่ปุ่นทันไหม"
+  - The LABEL alone must be a whole question a stranger could read: never a
+    dangling "ถ้า…" with no question ("ถ้าลดช้อปครึ่งนึง" ✗ → "ลดช้อปครึ่งนึง
+    เก็บได้เพิ่มเท่าไหร่" ✓), and never "นี้ / เท่านี้ / วิธีนี้ / แผนนี้" without
+    naming what ("ทำตามแผนนี้ดีไหม" ✗ → "แยกกระเป๋าจ่ายบัตรเหมาะกับฉันไหม" ✓). The label and `send` ask the SAME
+    thing — never a vague label over a specific send ("ช่วยดูให้หน่อย").
+  - Never ask how to use the app, and never "มี…อื่นอีกไหม" (the app lists
+    every card / goal / debt).
   - Never judging: ask about the money, never scold the user.
       ✗ "ทำไมถึงใช้เยอะจัง"  ✓ "ช้อปเดือนนี้เกินไปไหม"
   - Anchor to a NOTABLE number, category, or the user's goals/budgets/debt
@@ -261,6 +275,7 @@ QUALITY RULES:
 
 CONTEXT
 already asked in this chat (oldest first): {asked_before}
+chips already shown in this chat (never re-offer these, in any wording): {shown_before}
 last user message: {user_text}
 assistant answer: {answer_text}
 this-turn tool data: {tool_data}
@@ -282,6 +297,7 @@ async def build_suggestions_block(
     user_context: Optional[dict] = None,
     proposal_emitted: bool = False,
     asked_before: Optional[list[str]] = None,
+    shown_before: Optional[list[str]] = None,
     speculative: Optional["asyncio.Task"] = None,
 ) -> Optional[dict]:
     """Return a validated `suggestions` block, or None to emit nothing.
@@ -299,6 +315,8 @@ async def build_suggestions_block(
                         forwarded this turn → ADD turn → skip.
       asked_before:    the user's earlier questions in this thread — chips must
                        not repeat them (the generator used to see one turn only).
+      shown_before:    `send` texts of chips already shown in this thread. The
+                       same advisor chip kept coming back hop after hop.
       speculative:     a chip call started while the answer was still being
                        written (`start_speculative`). Used unless the answer
                        ends by asking the user back, which needs reply chips.
@@ -334,6 +352,7 @@ async def build_suggestions_block(
                 tool_data=tool_data or "(none)",
                 user_catalog=_summarize_catalog(user_context),
                 asked_before=asked_before,
+                shown_before=shown_before,
             )
         if result is None:
             # LLM failed / timed out. Chips are nice-to-have → emit nothing.
@@ -344,8 +363,13 @@ async def build_suggestions_block(
             return None
 
         # The question just asked is a repeat too (a chip once echoed it).
+        # The user just tapped a chip: at most one reply chip now, so a
+        # "ลองดูที่ 12,000 → ขอปรับลดอีกหน่อย" back-and-forth can't loop (C4 09-29).
+        tapped = any(_same(user_text or "", q, exact=True) for q in shown_before or [])
         items = _finalize(result.get("items", []),
-                          asked_before=[*(asked_before or []), user_text])
+                          asked_before=[*(asked_before or []), user_text,
+                                        *(shown_before or [])],
+                          max_replies=1 if tapped else 3)
         if not items:
             slog("suggest", "skip — nothing to emit after assembly")
             return None
@@ -420,6 +444,16 @@ def asked_before(messages: list) -> list[str]:
     return texts[:-1][-_ASKED_BEFORE_MAX:]
 
 
+# Chips remembered per thread. Twelve ≈ four hops of three.
+_SHOWN_CHIPS_MAX = 12
+
+
+def remember_shown(shown: Optional[list[str]], block: Optional[dict]) -> list[str]:
+    """`shown` plus this turn's chip `send` texts, newest last, capped."""
+    sent = [i["send"] for i in (block or {}).get("items") or [] if i.get("send")]
+    return [*(shown or []), *sent][-_SHOWN_CHIPS_MAX:]
+
+
 def tool_data_of(state: dict) -> str:
     """This turn's tool outputs, flattened for the chip prompt."""
     return "\n".join(
@@ -459,6 +493,7 @@ def start_speculative(
     tool_data: str,
     user_context: Optional[dict],
     asked_before: Optional[list[str]],
+    shown_before: Optional[list[str]] = None,
 ) -> None:
     """Start the chip call NOW, while the agent writes its answer.
 
@@ -476,6 +511,7 @@ def start_speculative(
         tool_data=tool_data or "(none)",
         user_catalog=_summarize_catalog(user_context),
         asked_before=asked_before,
+        shown_before=shown_before,
     ))
 
 
@@ -608,21 +644,92 @@ _NOT_NOW_CHIP = re.compile(r"^\s*(ยังไม่|ไม่ต้อง|ไ�
 # the provident fund (a payroll deduction, not a product pick).
 _PRODUCT_CHIP = re.compile(
     r"กองทุน(?!สำรองเลี้ยงชีพ)|หุ้น|คริปโต|บิทคอยน์|crypto|bitcoin"
-    r"|ลงทุน(อะไร|แบบไหน|ที่ไหน|ตัวไหน)|ธนาคารไหน|บัญชี(ดอกเบี้ยสูง|ไหนดี)|แอป(ไหน|อื่น)",
+    r"|ลงทุน(ใน\S{0,12})?(อะไร|แบบไหน|ประเภทไหน|ที่ไหน|ตัวไหน)|ธนาคารไหน|บัญชี(ดอกเบี้ยสูง|ไหนดี)|แอป(ไหน|อื่น)",
     re.IGNORECASE,
 )
+
+
+# Lookups the prompt keeps leaking in live chains (09-29):
+#  - "มีบัตรอื่นอีกไหม" / "มีหนี้บัตรอื่นอีกไหม" — the wallet list shows them all
+#  - "…ในแอปนี้ยังไง" — how-to-use-the-app, not money advice
+#  - "บัตรไหนใช้เยอะกว่าปกติ" — a ranking the breakdown screen sorts
+_ANY_OTHER = re.compile(r"^(ฉัน)?มี.{0,20}อื่น.{0,12}(อีก)?(ไหม|มั้ย)")
+_ALWAYS_LOOKUP = re.compile(
+    r"ใน(แอป|แอพ|app)"
+    r"|^(เดือนนี้)?\s*(หมวด|บัตร|บัญชี|กระเป๋า)(หมู่|เครดิต)?(ใบ)?ไหน.*(เยอะ|สูง|มาก)(กว่าปกติ|ที่สุด|สุด)",
+    re.IGNORECASE,
+)
+
+
+def _is_lookup(chip: dict) -> bool:
+    texts = (chip["label"], chip["send"])
+    if is_lookup_chip(chip["label"]) or any(_ALWAYS_LOOKUP.search(t) for t in texts):
+        return True
+    # An advisor word keeps it: "มีเป้าหมายอื่นที่ควรเริ่มไหม" is advice.
+    return any(_ANY_OTHER.search(t) and not _ADVISOR_WORD.search(t) for t in texts)
+
+# A label that hides what it asks: "ช่วยดูให้หน่อย" over a send that asks for a
+# list. Tapping it sends something the user never read.
+_VAGUE_LABEL = re.compile(r"^(ช่วย)?(ดู|สรุป|คำนวณ|วางแผน)?(ให้)?(หน่อย|ที)?$")
+
+# A "ถ้า…" label with no question in it ("ถ้าลดช้อปครึ่งนึง"), or a bare
+# "นี้/เท่านี้" with nothing named ("ทำตามแผนนี้เลยดีไหม").
+_QUESTION_WORD = re.compile(
+    r"ไหม|มั้ย|ไหน|อะไร|เท่า(ไหร่|ไร)|ยังไง|อย่างไร|แค่ไหน|เมื่อไหร่|กี่|หรือ(ยัง|เปล่า)|ล่ะ|\?"
+)
+
+
+def _is_vague(label: str) -> bool:
+    text = "".join((label or "").split())
+    if _VAGUE_LABEL.match(text):
+        return True
+    if text.startswith("ถ้า") and not _QUESTION_WORD.search(text):
+        return True
+    return bool(re.search(r"(แผน|วิธี|สัดส่วน)นี้|เท่านี้", text))
+
+
+# Near-duplicate test. Exact-match dedup missed "มีเป้าหมายอื่นที่สำคัญไหม" vs
+# "…สำคัญอีกไหม" and "เงินจะพอใช้ถึงสิ้นเดือนไหม" vs "เงินในบัญชีจะพอ…" — the
+# same chip came back 3–4 hops in a row. Particles and fillers are stripped,
+# then character bigrams are compared (Thai has no word breaks).
+_SIM_FILLER = re.compile(
+    r"ครับ|คะ|ค่ะ|นะ|หน่อย|ของฉัน|ฉัน|ผม|ตอนนี้|เลย|ดี|ไหม|มั้ย|บ้าง|ยังไง|อย่างไร"
+    r"|หรือยัง|อีก|ที่|จะ|[\s?？!.,]"
+)
+_SIM_MAX = 0.66  # repeats scored ≥0.68, distinct angles ≤0.53 (chip chains 09-29)
+
+
+def _bigrams(text: str) -> set[str]:
+    s = _SIM_FILLER.sub("", (text or "").lower())
+    return {s[i:i + 2] for i in range(len(s) - 1)} or ({s} if s else set())
+
+
+def similarity(a: str, b: str) -> float:
+    """Dice score of two chips' character bigrams, fillers stripped (0–1)."""
+    ga, gb = _bigrams(a), _bigrams(b)
+    if not ga or not gb:
+        return 0.0
+    return 2 * len(ga & gb) / (len(ga) + len(gb))
+
+
+def _same(a: str, b: str, *, exact: bool) -> bool:
+    if exact:
+        return "".join(a.split()).lower() == "".join((b or "").split()).lower()
+    return similarity(a, b) >= _SIM_MAX
 
 
 def _is_app_only(chip: dict) -> bool:
     return bool(_APP_ONLY_CHIP.match(chip["label"]) or _APP_ONLY_CHIP.match(chip["send"]))
 
 
-def _finalize(items: list[Any], *, asked_before: Optional[list[str]] = None) -> list[dict]:
+def _finalize(
+    items: list[Any], *, asked_before: Optional[list[str]] = None, max_replies: int = 3,
+) -> list[dict]:
     """Normalize LLM items into `{label, send}`; drop app-only action chips,
     "not now" chips, lookups of what the app screens already show (reply chips
     excepted), and repeats of earlier questions; dedup; cap at _MAX_ITEMS."""
     kept: list[dict] = []
-    seen: set[str] = {_key(q) for q in (asked_before or []) if q}
+    earlier = [q for q in (asked_before or []) if q]
     for raw in items:
         chip = _norm_chip(raw)
         if chip is None:
@@ -636,18 +743,28 @@ def _finalize(items: list[Any], *, asked_before: Optional[list[str]] = None) -> 
         if _PRODUCT_CHIP.search(chip["label"]) or _PRODUCT_CHIP.search(chip["send"]):
             slog("suggest", f"dropped product chip {chip['label']!r}")
             continue
-        key = _key(chip["send"])
-        if key in seen:
-            slog("suggest", f"dropped repeat chip {chip['label']!r}")
-            continue
         kind = str(raw.get("kind") or "") if isinstance(raw, dict) else ""
+        # Reply chips share a template ("เป้าหมาย<X>น่าสนใจที่สุด") and differ
+        # only in the answer itself, so they only drop on an exact repeat.
+        twin = next((q for q in [*earlier, *(c["send"] for c in kept)]
+                     if _same(chip["send"], q, exact=kind == "reply")), None)
+        if twin is not None:
+            slog("suggest", f"dropped repeat chip {chip['label']!r} ~ {twin!r}")
+            continue
         if isinstance(raw, dict) and str(raw.get("repeats") or "").strip():
             slog("suggest", f"dropped self-flagged repeat {chip['label']!r} ~ {raw['repeats']!r}")
             continue
-        if kind != "reply" and is_lookup_chip(chip["label"]):
+        if kind != "reply" and _is_lookup(chip):
             slog("suggest", f"dropped lookup chip {chip['label']!r}")
             continue
-        seen.add(key)
+        if kind != "reply" and _is_vague(chip["label"]):
+            slog("suggest", f"dropped vague chip {chip['label']!r}")
+            continue
+        if kind == "reply":
+            if max_replies <= 0:
+                slog("suggest", f"dropped extra reply chip {chip['label']!r}")
+                continue
+            max_replies -= 1
         kept.append(chip)
     return kept[:_MAX_ITEMS]
 
@@ -668,11 +785,6 @@ def _norm_chip(raw: Any) -> Optional[dict]:
     return {"label": label[:_MAX_ITEM_LEN], "send": send[:_MAX_ITEM_LEN]}
 
 
-def _key(text: str) -> str:
-    """Loose dedup key — strip spaces so near-identical chips collapse."""
-    return "".join((text or "").split()).lower()
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM call (thin OpenRouter pattern)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -685,6 +797,7 @@ async def _generate(
     tool_data: str,
     user_catalog: str,
     asked_before: Optional[list[str]] = None,
+    shown_before: Optional[list[str]] = None,
 ) -> Optional[dict]:
     """Run the chip generator. Returns the parsed dict, or None on any
     failure (caller then emits nothing)."""
@@ -695,6 +808,7 @@ async def _generate(
 
     prompt = _PROMPT_TEMPLATE.format(
         asked_before=json.dumps(asked_before or [], ensure_ascii=False),
+        shown_before=json.dumps(shown_before or [], ensure_ascii=False),
         user_text=user_text or "(none)",
         answer_text=(answer_text or "")[:1500],
         tool_data=tool_data,
@@ -772,8 +886,9 @@ def _chips_body(messages: list[dict], model: str, fallbacks: list[str]) -> dict:
         # A touch of creativity for varied chips, but low enough to stay on-task.
         "temperature": 0.4,
         "response_format": {"type": "json_object"},
-        # 3 chips, no spares: output is ~70% of a chip call's cost (09-29).
-        "max_tokens": 400,
+        # 4 candidates, 3 shown: one spare, because the repeat/lookup filters
+        # dropped a chip on half the turns with no spare (owner 09-29).
+        "max_tokens": 480,
     }
     if fallbacks:
         body["models"] = [model, *fallbacks]
@@ -823,6 +938,8 @@ __all__ = [
     "is_lookup_chip",
     "asked_before",
     "asks_back",
+    "remember_shown",
+    "similarity",
     "tool_data_of",
     "build_suggestions_block",
     "cancel_speculative",

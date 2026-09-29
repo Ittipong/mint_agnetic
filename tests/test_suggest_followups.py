@@ -147,23 +147,21 @@ async def test_UT_SG08_dedup_collapses_duplicates():
     """UT-SG08: chips with the same `send` (ignoring spaces) collapse to one."""
     block = await _build(
         gen_return=_gen(items=[
-            {"label": "หมวดไหนเยอะ", "send": "หมวดไหนใช้เยอะสุด"},
-            {"label": "หมวดเยอะ", "send": "หมวดไหนใช้ เยอะสุด"},  # dup after strip
-            {"label": "เทรนด์", "send": "เทรนด์ย้อนหลัง 3 เดือน"},
+            {"label": "ช้อปเกินไปไหม", "send": "ช้อปเดือนนี้เกินไปไหม"},
+            {"label": "ช้อปเกินไปไหม", "send": "ช้อปเดือนนี้ เกินไปไหม"},  # dup after strip
+            {"label": "เงินพอถึงสิ้นเดือนไหม", "send": "เงินจะพอใช้ถึงสิ้นเดือนไหม"},
         ]),
     )
     sends = _sends(block)
-    assert len(sends) == 2
-    assert sends == ["หมวดไหนใช้เยอะสุด", "เทรนด์ย้อนหลัง 3 เดือน"]
+    assert sends == ["ช้อปเดือนนี้เกินไปไหม", "เงินจะพอใช้ถึงสิ้นเดือนไหม"]
 
 
 async def test_UT_SG09_caps_at_three():
     """UT-SG09: 5 chips → keep first 3 (mobile renders at most 3)."""
-    items = [{"label": f"c{i}", "send": f"send-{i}"} for i in range(5)]
-    block = await _build(gen_return=_gen(items=items))
-    sends = _sends(block)
-    assert len(sends) == 3
-    assert sends == ["send-0", "send-1", "send-2"]
+    texts = ["ช้อปเดือนนี้เกินไปไหม", "เงินจะพอใช้ถึงสิ้นเดือนไหม",
+             "ควรจ่ายบัตรเต็มเลยไหม", "ไปญี่ปุ่นทันไหม", "เก็บเงินฉุกเฉินพอหรือยัง"]
+    block = await _build(gen_return=_gen(items=[{"label": t, "send": t} for t in texts]))
+    assert _sends(block) == texts[:3]
 
 
 async def test_UT_SG10_llm_failure_emits_nothing():
@@ -568,18 +566,18 @@ async def test_UT_SG32_fixed_instructions_are_a_cached_system_prefix(monkeypatch
 
 
 
-async def test_UT_SG36_three_chips_no_spares(monkeypatch):
-    """UT-SG36: owner 2026-09-29 — ask for exactly 3 chips instead of 5
-    candidates (output was ~70% of a chip call's cost); 2 shown is acceptable
-    when a filter drops one. No `repeats` field in the requested shape."""
+async def test_UT_SG36_four_candidates_one_spare(monkeypatch):
+    """UT-SG36: owner 2026-09-29 — ask for 4 candidates and show 3. With no
+    spare, the repeat/lookup filters left ≤2 chips on 15 of 25 turns. No
+    `repeats` field in the requested shape."""
     head, _, _ = sf._PROMPT_TEMPLATE.partition(sf._CONTEXT_MARKER)
-    assert "EXACTLY 3 ADVISOR chips" in head
+    assert "EXACTLY 4 ADVISOR chips" in head
     assert '"repeats"' not in head
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     seen, client = _chip_server([_OK])
     monkeypatch.setattr(sf.httpx, "AsyncClient", client)
     await sf._generate(user_text="q", answer_text="a", tool_data="", user_catalog="")
-    assert seen[0]["max_tokens"] == 400
+    assert seen[0]["max_tokens"] == 480
 
 
 def test_UT_SG37_product_shopping_chips_are_dropped():
@@ -595,3 +593,112 @@ def test_UT_SG37_product_shopping_chips_are_dropped():
         {"kind": "ahead", "label": "เพิ่มกองทุนสำรองเลี้ยงชีพไหม", "send": "ควรเพิ่มเงินเข้ากองทุนสำรองเลี้ยงชีพไหม"},
     ])
     assert [c["label"] for c in out] == ["แบ่งไปลงทุนเท่าไหร่", "เพิ่มกองทุนสำรองเลี้ยงชีพไหม"]
+
+
+def test_UT_SG38_near_duplicates_of_earlier_chips_are_dropped():
+    """UT-SG38: the same chip came back 3–4 hops in a row in other words
+    (chip chains 09-29). A chip too close to an earlier question or shown chip
+    is dropped; a genuinely new angle on the same topic is kept."""
+    earlier = ["มีเป้าหมายอื่นที่สำคัญไหม", "เงินจะพอใช้ถึงสิ้นเดือนไหม",
+               "ถ้าจ่ายแค่ขั้นต่ำไปเรื่อยๆ ยอดหนี้จะเพิ่มขึ้นแค่ไหน"]
+    out = sf._finalize([
+        {"kind": "ahead", "label": "มีเป้าหมายอื่นที่สำคัญอีกไหม", "send": "มีเป้าหมายอื่นที่สำคัญอีกไหม"},
+        {"kind": "ahead", "label": "เงินพอถึงสิ้นเดือนไหม", "send": "เงินในบัญชีจะพอใช้ถึงสิ้นเดือนไหม"},
+        {"kind": "whatif", "label": "จ่ายขั้นต่ำไปเรื่อยๆ", "send": "ถ้าจ่ายบัตรเครดิตแค่ขั้นต่ำไปเรื่อยๆ ยอดหนี้จะเพิ่มขึ้นแค่ไหน"},
+        {"kind": "decide", "label": "จ่ายเต็มดีไหม", "send": "ควรจ่ายบัตรเครดิตเต็มจำนวนเลยดีไหม"},
+        {"kind": "whatif", "label": "จ่ายเพิ่มเดือนละ 2,000 หมดเมื่อไหร่", "send": "ถ้าจ่ายหนี้บัตรเพิ่มเดือนละ 2,000 บาท หนี้จะหมดเมื่อไหร่"},
+    ], asked_before=earlier)
+    assert [c["label"] for c in out] == ["จ่ายเต็มดีไหม", "จ่ายเพิ่มเดือนละ 2,000 หมดเมื่อไหร่"]
+
+
+def test_UT_SG39_similarity_separates_repeats_from_new_angles():
+    """UT-SG39: repeats score at or above the cut, distinct angles below it."""
+    same = [("มีเป้าหมายอื่นที่ต้องดูไหม", "มีเป้าหมายอื่นที่ควรดูก่อนไหม"),
+            ("ถ้าจ่ายขั้นต่ำจะเป็นยังไง", "ถ้าจ่ายขั้นต่ำเป็นยังไง")]
+    different = [("จ่ายเต็มดีไหม", "ถ้าจ่ายขั้นต่ำเป็นยังไง"),
+                 ("ควรแบ่งเงินไปลงทุนเท่าไหร่", "ควรลงทุนตอนนี้เลยไหม"),
+                 ("เงินฉุกเฉินพอหรือยัง", "เงินจะพอใช้ถึงสิ้นเดือนไหม")]
+    assert all(sf.similarity(a, b) >= sf._SIM_MAX for a, b in same)
+    assert all(sf.similarity(a, b) < sf._SIM_MAX for a, b in different)
+
+
+def test_UT_SG40_screen_lookups_and_app_howto_are_dropped():
+    """UT-SG40: lookups that leaked past the prompt on 09-29 — "any other
+    card/debt?", how-to-use-the-app, "which card is above normal" — are dropped.
+    Advisor chips on the same topics stay."""
+    out = sf._finalize([
+        {"kind": "ahead", "label": "มีบัตรอื่นอีกไหม", "send": "ฉันมีบัตรเครดิตอื่นที่ต้องจ่ายอีกไหม"},
+        {"kind": "ahead", "label": "มีหนี้บัตรอื่นอีกไหม", "send": "มีหนี้บัตรเครดิตอื่นอีกไหมที่ต้องกังวล"},
+        {"kind": "ahead", "label": "บัตรไหนใช้เยอะกว่าปกติ", "send": "บัตรเครดิตใบไหนที่เดือนนี้ใช้จ่ายเยอะกว่าปกติ"},
+        {"kind": "ahead", "label": "มีวิธีติดตามการใช้จ่ายยังไง", "send": "มีวิธีติดตามการใช้จ่ายในแอปนี้ยังไงบ้าง"},
+        {"kind": "decide", "label": "ควรจ่ายบัตรไหนก่อน", "send": "ควรจ่ายบัตรเครดิตใบไหนก่อนดี"},
+        {"kind": "ahead", "label": "มีเป้าหมายอื่นที่ควรเริ่มไหม", "send": "ควรมีเป้าหมายอื่นที่ควรเริ่มเก็บไหม"},
+    ])
+    assert [c["label"] for c in out] == ["ควรจ่ายบัตรไหนก่อน", "มีเป้าหมายอื่นที่ควรเริ่มไหม"]
+
+
+def test_UT_SG41_vague_labels_are_dropped_reply_chips_exempt():
+    """UT-SG41: a label must be a whole question on its own — no dangling
+    "ถ้า…", no bare "นี้/เท่านี้", no "ช่วยดูให้หน่อย" over a specific send.
+    Reply chips are answers, not questions, so they are exempt."""
+    out = sf._finalize([
+        {"kind": "whatif", "label": "ถ้าลดช้อปครึ่งนึง", "send": "ถ้าลดค่าช้อปปิ้งลงครึ่งนึง จะเหลือเก็บเพิ่มเท่าไหร่"},
+        {"kind": "decide", "label": "ทำตามแผนนี้เลยดีไหม", "send": "ทำตามแผนที่แนะนำเลยดีไหม"},
+        {"kind": "decide", "label": "เงินเก็บเพิ่มขึ้นเท่านี้ดีไหม", "send": "เงินเก็บเพิ่มขึ้นเท่านี้ดีไหม"},
+        {"kind": "decide", "label": "ช่วยดูให้หน่อย", "send": "ช่วยดูให้หน่อยว่าเดือนที่ผ่านมามีหมวดไหนใช้จ่ายสูงเป็นพิเศษ"},
+        {"kind": "whatif", "label": "ถ้าลดช้อป 25% ล่ะ", "send": "ถ้าลดค่าช้อปปิ้งลง 25% จะเหลือเก็บเพิ่มเท่าไหร่"},
+        {"kind": "reply", "label": "คำนวณจากข้อมูลของฉัน", "send": "ช่วยคำนวณรายจ่ายคงที่จากข้อมูลของฉันให้หน่อย"},
+    ])
+    assert [c["label"] for c in out] == ["ถ้าลดช้อป 25% ล่ะ", "คำนวณจากข้อมูลของฉัน"]
+
+
+async def test_UT_SG42_shown_chips_reach_prompt_and_filter():
+    """UT-SG42: chips shown on earlier hops go into the prompt's CONTEXT and
+    are filtered in code, so a hop can't bring one back."""
+    block = await _build(
+        gen_return=_gen(items=[
+            {"kind": "ahead", "label": "เงินพอถึงสิ้นเดือนไหม", "send": "เงินจะพอใช้ถึงสิ้นเดือนไหม"},
+            {"kind": "decide", "label": "จ่ายบัตรเต็มดีไหม", "send": "ควรจ่ายบัตรเต็มเลยไหม"},
+        ]),
+        shown_before=["เงินในบัญชีจะพอใช้ถึงสิ้นเดือนไหม"],
+    )
+    assert _sends(block) == ["ควรจ่ายบัตรเต็มเลยไหม"]
+    head, _, tail = sf._PROMPT_TEMPLATE.partition(sf._CONTEXT_MARKER)
+    assert "{shown_before}" in tail and "{shown_before}" not in head
+
+
+def test_UT_SG43_remember_shown_appends_and_caps():
+    """UT-SG43: shown chips accumulate newest-last and stay capped."""
+    old = [f"q{i}" for i in range(sf._SHOWN_CHIPS_MAX)]
+    block = {"type": "suggestions", "items": [{"label": "a", "send": "A"}, {"label": "b", "send": "B"}]}
+    out = sf.remember_shown(old, block)
+    assert out[-2:] == ["A", "B"] and len(out) == sf._SHOWN_CHIPS_MAX
+    assert sf.remember_shown(None, None) == []
+
+
+def test_UT_SG44_reply_chips_drop_only_on_exact_repeat():
+    """UT-SG44: reply chips share a template and differ in the answer
+    ("เป้าหมายลงทุน…" vs "เป้าหมายเกษียณ…", 09-29 chain) — both are real
+    answers, so only an exact repeat drops. Asset-class picks are products."""
+    out = sf._finalize([
+        {"kind": "reply", "label": "เป้าหมายลงทุน", "send": "เป้าหมายลงทุนน่าสนใจที่สุด"},
+        {"kind": "reply", "label": "เป้าหมายเกษียณ", "send": "เป้าหมายเกษียณ น่าสนใจที่สุด"},
+        {"kind": "decide", "label": "ลงทุนแบบไหนดี", "send": "ฉันควรลงทุนในสินทรัพย์แบบไหนดี"},
+    ], asked_before=["เป้าหมายเกษียณน่าสนใจที่สุด"])
+    assert [c["label"] for c in out] == ["เป้าหมายลงทุน"]
+
+
+async def test_UT_SG45_after_a_tapped_chip_at_most_one_reply():
+    """UT-SG45: the user just sent a shown chip → at most one reply chip, so
+    the "ลองดูที่ 12,000 → ขอปรับลดอีกหน่อย" loop (C4 09-29) can't continue.
+    A typed message keeps the normal reply chips."""
+    items = [
+        {"kind": "reply", "label": "ลองดูที่ 12,000", "send": "ลองออมที่ 12,000 บาทต่อเดือน"},
+        {"kind": "reply", "label": "ขอปรับลดอีกหน่อย", "send": "ขอปรับลดเงินออมอีกหน่อย"},
+        {"kind": "decide", "label": "ควรลดหมวดไหนก่อนดี", "send": "ควรลดรายจ่ายหมวดไหนก่อนดี"},
+    ]
+    tapped = await _build(gen_return=_gen(items=items), user_text="ขอปรับลดจำนวนเงินออมลงมาหน่อย",
+                          shown_before=["ขอปรับลดจำนวนเงินออมลงมาหน่อย"])
+    assert _sends(tapped) == ["ลองออมที่ 12,000 บาทต่อเดือน", "ควรลดรายจ่ายหมวดไหนก่อนดี"]
+    typed = await _build(gen_return=_gen(items=items), user_text="ขอปรับลดจำนวนเงินออมลงมาหน่อย")
+    assert len(_sends(typed)) == 3

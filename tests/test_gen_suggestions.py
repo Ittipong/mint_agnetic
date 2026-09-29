@@ -134,3 +134,27 @@ def test_UT_GS05_no_answer_skips(monkeypatch) -> None:
     state = {"messages": [HumanMessage(content="เดือนนี้ใช้ไปเท่าไร")]}
     out = asyncio.run(_gen_suggestions(state))
     assert out["suggestions_block"] is None
+
+
+def test_UT_GS06_shown_chips_carried_across_turns(monkeypatch) -> None:
+    """UT-GS06: the node hands earlier hops' chips to the generator and writes
+    this turn's chips onto `shown_chips`; a skipped turn leaves it untouched."""
+    monkeypatch.setenv("SUGGESTIONS_ENABLED", "1")
+    captured: dict = {}
+
+    async def fake_generate(**kw):
+        captured.update(kw)
+        return {"skip": False, "items": [
+            {"label": "จ่ายบัตรเต็มดีไหม", "send": "ควรจ่ายบัตรเต็มเลยไหม"},
+        ]}
+
+    monkeypatch.setattr(sf, "_generate", fake_generate)
+    state = _state("ยอดบัตร 8,000 บาทครับ", "บัตรต้องจ่ายเท่าไหร่",
+                   shown_chips=["เงินจะพอใช้ถึงสิ้นเดือนไหม"])
+    out = asyncio.run(_gen_suggestions(state))
+
+    assert captured["shown_before"] == ["เงินจะพอใช้ถึงสิ้นเดือนไหม"]
+    assert out["shown_chips"] == ["เงินจะพอใช้ถึงสิ้นเดือนไหม", "ควรจ่ายบัตรเต็มเลยไหม"]
+
+    crisis = _state("อยู่ตรงนี้นะครับ", "ไม่อยากอยู่แล้ว", shown_chips=["x"])
+    assert "shown_chips" not in asyncio.run(_gen_suggestions(crisis))
